@@ -1,0 +1,27 @@
+# Environment / Secrets
+.env
+# Database
+*.db
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.venv311/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+# OS
+.DS_Store
+Thumbs.db
+# Distribution
+dist/
+build/
+*.egg-info/
