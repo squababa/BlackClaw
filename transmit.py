@@ -29,6 +29,29 @@ def format_transmission(
 {path_str}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
     return text
+def format_convergence_transmission(
+    transmission_number: int,
+    domain_a: str,
+    domain_b: str,
+    times_found: int,
+    original_connections: list[str],
+    deep_dive_result: str,
+) -> str:
+    """Format a higher-tier convergence transmission."""
+    if original_connections:
+        original_block = "\n".join(f"  - {line}" for line in original_connections[:5])
+    else:
+        original_block = "  - No original connections logged."
+    text = f""" ⚫ BLACKCLAW — CONVERGENCE TRANSMISSION #{transmission_number:04d}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Domains: {domain_a} ↔ {domain_b}
+  Independent discoveries: {times_found}
+  Original connections:
+{original_block}
+  Deep dive:
+  {deep_dive_result}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+    return text
 def print_transmission(formatted: str):
     """Print a formatted transmission to the terminal with Rich styling."""
     console.print()

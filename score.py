@@ -22,6 +22,10 @@ Scale:
 0.8 = Rarely connected fields (e.g., music theory and thermodynamics)
 1.0 = No known relationship (e.g., medieval poetry and quantum computing)
 Respond with ONLY a JSON object: {{"distance": 0.X}}"""
+DEEP_DIVE_PROMPT = """This connection between {domain_a} and {domain_b} keeps appearing from different starting points. Why? What is the shared underlying mechanism?
+Original discovered connections:
+{connections}
+Provide a concise mechanism-level explanation."""
 def _check_novelty(
     source_domain: str, target_domain: str, connection_desc: str
 ) -> float:
@@ -120,3 +124,28 @@ def score_connection(
         "depth": round(depth, 3),
         "total": round(total, 3),
     }
+def deep_dive_convergence(
+    domain_a: str, domain_b: str, original_connections: list[str]
+) -> str:
+    """Run a deep-dive explanation for repeated convergence findings."""
+    connections_text = "\n".join(
+        f"- {c}" for c in (original_connections or ["No prior connection text available."])
+    )
+    prompt = DEEP_DIVE_PROMPT.format(
+        domain_a=domain_a,
+        domain_b=domain_b,
+        connections=connections_text,
+    )
+    try:
+        response = _gemini_model.generate_content(
+            prompt,
+            generation_config={"max_output_tokens": 500},
+        )
+        increment_llm_calls(1)
+        raw = response.text if getattr(response, "text", None) else ""
+        checked = check_llm_output(raw)
+        if checked is None:
+            return "Deep dive output failed safety checks."
+        return checked.strip()
+    except Exception as e:
+        return f"Deep dive failed: {e}"
