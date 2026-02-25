@@ -62,11 +62,29 @@ def parse_args():
         action="store_true",
         help="Log what would happen without making API calls (not yet implemented)",
     )
+    parser.add_argument(
+        "--seed",
+        type=str,
+        default=None,
+        help="Use a custom seed topic instead of random picker (auto-generates search queries)",
+    )
     return parser.parse_args()
+def build_custom_seed(topic: str) -> dict:
+    """Build a seed object from a custom topic string."""
+    topic = topic.strip()
+    return {
+        "name": topic,
+        "category": "Custom",
+        "seed_queries": [
+            f"{topic} fundamental concepts",
+            f"{topic} core mechanisms principles",
+        ],
+    }
 def run_cycle(
     cycle_num: int,
     threshold: float,
     max_patterns: int,
+    custom_seed_topic: str | None = None,
 ) -> bool:
     """
     Run a single exploration cycle.
@@ -75,7 +93,10 @@ def run_cycle(
     transmitted = False
     connections_found = 0
     # 1. Pick seed
-    seed = pick_seed()
+    if custom_seed_topic:
+        seed = build_custom_seed(custom_seed_topic)
+    else:
+        seed = pick_seed()
     print(f"\n  [Seed] {seed['name']} ({seed['category']})")
     # Track domain visit
     update_domain_visited(seed["name"], seed["category"])
@@ -157,10 +178,14 @@ def main():
     if args.dry_run:
         print("  [!] Dry run mode not yet implemented. Exiting.")
         sys.exit(0)
+    custom_seed = args.seed.strip() if args.seed else None
+    if args.seed is not None and not custom_seed:
+        print("  [!] --seed was provided but empty. Please provide a topic.")
+        sys.exit(1)
     cycle = 1
     try:
         while True:
-            run_cycle(cycle, args.threshold, args.max_patterns)
+            run_cycle(cycle, args.threshold, args.max_patterns, custom_seed)
             if args.once:
                 break
             print(f"\n  [Wait] Next cycle in {args.cooldown}s... (Ctrl+C to stop)\n")
