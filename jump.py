@@ -9,6 +9,7 @@ from tavily import TavilyClient
 from config import GEMINI_API_KEY, TAVILY_API_KEY, MODEL
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
+from debug_log import log_gemini_output
 genai.configure(api_key=GEMINI_API_KEY)
 _gemini_model = genai.GenerativeModel(MODEL)
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
@@ -28,6 +29,9 @@ Criteria for REJECTING (not a real connection):
 - Surface-level analogy ("both involve growth")
 - Shared vocabulary but different mechanics
 - Common sense observations anyone would make
+- Also reject connections that would be obvious to someone with a college education in either field.
+- If a textbook in either domain already covers this overlap, it is not novel.
+- The goal is connections that would surprise an expert in both fields, not connections that confirm what they already know.
 Be strict. Most jumps should fail. Only flag genuine structural parallels.
 Respond ONLY with valid JSON. No markdown. No explanation.
 If NO genuine connection: {{"no_connection": true}}
@@ -40,6 +44,78 @@ If YES genuine connection:
   "depth": 0.0 to 1.0 where 0.0 is weak analogy and 1.0 is identical underlying math,
   "evidence": "the specific piece of evidence from the search results that supports this"
 }}"""
+JSON_RETRY_PROMPT = (
+    "Your previous response was not valid JSON. Please respond with ONLY valid JSON, "
+    "no markdown, no explanation, no trailing commas, no comments. Here is what I need:"
+)
+def _extract_json_substring(text: str) -> str | None:
+    """
+    Try to isolate valid JSON from model output.
+    1) Parse cleaned full text (after fence stripping)
+    2) Parse substring from first '{' to last '}'.
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+    if cleaned.endswith("```"):
+        cleaned = cleaned.rsplit("```", 1)[0]
+    cleaned = cleaned.strip()
+    # Attempt full payload first.
+    try:
+        json.loads(cleaned)
+        return cleaned
+    except Exception:
+        pass
+    # Fall back to first-object extraction.
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first == -1 or last == -1 or last <= first:
+        return None
+    candidate = cleaned[first:last + 1].strip()
+    try:
+        json.loads(candidate)
+        return candidate
+    except Exception:
+        return None
+def _generate_json_with_retry(full_prompt: str, max_output_tokens: int) -> str | None:
+    """Generate JSON with one retry if parsing fails."""
+    try:
+        response = _gemini_model.generate_content(
+            full_prompt,
+            generation_config={
+                "max_output_tokens": max_output_tokens,
+                "response_mime_type": "application/json",
+            },
+        )
+        log_gemini_output("jump", "initial", response)
+        increment_llm_calls(1)
+        raw_output = response.text if getattr(response, "text", None) else ""
+        checked = check_llm_output(raw_output)
+        if checked is None:
+            print("  [!] Jump LLM output failed safety check")
+            return None
+        extracted = _extract_json_substring(checked)
+        if extracted is not None:
+            return extracted
+        retry_prompt = f"{JSON_RETRY_PROMPT}\n\n{full_prompt}"
+        retry_response = _gemini_model.generate_content(
+            retry_prompt,
+            generation_config={
+                "max_output_tokens": max_output_tokens,
+                "response_mime_type": "application/json",
+            },
+        )
+        log_gemini_output("jump", "retry", retry_response)
+        increment_llm_calls(1)
+        retry_raw = retry_response.text if getattr(retry_response, "text", None) else ""
+        retry_checked = check_llm_output(retry_raw)
+        if retry_checked is None:
+            print("  [!] Jump LLM retry output failed safety check")
+            return None
+        return _extract_json_substring(retry_checked)
+    except Exception as e:
+        print(f"  [!] Jump LLM call failed: {e}")
+        return None
 def lateral_jump(
     pattern: dict, source_domain: str, source_category: str
 ) -> dict | None:
@@ -90,41 +166,24 @@ def lateral_jump(
         abstract_structure=pattern["abstract_structure"],
         search_results=combined,
     )
+    extracted_json = _generate_json_with_retry(prompt, 4096)
+    if extracted_json is None:
+        print("  [!] Failed to parse jump LLM response as JSON after retry")
+        return None
     try:
-        response = _gemini_model.generate_content(
-            prompt,
-            generation_config={"max_output_tokens": 800},
-        )
-        increment_llm_calls(1)
-        raw_output = response.text if getattr(response, "text", None) else ""
-        # Safety check
-        checked = check_llm_output(raw_output)
-        if checked is None:
-            print("  [!] Jump LLM output failed safety check")
-            return None
-        # Parse JSON
-        cleaned = checked.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
-        data = json.loads(cleaned)
-        # No connection found
-        if data.get("no_connection", True):
-            return None
-        # Validate required fields
-        required = {"source_domain", "target_domain", "connection", "depth"}
-        if not required.issubset(data.keys()):
-            return None
-        # Validate depth is a number between 0 and 1
-        depth = data.get("depth", 0)
-        if not isinstance(depth, (int, float)) or depth < 0 or depth > 1:
-            data["depth"] = max(0.0, min(1.0, float(depth)))
-        return data
+        data = json.loads(extracted_json)
     except json.JSONDecodeError:
         print("  [!] Failed to parse jump LLM response as JSON")
         return None
-    except Exception as e:
-        print(f"  [!] Jump LLM call failed: {e}")
+    # No connection found
+    if data.get("no_connection", True):
         return None
+    # Validate required fields
+    required = {"source_domain", "target_domain", "connection", "depth"}
+    if not required.issubset(data.keys()):
+        return None
+    # Validate depth is a number between 0 and 1
+    depth = data.get("depth", 0)
+    if not isinstance(depth, (int, float)) or depth < 0 or depth > 1:
+        data["depth"] = max(0.0, min(1.0, float(depth)))
+    return data
