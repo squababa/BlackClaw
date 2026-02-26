@@ -3,12 +3,13 @@ BlackClaw Persistence Layer
 SQLite storage for explorations, transmissions, and domain tracking.
 All queries use parameterized statements — no string interpolation.
 """
+from collections import Counter
 import json
 import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from config import DB_PATH
+from config import DB_PATH, INVARIANCE_KILL_THRESHOLD
 def _connect() -> sqlite3.Connection:
     """Get a database connection with row factory."""
     conn = sqlite3.connect(DB_PATH)
@@ -38,6 +39,7 @@ def init_db():
             distance_score REAL,
             depth_score REAL,
             total_score REAL,
+            validation_json TEXT,
             adversarial_rubric_json TEXT,
             invariance_json TEXT,
             transmitted INTEGER NOT NULL DEFAULT 0
@@ -140,6 +142,8 @@ def init_db():
         conn.execute("ALTER TABLE explorations ADD COLUMN target_url TEXT")
     if "target_excerpt" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN target_excerpt TEXT")
+    if "validation_json" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN validation_json TEXT")
     if "adversarial_rubric_json" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN adversarial_rubric_json TEXT")
     if "invariance_json" not in existing_columns:
@@ -219,6 +223,7 @@ def save_exploration(
     distance_score: float | None = None,
     depth_score: float | None = None,
     total_score: float | None = None,
+    validation_json: dict | str | None = None,
     adversarial_rubric: dict | None = None,
     invariance_json: dict | str | None = None,
     transmitted: bool = False,
@@ -230,8 +235,9 @@ def save_exploration(
         (timestamp, seed_domain, seed_category, patterns_found, jump_target_domain,
          connection_description, scholarly_prior_art_summary, chain_path, seed_url,
          seed_excerpt, target_url, target_excerpt, novelty_score, distance_score,
-         depth_score, total_score, adversarial_rubric_json, invariance_json, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         depth_score, total_score, validation_json, adversarial_rubric_json,
+         invariance_json, transmitted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
@@ -249,6 +255,15 @@ def save_exploration(
             distance_score,
             depth_score,
             total_score,
+            (
+                json.dumps(validation_json, ensure_ascii=False)
+                if isinstance(validation_json, dict)
+                else (
+                    validation_json.strip()
+                    if isinstance(validation_json, str) and validation_json.strip()
+                    else None
+                )
+            ),
             json.dumps(adversarial_rubric, ensure_ascii=False)
             if isinstance(adversarial_rubric, dict)
             else None,
@@ -389,6 +404,139 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
         ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def _json_object_or_empty(value: object) -> dict:
+    """Parse JSON text into a dict when possible."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    text = value.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _clean_reason_list(value: object) -> list[str]:
+    """Normalize reason payload into a clean string list."""
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    return []
+
+
+def _top_reason_rows(counter: Counter[str], top_n: int = 10) -> list[dict]:
+    """Return top-N reasons sorted by frequency then reason text."""
+    return [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(
+            counter.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:top_n]
+    ]
+
+
+def get_reasoning_failure_audit(limit: int = 200) -> dict:
+    """Aggregate validator/adversarial/invariance failures over last N explorations."""
+    safe_limit = max(1, int(limit))
+    conn = _connect()
+    total_explorations = conn.execute(
+        "SELECT COUNT(*) AS c FROM explorations"
+    ).fetchone()["c"]
+    rows = conn.execute(
+        """SELECT
+            validation_json,
+            adversarial_rubric_json,
+            invariance_json
+        FROM explorations
+        ORDER BY id DESC
+        LIMIT ?""",
+        (safe_limit,),
+    ).fetchall()
+    conn.close()
+
+    validator_reasons: Counter[str] = Counter()
+    adversarial_reasons: Counter[str] = Counter()
+    invariance_reasons: Counter[str] = Counter()
+    validator_total = 0
+    adversarial_total = 0
+    invariance_total = 0
+
+    for row in rows:
+        validation = _json_object_or_empty(row["validation_json"])
+        validation_list = _clean_reason_list(
+            validation.get("rejection_reasons")
+        ) or _clean_reason_list(validation.get("reasons"))
+        validation_rejected = bool(validation_list) or validation.get("passed") is False
+        if validation_rejected:
+            validator_total += 1
+            if validation_list:
+                validator_reasons.update(validation_list)
+            else:
+                validator_reasons.update(["unspecified validation rejection"])
+
+        adversarial = _json_object_or_empty(row["adversarial_rubric_json"])
+        kill_reasons = _clean_reason_list(adversarial.get("kill_reasons"))
+        if kill_reasons:
+            adversarial_total += 1
+            adversarial_reasons.update(kill_reasons)
+
+        invariance = _json_object_or_empty(row["invariance_json"])
+        score_raw = invariance.get("invariance_score")
+        try:
+            invariance_score = float(score_raw)
+        except Exception:
+            invariance_score = None
+        if (
+            invariance_score is not None
+            and invariance_score < INVARIANCE_KILL_THRESHOLD
+        ):
+            invariance_total += 1
+            inv_reasons = _clean_reason_list(invariance.get("failure_modes"))
+            notes = invariance.get("notes")
+            note_text = str(notes).strip() if notes is not None else ""
+            if inv_reasons:
+                invariance_reasons.update(inv_reasons)
+            elif note_text:
+                invariance_reasons.update([note_text])
+            else:
+                invariance_reasons.update(
+                    [f"invariance_score below {INVARIANCE_KILL_THRESHOLD:.2f}"]
+                )
+
+    return {
+        "total_explorations": int(total_explorations),
+        "sample_size": len(rows),
+        "limit": safe_limit,
+        "insufficient_data": int(total_explorations) < 100,
+        "validator": {
+            "total": validator_total,
+            "reason_instances_total": int(sum(validator_reasons.values())),
+            "top_reasons": _top_reason_rows(validator_reasons, top_n=10),
+        },
+        "adversarial": {
+            "total": adversarial_total,
+            "reason_instances_total": int(sum(adversarial_reasons.values())),
+            "top_reasons": _top_reason_rows(adversarial_reasons, top_n=10),
+        },
+        "invariance": {
+            "total": invariance_total,
+            "reason_instances_total": int(sum(invariance_reasons.values())),
+            "top_reasons": _top_reason_rows(invariance_reasons, top_n=10),
+        },
+    }
 
 
 def _extract_variable_mapping_from_signature(signature: str | None) -> str:

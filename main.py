@@ -29,6 +29,7 @@ from store import (
     increment_llm_calls,
     list_predictions,
     list_near_misses,
+    get_reasoning_failure_audit,
     get_prediction,
     update_prediction_status,
 )
@@ -163,6 +164,18 @@ def parse_args():
         "--near-misses",
         action="store_true",
         help="List near-miss contradiction pairs and exit",
+    )
+    parser.add_argument(
+        "--audit-reasoning",
+        action="store_true",
+        help="Report validator/adversarial/invariance failure reasons and exit",
+    )
+    parser.add_argument(
+        "--audit-limit",
+        type=int,
+        default=200,
+        metavar="N",
+        help="How many recent explorations to include in reasoning audit (default: 200)",
     )
     parser.add_argument(
         "--prediction",
@@ -345,6 +358,8 @@ def _score_store_and_transmit(
     passes_threshold = scores["total"] >= threshold
     rewritten_description = connection.get("connection", "")
     validation_ok = True
+    validation_reasons: list[str] = []
+    validation_log = None
     adversarial_ok = True
     adversarial_rubric = None
     invariance_ok = True
@@ -352,6 +367,10 @@ def _score_store_and_transmit(
     boring = False
     if passes_threshold:
         validation_ok, validation_reasons = validate_hypothesis(connection)
+        validation_log = {
+            "passed": validation_ok,
+            "rejection_reasons": validation_reasons if not validation_ok else [],
+        }
         if not validation_ok:
             print("  [Validation] Rejected hypothesis — skipping transmission")
             for reason in validation_reasons:
@@ -416,6 +435,7 @@ def _score_store_and_transmit(
         distance_score=scores["distance"],
         depth_score=scores["depth"],
         total_score=scores["total"],
+        validation_json=validation_log,
         adversarial_rubric=adversarial_rubric,
         invariance_json=invariance_result,
         transmitted=should_transmit,
@@ -654,6 +674,7 @@ def main():
         [
             args.predictions,
             args.near_misses,
+            args.audit_reasoning,
             args.prediction is not None,
             args.mark_supported is not None,
             args.mark_failed is not None,
@@ -665,13 +686,16 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --near-misses, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and prediction_action_count > 0:
         print(
-            "  [!] Prediction actions cannot be combined with --star, --dismiss, or --dive."
+            "  [!] Prediction/audit actions cannot be combined with --star, --dismiss, or --dive."
         )
+        sys.exit(1)
+    if args.audit_reasoning and args.audit_limit <= 0:
+        print("  [!] --audit-limit requires a positive integer.")
         sys.exit(1)
     if (
         args.note is not None
@@ -753,6 +777,35 @@ def main():
             print(
                 f"{pair_id}\t{row.get('cluster_id')}\t{row.get('transmission_number_a')}\t{row.get('transmission_number_b')}\t{pred_a}\t{pred_b}"
             )
+        return
+
+    if args.audit_reasoning:
+        report = get_reasoning_failure_audit(limit=args.audit_limit)
+        if report.get("insufficient_data"):
+            print("Not enough data yet")
+            return
+        sample_size = report.get("sample_size", 0)
+        total_explorations = report.get("total_explorations", 0)
+        print(
+            f"[ReasoningAudit] Last {sample_size} explorations (total stored: {total_explorations})"
+        )
+        for stage_key, stage_label in (
+            ("validator", "validator"),
+            ("adversarial", "adversarial"),
+            ("invariance", "invariance"),
+        ):
+            stage = report.get(stage_key, {})
+            print(
+                f"{stage_label}\ttotal={stage.get('total', 0)}\treason_instances={stage.get('reason_instances_total', 0)}"
+            )
+            top_reasons = stage.get("top_reasons") or []
+            if not top_reasons:
+                print("  none")
+                continue
+            for reason_row in top_reasons:
+                print(
+                    f"  {reason_row.get('count', 0)}x\t{reason_row.get('reason', '')}"
+                )
         return
 
     if args.prediction is not None:
