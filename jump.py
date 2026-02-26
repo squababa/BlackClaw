@@ -37,6 +37,10 @@ ADDITIONAL REJECTION CRITERIA:
 - If you have to use the word "both" more than once in your description, the connection is probably too vague
 - A good connection should make someone say "wait, really?" not "yeah, that makes sense"
 Be strict. Most jumps should fail. Only flag genuine structural parallels.
+MECHANISM-FIRST OUTPUT REQUIREMENTS:
+- If no genuine connection, return {{"no_connection": true}}
+- If yes connection, include: mechanism, variable_mapping (>=3), prediction, test (metric + confirm + falsify), assumptions (>=2), boundary_conditions
+- If unsure, return {{"no_connection": true}} rather than vague output
 Respond ONLY with valid JSON. No markdown. No explanation.
 If NO genuine connection: {{"no_connection": true}}
 If YES genuine connection:
@@ -51,6 +55,10 @@ If YES genuine connection:
 JSON_RETRY_PROMPT = (
     "Your previous response was not valid JSON. Please respond with ONLY valid JSON, "
     "no markdown, no explanation, no trailing commas, no comments. Here is what I need:"
+)
+MISSING_FIELDS_REPAIR_PROMPT = (
+    "Your output is missing fields: {missing_fields}. Return ONLY corrected JSON with those fields filled. "
+    "Do not change the domains."
 )
 def _extract_json_substring(text: str) -> str | None:
     """
@@ -119,6 +127,118 @@ def _generate_json_with_retry(full_prompt: str, max_output_tokens: int) -> str |
         return _extract_json_substring(retry_checked)
     except Exception as e:
         print(f"  [!] Jump LLM call failed: {e}")
+        return None
+def _missing_required_fields(data: dict) -> list[str]:
+    def _is_non_empty(value: object) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, dict, tuple, set)):
+            return len(value) > 0
+        return value is not None
+    def _mapping_count(variable_mapping: object) -> int:
+        if isinstance(variable_mapping, dict):
+            return sum(
+                1
+                for k, v in variable_mapping.items()
+                if str(k).strip() and str(v).strip()
+            )
+        if isinstance(variable_mapping, list):
+            count = 0
+            for item in variable_mapping:
+                if isinstance(item, dict):
+                    if any(str(v).strip() for v in item.values()):
+                        count += 1
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    if str(item[0]).strip() and str(item[1]).strip():
+                        count += 1
+                elif isinstance(item, str):
+                    cleaned = item.strip()
+                    if cleaned and any(sep in cleaned for sep in ("->", "=>", ":", "=")):
+                        count += 1
+            return count
+        if isinstance(variable_mapping, str):
+            return sum(
+                1
+                for part in variable_mapping.split(",")
+                if part.strip() and any(sep in part for sep in ("->", "=>", ":", "="))
+            )
+        return 0
+    def _assumptions_count(assumptions: object) -> int:
+        if isinstance(assumptions, list):
+            return sum(1 for item in assumptions if str(item).strip())
+        if isinstance(assumptions, str):
+            return len([p for p in assumptions.replace("\n", ";").split(";") if p.strip()])
+        return 0
+    def _test_has_metric_confirm_falsify(test: object) -> bool:
+        if isinstance(test, dict):
+            has_metric = _is_non_empty(test.get("metric")) or _is_non_empty(test.get("metrics"))
+            has_confirm = any(
+                _is_non_empty(test.get(key))
+                for key in ("confirm", "confirms", "confirmed_if", "supports")
+            )
+            has_falsify = any(
+                _is_non_empty(test.get(key))
+                for key in ("falsify", "falsifies", "falsified_if", "refutes")
+            )
+            return has_metric and has_confirm and has_falsify
+        if isinstance(test, str):
+            lower = test.lower()
+            has_metric = "metric" in lower
+            has_confirm = any(
+                k in lower for k in ("confirm", "support", "validated", "true")
+            )
+            has_falsify = any(
+                k in lower for k in ("falsif", "refut", "reject", "false")
+            )
+            return has_metric and has_confirm and has_falsify
+        return False
+    missing: list[str] = []
+    for field in ("source_domain", "target_domain", "connection", "depth"):
+        if field not in data or not _is_non_empty(data.get(field)):
+            missing.append(field)
+    if not _is_non_empty(data.get("mechanism")):
+        missing.append("mechanism")
+    if _mapping_count(data.get("variable_mapping")) < 3:
+        missing.append("variable_mapping")
+    if not _is_non_empty(data.get("prediction")):
+        missing.append("prediction")
+    if not _test_has_metric_confirm_falsify(data.get("test")):
+        missing.append("test")
+    if _assumptions_count(data.get("assumptions")) < 2:
+        missing.append("assumptions")
+    if not _is_non_empty(data.get("boundary_conditions")):
+        missing.append("boundary_conditions")
+    return missing
+def _repair_missing_fields(
+    full_prompt: str, original_json: str, missing_fields: list[str]
+) -> dict | None:
+    repair_prompt = MISSING_FIELDS_REPAIR_PROMPT.format(
+        missing_fields=", ".join(missing_fields)
+    )
+    repair_prompt = (
+        f"{repair_prompt}\n\nOriginal instruction:\n{full_prompt}\n\nOriginal JSON:\n{original_json}"
+    )
+    try:
+        response = _llm_client.generate_content(
+            repair_prompt,
+            generation_config={
+                "max_output_tokens": 4096,
+                "response_mime_type": "application/json",
+            },
+        )
+        log_gemini_output("jump", "repair", response)
+        increment_llm_calls(1)
+        raw_output = response.text if getattr(response, "text", None) else ""
+        checked = check_llm_output(raw_output)
+        if checked is None:
+            print("  [!] Jump LLM repair output failed safety check")
+            return None
+        extracted = _extract_json_substring(checked)
+        if extracted is None:
+            return None
+        return json.loads(extracted)
+    except Exception as e:
+        print(f"  [!] Jump LLM repair call failed: {e}")
         return None
 def lateral_jump(
     pattern: dict, source_domain: str, source_category: str
@@ -190,10 +310,16 @@ def lateral_jump(
     # No connection found
     if data.get("no_connection", True):
         return None
-    # Validate required fields
-    required = {"source_domain", "target_domain", "connection", "depth"}
-    if not required.issubset(data.keys()):
-        return None
+    missing_fields = _missing_required_fields(data)
+    if missing_fields:
+        repaired = _repair_missing_fields(prompt, extracted_json, missing_fields)
+        if repaired is None:
+            return None
+        data = repaired
+        if data.get("no_connection", True):
+            return None
+        if _missing_required_fields(data):
+            return None
     # Validate depth is a number between 0 and 1
     depth = data.get("depth", 0)
     if not isinstance(depth, (int, float)) or depth < 0 or depth > 1:
