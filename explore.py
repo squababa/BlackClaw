@@ -3,14 +3,14 @@ BlackClaw Exploration — Dive + Pattern Extraction
 Searches a seed domain and extracts abstract patterns via LLM.
 """
 import json
-import google.generativeai as genai
 from tavily import TavilyClient
-from config import GEMINI_API_KEY, TAVILY_API_KEY, MODEL
+from config import TAVILY_API_KEY
+from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
 from debug_log import log_gemini_output
-genai.configure(api_key=GEMINI_API_KEY)
-_gemini_model = genai.GenerativeModel(MODEL)
+
+_llm_client = get_llm_client()
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
 EXTRACT_PROMPT = """You are a pattern extraction engine. Your job is to find abstract, transferable patterns in a domain of knowledge.
 You are analyzing the domain of: {domain}
@@ -101,7 +101,7 @@ def _extract_json_substring(text: str) -> str | None:
 def _generate_json_with_retry(full_prompt: str, max_output_tokens: int) -> str | None:
     """Generate JSON with one retry if parsing fails."""
     try:
-        response = _gemini_model.generate_content(
+        response = _llm_client.generate_content(
             full_prompt,
             generation_config={
                 "max_output_tokens": max_output_tokens,
@@ -119,7 +119,7 @@ def _generate_json_with_retry(full_prompt: str, max_output_tokens: int) -> str |
         if extracted is not None:
             return extracted
         retry_prompt = f"{JSON_RETRY_PROMPT}\n\n{full_prompt}"
-        retry_response = _gemini_model.generate_content(
+        retry_response = _llm_client.generate_content(
             retry_prompt,
             generation_config={
                 "max_output_tokens": max_output_tokens,

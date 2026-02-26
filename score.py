@@ -4,15 +4,14 @@ Evaluates connections on novelty, cross-domain distance, and structural depth.
 """
 import json
 import re
-import google.generativeai as genai
 from tavily import TavilyClient
-from config import GEMINI_API_KEY, TAVILY_API_KEY, MODEL
+from config import TAVILY_API_KEY
+from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
 from debug_log import log_gemini_output
 
-genai.configure(api_key=GEMINI_API_KEY)
-_gemini_model = genai.GenerativeModel(MODEL)
+_llm_client = get_llm_client()
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
 DISTANCE_PROMPT = """Rate the semantic distance between these two domains on a scale from 0.0 to 1.0.
@@ -71,7 +70,7 @@ def _extract_json_substring(text: str) -> str | None:
 def _call_json(prompt: str, stage: str, max_output_tokens: int = 4096) -> dict | None:
     """Run a JSON-only Gemini call and parse its response."""
     try:
-        response = _gemini_model.generate_content(
+        response = _llm_client.generate_content(
             prompt,
             generation_config={
                 "max_output_tokens": max_output_tokens,
@@ -271,7 +270,7 @@ def deep_dive_convergence(
         connection_description=connection_description or "No connection description available.",
     )
     try:
-        response = _gemini_model.generate_content(
+        response = _llm_client.generate_content(
             prompt,
             generation_config={"max_output_tokens": 1200},
         )

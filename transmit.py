@@ -3,17 +3,15 @@ BlackClaw Transmission Formatting + Rewrite Pass
 Formats discoveries for terminal output using Rich.
 """
 import json
-import google.generativeai as genai
 from rich.console import Console
 from rich.panel import Panel
-from config import GEMINI_API_KEY, MODEL
+from llm_client import get_llm_client
 from sanitize import check_llm_output
 from store import increment_llm_calls
 from debug_log import log_gemini_output
 
 console = Console()
-genai.configure(api_key=GEMINI_API_KEY)
-_gemini_model = genai.GenerativeModel(MODEL)
+_llm_client = get_llm_client()
 
 REWRITE_PROMPT = """Rewrite this discovery into a tight, compelling transmission. Rules:
 - Maximum 3 sentences
@@ -70,7 +68,7 @@ def rewrite_transmission(
         raw_description=raw_description or "No description available.",
     )
     try:
-        response = _gemini_model.generate_content(
+        response = _llm_client.generate_content(
             prompt,
             generation_config={
                 "max_output_tokens": 4096,

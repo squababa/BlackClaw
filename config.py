@@ -45,7 +45,19 @@ def _optional(var: str, default):
 # Load .env on import
 _load_env()
 # --- Required ---
-GEMINI_API_KEY: str = _require("GEMINI_API_KEY")
+LLM_PROVIDER: str = _optional("LLM_PROVIDER", "gemini").strip().lower()
+if LLM_PROVIDER not in {"gemini", "claude"}:
+    print(f"\n[BlackClaw] FATAL: Invalid LLM_PROVIDER value: {LLM_PROVIDER}")
+    print("  → Allowed values: gemini | claude\n")
+    sys.exit(1)
+
+if LLM_PROVIDER == "gemini":
+    GEMINI_API_KEY: str = _require("GEMINI_API_KEY")
+    ANTHROPIC_API_KEY: str = _optional("ANTHROPIC_API_KEY", "")
+else:
+    ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
+    GEMINI_API_KEY: str = _optional("GEMINI_API_KEY", "")
+
 TAVILY_API_KEY: str = _require("TAVILY_API_KEY")
 # --- Optional with defaults ---
 MODEL: str = _optional("BLACKCLAW_MODEL", "gemini-2.5-flash")
