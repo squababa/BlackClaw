@@ -30,6 +30,10 @@ def init_db():
             connection_description TEXT,
             scholarly_prior_art_summary TEXT,
             chain_path TEXT,
+            seed_url TEXT,
+            seed_excerpt TEXT,
+            target_url TEXT,
+            target_excerpt TEXT,
             novelty_score REAL,
             distance_score REAL,
             depth_score REAL,
@@ -104,6 +108,14 @@ def init_db():
         conn.execute("ALTER TABLE explorations ADD COLUMN chain_path TEXT")
     if "scholarly_prior_art_summary" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN scholarly_prior_art_summary TEXT")
+    if "seed_url" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN seed_url TEXT")
+    if "seed_excerpt" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN seed_excerpt TEXT")
+    if "target_url" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN target_url TEXT")
+    if "target_excerpt" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN target_excerpt TEXT")
     transmission_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(transmissions)").fetchall()
     }
@@ -163,6 +175,10 @@ def save_exploration(
     connection_description: str | None = None,
     scholarly_prior_art_summary: str | None = None,
     chain_path: list[str] | None = None,
+    seed_url: str | None = None,
+    seed_excerpt: str | None = None,
+    target_url: str | None = None,
+    target_excerpt: str | None = None,
     novelty_score: float | None = None,
     distance_score: float | None = None,
     depth_score: float | None = None,
@@ -174,9 +190,10 @@ def save_exploration(
     cursor = conn.execute(
         """INSERT INTO explorations
         (timestamp, seed_domain, seed_category, patterns_found, jump_target_domain,
-         connection_description, scholarly_prior_art_summary, chain_path,
-         novelty_score, distance_score, depth_score, total_score, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         connection_description, scholarly_prior_art_summary, chain_path, seed_url,
+         seed_excerpt, target_url, target_excerpt, novelty_score, distance_score,
+         depth_score, total_score, transmitted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
@@ -186,6 +203,10 @@ def save_exploration(
             connection_description,
             scholarly_prior_art_summary,
             json.dumps(chain_path) if chain_path else None,
+            seed_url,
+            seed_excerpt,
+            target_url,
+            target_excerpt,
             novelty_score,
             distance_score,
             depth_score,
@@ -396,6 +417,10 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
             e.jump_target_domain,
             e.connection_description,
             e.scholarly_prior_art_summary,
+            e.seed_url,
+            e.seed_excerpt,
+            e.target_url,
+            e.target_excerpt,
             e.novelty_score,
             e.depth_score,
             e.distance_score,
@@ -421,6 +446,10 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 "target_domain": row["jump_target_domain"],
                 "connection": row["connection_description"],
                 "scholarly_prior_art_summary": row["scholarly_prior_art_summary"],
+                "seed_url": row["seed_url"],
+                "seed_excerpt": row["seed_excerpt"],
+                "target_url": row["target_url"],
+                "target_excerpt": row["target_excerpt"],
                 "mechanism_signature": row["mechanism_signature"],
                 "cluster_id": row["signature_cluster_id"],
                 "scores": {

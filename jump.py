@@ -150,6 +150,8 @@ def lateral_jump(
     search_content = []
     source_lower = source_domain.lower()
     category_lower = source_category.lower()
+    target_url = None
+    target_excerpt = None
     for result in results.get("results", []):
         title = result.get("title", "").lower()
         content = result.get("content", "")
@@ -158,6 +160,12 @@ def lateral_jump(
             continue
         clean = sanitize(content)
         if clean:
+            if target_excerpt is None:
+                target_excerpt = clean[:500]
+            if target_url is None:
+                url = (result.get("url") or "").strip()
+                if url:
+                    target_url = url
             search_content.append(f"Title: {result.get('title', 'Unknown')}")
             search_content.append(clean)
             search_content.append("")
@@ -190,4 +198,8 @@ def lateral_jump(
     depth = data.get("depth", 0)
     if not isinstance(depth, (int, float)) or depth < 0 or depth > 1:
         data["depth"] = max(0.0, min(1.0, float(depth)))
+    if target_url:
+        data["target_url"] = target_url
+    if target_excerpt:
+        data["target_excerpt"] = target_excerpt
     return data

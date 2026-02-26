@@ -44,9 +44,10 @@ JSON_RETRY_PROMPT = (
     "Your previous response was not valid JSON. Please respond with ONLY valid JSON, "
     "no markdown, no explanation, no trailing commas, no comments. Here is what I need:"
 )
-def _search_seed(seed: dict) -> str:
-    """Run Tavily searches for the seed domain and return combined content."""
+def _search_seed(seed: dict) -> tuple[str, dict]:
+    """Run Tavily searches for the seed domain and return combined content + provenance."""
     combined = []
+    provenance = {"seed_url": None, "seed_excerpt": None}
     for query in seed["seed_queries"][:2]:  # Max 2 searches per seed
         try:
             results = _tavily.search(
@@ -62,13 +63,19 @@ def _search_seed(seed: dict) -> str:
                     # Sanitize BEFORE collecting
                     clean = sanitize(content)
                     if clean:
+                        if provenance["seed_excerpt"] is None:
+                            provenance["seed_excerpt"] = clean[:500]
+                        if provenance["seed_url"] is None:
+                            url = (result.get("url") or "").strip()
+                            if url:
+                                provenance["seed_url"] = url
                         combined.append(f"Source: {result.get('title', 'Unknown')}")
                         combined.append(clean)
                         combined.append("")
         except Exception as e:
             print(f"  [!] Tavily search failed for '{query}': {e}")
             continue
-    return "\n".join(combined)
+    return "\n".join(combined), provenance
 def _extract_json_substring(text: str) -> str | None:
     """
     Try to isolate valid JSON from model output.
@@ -146,7 +153,7 @@ def dive(seed: dict) -> list[dict]:
     Returns empty list on failure.
     """
     # Step 1: Search
-    research = _search_seed(seed)
+    research, provenance = _search_seed(seed)
     if not research.strip():
         print(f"  [!] No search results for {seed['name']}")
         return []
@@ -168,5 +175,10 @@ def dive(seed: dict) -> list[dict]:
     required = {"pattern_name", "description", "abstract_structure", "search_query"}
     for p in patterns:
         if required.issubset(p.keys()):
-            valid.append(p)
+            pattern = dict(p)
+            if provenance.get("seed_url"):
+                pattern["seed_url"] = provenance["seed_url"]
+            if provenance.get("seed_excerpt"):
+                pattern["seed_excerpt"] = provenance["seed_excerpt"]
+            valid.append(pattern)
     return valid

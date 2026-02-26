@@ -121,6 +121,18 @@ def _effective_pattern_budget(pattern_count: int, max_patterns: int) -> int:
     return 1
 
 
+def _extract_seed_provenance(patterns: list[dict] | None) -> tuple[str | None, str | None]:
+    """Pick first available seed provenance from extracted patterns."""
+    for pattern in patterns or []:
+        if not isinstance(pattern, dict):
+            continue
+        seed_url = pattern.get("seed_url")
+        seed_excerpt = pattern.get("seed_excerpt")
+        if seed_url or seed_excerpt:
+            return seed_url, seed_excerpt
+    return None, None
+
+
 def _handle_convergence(
     domain_a: str,
     domain_b: str,
@@ -200,6 +212,7 @@ def _score_store_and_transmit(
                 print(f"  [Validation] - {reason}")
 
     should_transmit = passes_threshold and not boring and validation_ok
+    seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
     exploration_id = save_exploration(
         seed_domain=source_domain,
         seed_category=source_category,
@@ -208,6 +221,10 @@ def _score_store_and_transmit(
         connection_description=rewritten_description,
         scholarly_prior_art_summary=scores.get("scholarly_prior_art_summary"),
         chain_path=chain_path,
+        seed_url=seed_url,
+        seed_excerpt=seed_excerpt,
+        target_url=connection.get("target_url"),
+        target_excerpt=connection.get("target_excerpt"),
         novelty_score=scores["novelty"],
         distance_score=scores["distance"],
         depth_score=scores["depth"],
@@ -408,11 +425,14 @@ def run_cycle(
             break
 
     if connections_found == 0:
+        seed_url, seed_excerpt = _extract_seed_provenance(patterns)
         save_exploration(
             seed_domain=seed["name"],
             seed_category=seed["category"],
             patterns_found=patterns,
             chain_path=[seed["name"]],
+            seed_url=seed_url,
+            seed_excerpt=seed_excerpt,
         )
 
     total_tx = get_next_transmission_number() - 1
