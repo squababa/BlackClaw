@@ -46,6 +46,7 @@ NOVELTY_QUERY_PROMPT = """I found a connection between {domain_a} and {domain_b}
 What would researchers call this connection? Give me exactly 3 alternative search queries that an expert familiar with this overlap would use to find existing literature about it. Return ONLY a JSON object: {{"queries": ["query1", "query2", "query3"]}}"""
 
 PRIOR_ART_JUDGMENT_PROMPT = """Does this search result describe essentially the same connection as '{connection_description}' between {domain_a} and {domain_b}? Answer ONLY with JSON: {{"is_prior_art": true/false}}
+Does prior work explain the SAME GENERATIVE PROCESS or merely similar vocabulary?
 
 Search result title: {title}
 Search result excerpt:
@@ -61,6 +62,7 @@ Paper abstract:
 
 Decide if the paper describes essentially the same causal mechanism/process as the candidate connection.
 Do NOT rely on keyword overlap alone.
+Does prior work explain the SAME GENERATIVE PROCESS or merely similar vocabulary?
 Return ONLY JSON: {{"is_prior_art": true/false, "reason": "short mechanism-based reason"}}"""
 
 CONVERGENCE_DEEP_DIVE_PROMPT = """This connection between {domain_a} and {domain_b} has been independently discovered {times_found} times from different starting domains: {source_seeds_list}.
