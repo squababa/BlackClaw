@@ -39,8 +39,17 @@ python main.py
 
 ## Required API Keys
 
-- **Anthropic API Key** — [console.anthropic.com](https://console.anthropic.com)
+- **Gemini API Key** — set `GEMINI_API_KEY` (currently active provider)
 - **Tavily API Key** — [tavily.com](https://tavily.com) (free tier: 1000 searches/month)
+
+Anthropic/Claude support is planned later. When enabled, it will use `ANTHROPIC_API_KEY`.
+
+## Provider Selection
+
+Set `LLM_PROVIDER` in `.env`:
+
+- `gemini` (default) — requires `GEMINI_API_KEY`
+- `claude` — requires `ANTHROPIC_API_KEY` (provider stub is present; calls not implemented yet)
 
 ## Usage
 
