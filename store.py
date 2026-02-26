@@ -648,6 +648,73 @@ def get_recent_domains(n: int = 20) -> list[str]:
     ).fetchall()
     conn.close()
     return [row["seed_domain"] for row in rows]
+
+
+def get_feedback_seed_metrics() -> dict:
+    """Aggregate star/dismiss feedback by domain, category, and signature cluster."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT
+            e.seed_domain,
+            e.seed_category,
+            t.user_rating,
+            t.signature_cluster_id
+        FROM transmissions t
+        INNER JOIN explorations e ON e.id = t.exploration_id
+        WHERE t.user_rating IN ('starred', 'dismissed')"""
+    ).fetchall()
+    conn.close()
+
+    domain_counts: dict[str, dict[str, int]] = {}
+    category_counts: dict[str, dict[str, int]] = {}
+    cluster_counts: dict[str, dict[str, int]] = {}
+    domain_clusters: dict[str, list[str]] = {}
+
+    for row in rows:
+        domain = (row["seed_domain"] or "").strip()
+        category = (row["seed_category"] or "").strip()
+        rating = (row["user_rating"] or "").strip()
+        cluster_id = (row["signature_cluster_id"] or "").strip()
+        metric_key = "starred" if rating == "starred" else "dismissed"
+
+        if domain:
+            counts = domain_counts.setdefault(domain, {"starred": 0, "dismissed": 0})
+            counts[metric_key] += 1
+        if category:
+            counts = category_counts.setdefault(
+                category, {"starred": 0, "dismissed": 0}
+            )
+            counts[metric_key] += 1
+        if cluster_id:
+            counts = cluster_counts.setdefault(
+                cluster_id, {"starred": 0, "dismissed": 0}
+            )
+            counts[metric_key] += 1
+            if domain:
+                domain_clusters.setdefault(domain, []).append(cluster_id)
+
+    cluster_dismiss_rates: dict[str, float] = {}
+    for cluster_id, counts in cluster_counts.items():
+        total = counts["starred"] + counts["dismissed"]
+        if total > 0:
+            cluster_dismiss_rates[cluster_id] = counts["dismissed"] / total
+
+    domain_cluster_penalty: dict[str, float] = {}
+    for domain, clusters in domain_clusters.items():
+        if not clusters:
+            continue
+        high_dismiss_count = 0
+        for cluster_id in clusters:
+            if cluster_dismiss_rates.get(cluster_id, 0.0) >= 0.7:
+                high_dismiss_count += 1
+        high_dismiss_fraction = high_dismiss_count / len(clusters)
+        domain_cluster_penalty[domain] = max(0.6, 1.0 - (0.4 * high_dismiss_fraction))
+
+    return {
+        "domain_counts": domain_counts,
+        "category_counts": category_counts,
+        "domain_cluster_penalty": domain_cluster_penalty,
+    }
 def get_connection_key(domain_a: str, domain_b: str) -> str:
     """Create a normalized key from two domain names (sorted alphabetically)."""
     pair = sorted(

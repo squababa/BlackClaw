@@ -70,3 +70,4 @@ MAX_TAVILY_CALLS_PER_CYCLE: int = _optional("BLACKCLAW_MAX_TAVILY", 10)
 MAX_LLM_CALLS_PER_CYCLE: int = _optional("BLACKCLAW_MAX_LLM", 5)
 # --- Seed exclusion ---
 SEED_EXCLUSION_WINDOW: int = 20  # Avoid last N explored domains
+PERSONALIZATION: bool = str(_optional("PERSONALIZATION", "0")).strip() == "1"
