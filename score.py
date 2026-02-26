@@ -67,6 +67,30 @@ CONVERGENCE_DEEP_DIVE_PROMPT = """This connection between {domain_a} and {domain
 The connection: {connection_description}
 Why does this keep appearing? What is the deeper underlying mechanism that makes these domains structurally related? Go beyond the surface pattern. What fundamental principle connects them that would explain why any exploration starting from unrelated fields keeps arriving here?
 Respond with a 3-5 sentence explanation."""
+
+ADVERSARIAL_SUBSCORES = (
+    "mapping_integrity",
+    "invariant_validity",
+    "assumption_fragility",
+    "test_discriminativeness",
+)
+
+ADVERSARIAL_RUBRIC_PROMPT = """You are an adversarial validator. Stress-test this hypothesis and score whether it survives a structured kill pass.
+Domain A: {domain_a}
+Domain B: {domain_b}
+Hypothesis JSON:
+{hypothesis_json}
+
+Return ONLY a valid JSON object with this exact schema:
+{{
+  "mapping_integrity": 0-1,
+  "invariant_validity": 0-1,
+  "assumption_fragility": 0-1,
+  "test_discriminativeness": 0-1,
+  "survival_score": 0-1,
+  "kill_reasons": ["..."]
+}}
+No markdown. No extra keys."""
 _scholar_cache: dict | None = None
 
 
@@ -120,6 +144,83 @@ def _call_json(prompt: str, stage: str, max_output_tokens: int = 4096) -> dict |
         return None
     except Exception:
         return None
+
+
+def _clamp_unit_score(value: object) -> float:
+    """Normalize score values into [0, 1]."""
+    try:
+        score = float(value)
+    except Exception:
+        return 0.0
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _normalize_kill_reasons(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _failed_adversarial_rubric(reason: str) -> dict:
+    return {
+        "mapping_integrity": 0.0,
+        "invariant_validity": 0.0,
+        "assumption_fragility": 0.0,
+        "test_discriminativeness": 0.0,
+        "survival_score": 0.0,
+        "kill_reasons": [reason],
+    }
+
+
+def run_adversarial_rubric(
+    connection: dict,
+    source_domain: str,
+    target_domain: str,
+) -> tuple[bool, dict]:
+    """
+    Structured kill pass.
+    Kill if any subscore < 0.35 or survival_score < 0.4.
+    """
+    if not isinstance(connection, dict):
+        return False, _failed_adversarial_rubric("connection payload must be a JSON object")
+
+    prompt = ADVERSARIAL_RUBRIC_PROMPT.format(
+        domain_a=source_domain,
+        domain_b=target_domain,
+        hypothesis_json=json.dumps(connection, ensure_ascii=False, sort_keys=True),
+    )
+    data = _call_json(prompt, "adversarial_rubric", max_output_tokens=2048)
+    if not isinstance(data, dict):
+        return False, _failed_adversarial_rubric(
+            "adversarial rubric output was invalid JSON"
+        )
+
+    rubric = {
+        "mapping_integrity": _clamp_unit_score(data.get("mapping_integrity")),
+        "invariant_validity": _clamp_unit_score(data.get("invariant_validity")),
+        "assumption_fragility": _clamp_unit_score(data.get("assumption_fragility")),
+        "test_discriminativeness": _clamp_unit_score(data.get("test_discriminativeness")),
+        "survival_score": _clamp_unit_score(data.get("survival_score")),
+        "kill_reasons": _normalize_kill_reasons(data.get("kill_reasons")),
+    }
+
+    auto_kill_reasons: list[str] = []
+    for key in ADVERSARIAL_SUBSCORES:
+        if rubric[key] < 0.35:
+            auto_kill_reasons.append(f"{key} below 0.35")
+    if rubric["survival_score"] < 0.4:
+        auto_kill_reasons.append("survival_score below 0.4")
+
+    if auto_kill_reasons:
+        existing = set(rubric["kill_reasons"])
+        for reason in auto_kill_reasons:
+            if reason not in existing:
+                rubric["kill_reasons"].append(reason)
+        return False, rubric
+
+    return True, rubric
 
 
 def _load_scholar_cache() -> dict:

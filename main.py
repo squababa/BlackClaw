@@ -25,7 +25,7 @@ from store import (
 from seed import pick_seed
 from explore import dive
 from jump import lateral_jump
-from score import score_connection, deep_dive_convergence
+from score import score_connection, deep_dive_convergence, run_adversarial_rubric
 from hypothesis_validation import validate_hypothesis
 from transmit import (
     format_transmission,
@@ -188,8 +188,29 @@ def _score_store_and_transmit(
 
     passes_threshold = scores["total"] >= threshold
     rewritten_description = connection.get("connection", "")
+    validation_ok = True
+    adversarial_ok = True
+    adversarial_rubric = None
     boring = False
     if passes_threshold:
+        validation_ok, validation_reasons = validate_hypothesis(connection)
+        if not validation_ok:
+            print("  [Validation] Rejected hypothesis — skipping transmission")
+            for reason in validation_reasons:
+                print(f"  [Validation] - {reason}")
+
+    if passes_threshold and validation_ok:
+        adversarial_ok, adversarial_rubric = run_adversarial_rubric(
+            connection,
+            source_domain,
+            target_domain,
+        )
+        if not adversarial_ok:
+            print("  [Adversarial] Killed hypothesis — skipping transmission")
+            for reason in adversarial_rubric.get("kill_reasons", []):
+                print(f"  [Adversarial] - {reason}")
+
+    if passes_threshold and validation_ok and adversarial_ok:
         rewrite = rewrite_transmission(
             source_domain=source_domain,
             target_domain=target_domain,
@@ -203,15 +224,7 @@ def _score_store_and_transmit(
             if isinstance(rewritten, str) and rewritten.strip():
                 rewritten_description = rewritten.strip()
 
-    validation_ok = True
-    if passes_threshold and not boring:
-        validation_ok, validation_reasons = validate_hypothesis(connection)
-        if not validation_ok:
-            print("  [Validation] Rejected hypothesis — skipping transmission")
-            for reason in validation_reasons:
-                print(f"  [Validation] - {reason}")
-
-    should_transmit = passes_threshold and not boring and validation_ok
+    should_transmit = passes_threshold and validation_ok and adversarial_ok and not boring
     seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
     exploration_id = save_exploration(
         seed_domain=source_domain,
@@ -229,6 +242,7 @@ def _score_store_and_transmit(
         distance_score=scores["distance"],
         depth_score=scores["depth"],
         total_score=scores["total"],
+        adversarial_rubric=adversarial_rubric,
         transmitted=should_transmit,
     )
 
