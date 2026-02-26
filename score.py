@@ -233,11 +233,11 @@ def score_connection(
 ) -> dict:
     """
     Score a connection on three dimensions.
-    Smart novelty check is only run when (depth + distance)/2 >= 0.4.
+    Smart novelty check is only run when (depth + distance)/2 > 0.4.
     """
     distance = _check_distance(source_domain, target_domain)
     depth = float(connection.get("depth", 0.0))
-    if ((depth + distance) / 2.0) < 0.4:
+    if ((depth + distance) / 2.0) <= 0.4:
         novelty = 0.5
     else:
         novelty = _check_novelty(

@@ -133,16 +133,15 @@ def format_convergence_transmission(
     """Format a convergence transmission."""
     cnum = f"C{transmission_number:03d}"
     source_list = ", ".join(source_seeds) if source_seeds else "(unknown)"
-    border = '"' * 40
-    text = (
-        f" ! BLACKCLAW — CONVERGENCE TRANSMISSION #{cnum}\n"
-        f"{border}\n"
-        f"  {domain_a} ! {domain_b}\n"
-        f"  Independently discovered {times_found} times from: {source_list}\n"
-        f"  {deep_dive_result}\n"
-        f"  CONVERGENCE STRENGTH: {times_found}\n"
-        f"{border}"
-    )
+    text = f"""◆ BLACKCLAW — CONVERGENCE TRANSMISSION #{cnum}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  {domain_a} ↔ {domain_b}
+  Independently discovered {times_found} times from: {source_list}
+
+  {deep_dive_result}
+
+  CONVERGENCE STRENGTH: {times_found}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
     return text
 
 
