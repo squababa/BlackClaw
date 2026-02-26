@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from tavily import TavilyClient
-from config import TAVILY_API_KEY
+from config import TAVILY_API_KEY, INVARIANCE_KILL_THRESHOLD
 from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
@@ -93,6 +93,24 @@ Return ONLY a valid JSON object with this exact schema:
   "kill_reasons": ["..."]
 }}
 No markdown. No extra keys."""
+
+INVARIANCE_CHECK_PROMPT = """Evaluate mechanism stability under controlled perturbations.
+Domain A: {domain_a}
+Domain B: {domain_b}
+Hypothesis JSON:
+{hypothesis_json}
+
+Return ONLY a valid JSON object with this exact schema:
+{{
+  "invariances": ["...","..."],
+  "failure_modes": ["...","..."],
+  "invariance_score": 0-1,
+  "notes": "1-2 sentence rationale"
+}}
+Rules:
+- Provide 2-3 invariances that should NOT break the mechanism.
+- Provide 2-3 failure_modes that WOULD break the mechanism.
+- No markdown. No extra keys."""
 _scholar_cache: dict | None = None
 
 
@@ -165,6 +183,15 @@ def _normalize_kill_reasons(value: object) -> list[str]:
     return []
 
 
+def _normalize_short_string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items[:3]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
 def _failed_adversarial_rubric(reason: str) -> dict:
     return {
         "mapping_integrity": 0.0,
@@ -223,6 +250,45 @@ def run_adversarial_rubric(
         return False, rubric
 
     return True, rubric
+
+
+def _failed_invariance_check(reason: str) -> dict:
+    return {
+        "invariances": [],
+        "failure_modes": [],
+        "invariance_score": 0.0,
+        "notes": reason,
+    }
+
+
+def run_invariance_check(
+    connection: dict,
+    source_domain: str,
+    target_domain: str,
+) -> tuple[bool, dict]:
+    """Mechanism stability gate. Kill when invariance_score is below threshold."""
+    if not isinstance(connection, dict):
+        return False, _failed_invariance_check("connection payload must be a JSON object")
+
+    prompt = INVARIANCE_CHECK_PROMPT.format(
+        domain_a=source_domain,
+        domain_b=target_domain,
+        hypothesis_json=json.dumps(connection, ensure_ascii=False, sort_keys=True),
+    )
+    data = _call_json(prompt, "invariance_check", max_output_tokens=2048)
+    if not isinstance(data, dict):
+        return False, _failed_invariance_check("invariance check output was invalid JSON")
+
+    notes = data.get("notes")
+    invariance = {
+        "invariances": _normalize_short_string_list(data.get("invariances")),
+        "failure_modes": _normalize_short_string_list(data.get("failure_modes")),
+        "invariance_score": _clamp_unit_score(data.get("invariance_score")),
+        "notes": str(notes).strip() if notes is not None else "",
+    }
+    if invariance["invariance_score"] < INVARIANCE_KILL_THRESHOLD:
+        return False, invariance
+    return True, invariance
 
 
 def _load_scholar_cache() -> dict:

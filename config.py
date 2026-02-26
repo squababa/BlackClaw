@@ -62,6 +62,7 @@ TAVILY_API_KEY: str = _require("TAVILY_API_KEY")
 # --- Optional with defaults ---
 MODEL: str = _optional("BLACKCLAW_MODEL", "gemini-2.5-flash")
 TRANSMIT_THRESHOLD: float = _optional("BLACKCLAW_THRESHOLD", 0.6)
+INVARIANCE_KILL_THRESHOLD: float = _optional("BLACKCLAW_INVARIANCE_KILL_THRESHOLD", 0.4)
 CYCLE_COOLDOWN: int = _optional("BLACKCLAW_COOLDOWN", 300)  # seconds
 DB_PATH: str = _optional("BLACKCLAW_DB_PATH", "blackclaw.db")
 MAX_PATTERNS_PER_CYCLE: int = _optional("BLACKCLAW_MAX_PATTERNS", 3)

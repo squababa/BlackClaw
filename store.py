@@ -39,6 +39,7 @@ def init_db():
             depth_score REAL,
             total_score REAL,
             adversarial_rubric_json TEXT,
+            invariance_json TEXT,
             transmitted INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS transmissions (
@@ -141,6 +142,8 @@ def init_db():
         conn.execute("ALTER TABLE explorations ADD COLUMN target_excerpt TEXT")
     if "adversarial_rubric_json" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN adversarial_rubric_json TEXT")
+    if "invariance_json" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN invariance_json TEXT")
     transmission_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(transmissions)").fetchall()
     }
@@ -217,6 +220,7 @@ def save_exploration(
     depth_score: float | None = None,
     total_score: float | None = None,
     adversarial_rubric: dict | None = None,
+    invariance_json: dict | str | None = None,
     transmitted: bool = False,
 ) -> int:
     """Save an exploration attempt. Returns the exploration id."""
@@ -226,8 +230,8 @@ def save_exploration(
         (timestamp, seed_domain, seed_category, patterns_found, jump_target_domain,
          connection_description, scholarly_prior_art_summary, chain_path, seed_url,
          seed_excerpt, target_url, target_excerpt, novelty_score, distance_score,
-         depth_score, total_score, adversarial_rubric_json, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         depth_score, total_score, adversarial_rubric_json, invariance_json, transmitted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
@@ -248,6 +252,15 @@ def save_exploration(
             json.dumps(adversarial_rubric, ensure_ascii=False)
             if isinstance(adversarial_rubric, dict)
             else None,
+            (
+                json.dumps(invariance_json, ensure_ascii=False)
+                if isinstance(invariance_json, dict)
+                else (
+                    invariance_json.strip()
+                    if isinstance(invariance_json, str) and invariance_json.strip()
+                    else None
+                )
+            ),
             1 if transmitted else 0,
         ),
     )
@@ -757,7 +770,8 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
             e.distance_score,
             e.total_score,
             e.chain_path,
-            e.adversarial_rubric_json
+            e.adversarial_rubric_json,
+            e.invariance_json
         FROM transmissions t
         LEFT JOIN explorations e ON e.id = t.exploration_id
         WHERE t.exportable = 1
@@ -813,6 +827,15 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 adversarial = {}
         except Exception:
             adversarial = {}
+        invariance_json = row["invariance_json"]
+        if isinstance(invariance_json, str):
+            try:
+                parsed_invariance = json.loads(invariance_json)
+                invariance_json = (
+                    parsed_invariance if isinstance(parsed_invariance, dict) else invariance_json
+                )
+            except Exception:
+                invariance_json = invariance_json
         dive_result = row["dive_result"]
         if isinstance(dive_result, str) and len(dive_result) > 4000:
             dive_result = dive_result[:4000].rstrip() + "\n[...truncated]"
@@ -844,6 +867,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                     "survival_score": adversarial.get("survival_score"),
                     "kill_reasons": adversarial.get("kill_reasons", []),
                 },
+                "invariance_json": invariance_json,
                 "chain_path": chain_path,
                 "user_rating": row["user_rating"],
                 "user_notes": row["user_notes"],

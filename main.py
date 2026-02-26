@@ -8,6 +8,7 @@ import sys
 import time
 from config import (
     TRANSMIT_THRESHOLD,
+    INVARIANCE_KILL_THRESHOLD,
     CYCLE_COOLDOWN,
     MAX_PATTERNS_PER_CYCLE,
 )
@@ -33,7 +34,12 @@ from store import (
 from seed import pick_seed
 from explore import dive
 from jump import lateral_jump
-from score import score_connection, deep_dive_convergence, run_adversarial_rubric
+from score import (
+    score_connection,
+    deep_dive_convergence,
+    run_adversarial_rubric,
+    run_invariance_check,
+)
 from hypothesis_validation import validate_hypothesis
 from llm_client import get_llm_client
 from sanitize import check_llm_output
@@ -335,6 +341,8 @@ def _score_store_and_transmit(
     validation_ok = True
     adversarial_ok = True
     adversarial_rubric = None
+    invariance_ok = True
+    invariance_result = None
     boring = False
     if passes_threshold:
         validation_ok, validation_reasons = validate_hypothesis(connection)
@@ -355,6 +363,20 @@ def _score_store_and_transmit(
                 print(f"  [Adversarial] - {reason}")
 
     if passes_threshold and validation_ok and adversarial_ok:
+        invariance_ok, invariance_result = run_invariance_check(
+            connection,
+            source_domain,
+            target_domain,
+        )
+        if not invariance_ok:
+            print("  [Invariance] Killed hypothesis — skipping transmission")
+            print(
+                "  [Invariance] - invariance_score below "
+                f"{INVARIANCE_KILL_THRESHOLD:.2f}: "
+                f"{invariance_result.get('invariance_score', 0.0):.3f}"
+            )
+
+    if passes_threshold and validation_ok and adversarial_ok and invariance_ok:
         rewrite = rewrite_transmission(
             source_domain=source_domain,
             target_domain=target_domain,
@@ -368,7 +390,9 @@ def _score_store_and_transmit(
             if isinstance(rewritten, str) and rewritten.strip():
                 rewritten_description = rewritten.strip()
 
-    should_transmit = passes_threshold and validation_ok and adversarial_ok and not boring
+    should_transmit = (
+        passes_threshold and validation_ok and adversarial_ok and invariance_ok and not boring
+    )
     seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
     exploration_id = save_exploration(
         seed_domain=source_domain,
@@ -387,6 +411,7 @@ def _score_store_and_transmit(
         depth_score=scores["depth"],
         total_score=scores["total"],
         adversarial_rubric=adversarial_rubric,
+        invariance_json=invariance_result,
         transmitted=should_transmit,
     )
 
