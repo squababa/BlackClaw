@@ -50,6 +50,10 @@ def init_db():
             mechanism_signature TEXT,
             signature_cluster_id TEXT,
             exportable INTEGER NOT NULL DEFAULT 1,
+            user_rating TEXT,
+            user_notes TEXT,
+            dive_result TEXT,
+            dive_timestamp TEXT,
             FOREIGN KEY (exploration_id) REFERENCES explorations(id)
         );
         CREATE TABLE IF NOT EXISTS domains_visited (
@@ -130,6 +134,14 @@ def init_db():
         conn.execute("ALTER TABLE transmissions ADD COLUMN mechanism_signature TEXT")
     if "signature_cluster_id" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN signature_cluster_id TEXT")
+    if "user_rating" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN user_rating TEXT")
+    if "user_notes" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN user_notes TEXT")
+    if "dive_result" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN dive_result TEXT")
+    if "dive_timestamp" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN dive_timestamp TEXT")
     convergence_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(convergences)").fetchall()
     }
@@ -269,6 +281,102 @@ def get_next_transmission_number() -> int:
     if row and row["max_num"] is not None:
         return row["max_num"] + 1
     return 1
+
+
+def set_transmission_feedback(
+    transmission_number: int,
+    user_rating: str,
+    user_notes: str | None = None,
+) -> bool:
+    """Set star/dismiss feedback for a transmission number."""
+    if user_rating not in {"starred", "dismissed"}:
+        raise ValueError("user_rating must be 'starred' or 'dismissed'")
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT 1 FROM transmissions WHERE transmission_number = ? LIMIT 1",
+        (transmission_number,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+    if user_notes is None:
+        conn.execute(
+            "UPDATE transmissions SET user_rating = ? WHERE transmission_number = ?",
+            (user_rating, transmission_number),
+        )
+    else:
+        note = user_notes.strip()
+        conn.execute(
+            """UPDATE transmissions
+            SET user_rating = ?, user_notes = ?
+            WHERE transmission_number = ?""",
+            (user_rating, note if note else None, transmission_number),
+        )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_transmission_feedback_context(transmission_number: int) -> dict | None:
+    """Fetch one transmission and related exploration context for feedback dive."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            t.transmission_number,
+            t.formatted_output,
+            t.user_rating,
+            t.user_notes,
+            t.dive_result,
+            t.dive_timestamp,
+            e.seed_domain,
+            e.jump_target_domain,
+            e.connection_description,
+            e.scholarly_prior_art_summary,
+            e.seed_url,
+            e.seed_excerpt,
+            e.target_url,
+            e.target_excerpt,
+            e.adversarial_rubric_json
+        FROM transmissions t
+        LEFT JOIN explorations e ON e.id = t.exploration_id
+        WHERE t.transmission_number = ?
+        ORDER BY t.id DESC
+        LIMIT 1""",
+        (transmission_number,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    out = dict(row)
+    try:
+        adversarial = json.loads(out.get("adversarial_rubric_json") or "{}")
+        if not isinstance(adversarial, dict):
+            adversarial = {}
+    except Exception:
+        adversarial = {}
+    out["adversarial_rubric"] = adversarial
+    return out
+
+
+def save_transmission_dive(transmission_number: int, dive_result: str) -> bool:
+    """Store dive output and timestamp for a transmission number."""
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT 1 FROM transmissions WHERE transmission_number = ? LIMIT 1",
+        (transmission_number,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+    conn.execute(
+        """UPDATE transmissions
+        SET dive_result = ?, dive_timestamp = ?
+        WHERE transmission_number = ?""",
+        ((dive_result or "").strip(), _now(), transmission_number),
+    )
+    conn.commit()
+    conn.close()
+    return True
 
 
 def _canonical_text(value) -> str:
@@ -420,6 +528,10 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
             t.formatted_output,
             t.mechanism_signature,
             t.signature_cluster_id,
+            t.user_rating,
+            t.user_notes,
+            t.dive_result,
+            t.dive_timestamp,
             e.seed_domain,
             e.jump_target_domain,
             e.connection_description,
@@ -456,6 +568,9 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 adversarial = {}
         except Exception:
             adversarial = {}
+        dive_result = row["dive_result"]
+        if isinstance(dive_result, str) and len(dive_result) > 4000:
+            dive_result = dive_result[:4000].rstrip() + "\n[...truncated]"
         payload.append(
             {
                 "number": row["transmission_number"],
@@ -485,6 +600,10 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                     "kill_reasons": adversarial.get("kill_reasons", []),
                 },
                 "chain_path": chain_path,
+                "user_rating": row["user_rating"],
+                "user_notes": row["user_notes"],
+                "dive_result": dive_result,
+                "dive_timestamp": row["dive_timestamp"],
                 "is_convergence": "CONVERGENCE TRANSMISSION"
                 in (row["formatted_output"] or ""),
             }

@@ -3,6 +3,7 @@ BlackClaw — Autonomous Curiosity Engine
 Entry point. Runs the exploration loop.
 """
 import argparse
+import json
 import sys
 import time
 from config import (
@@ -21,12 +22,18 @@ from store import (
     check_convergence,
     save_deep_dive,
     export_transmissions,
+    set_transmission_feedback,
+    get_transmission_feedback_context,
+    save_transmission_dive,
+    increment_llm_calls,
 )
 from seed import pick_seed
 from explore import dive
 from jump import lateral_jump
 from score import score_connection, deep_dive_convergence, run_adversarial_rubric
 from hypothesis_validation import validate_hypothesis
+from llm_client import get_llm_client
+from sanitize import check_llm_output
 from transmit import (
     format_transmission,
     format_convergence_transmission,
@@ -36,6 +43,34 @@ from transmit import (
     print_summary,
     rewrite_transmission,
 )
+
+FEEDBACK_DIVE_PROMPT = """You are creating a deeper analysis for an existing BlackClaw transmission.
+Use the provided transmission text, provenance details, and adversarial rubric (if available).
+
+Transmission number: {transmission_number}
+Transmission text:
+{formatted_output}
+
+Core mechanism summary:
+{connection_description}
+
+Provenance:
+- Source domain: {seed_domain}
+- Target domain: {jump_target_domain}
+- Seed URL: {seed_url}
+- Seed excerpt: {seed_excerpt}
+- Target URL: {target_url}
+- Target excerpt: {target_excerpt}
+
+Adversarial rubric (if available):
+{adversarial_rubric}
+
+Write a concise response with exactly these 4 sections:
+1) Mechanism restatement: clearly restate the causal/shared mechanism.
+2) Strongest assumptions: list the 1-2 strongest assumptions.
+3) Discriminative test: propose 1 test with a metric and expected outcomes for both "mechanism true" and "mechanism false".
+4) Scholarly search queries: provide exactly 2 query strings.
+"""
 
 
 def parse_args():
@@ -81,6 +116,33 @@ def parse_args():
         "--export",
         action="store_true",
         help="Export transmissions to transmissions_export.json and exit",
+    )
+    parser.add_argument(
+        "--star",
+        type=int,
+        default=None,
+        metavar="NUMBER",
+        help="Mark a transmission as starred and exit",
+    )
+    parser.add_argument(
+        "--dismiss",
+        type=int,
+        default=None,
+        metavar="NUMBER",
+        help="Mark a transmission as dismissed and exit",
+    )
+    parser.add_argument(
+        "--dive",
+        type=int,
+        default=None,
+        metavar="NUMBER",
+        help="Run a deeper one-call LLM analysis for a transmission and exit",
+    )
+    parser.add_argument(
+        "--note",
+        type=str,
+        default=None,
+        help="Optional note to store with --star or --dismiss",
     )
     return parser.parse_args()
 
@@ -131,6 +193,52 @@ def _extract_seed_provenance(patterns: list[dict] | None) -> tuple[str | None, s
         if seed_url or seed_excerpt:
             return seed_url, seed_excerpt
     return None, None
+
+
+def _run_feedback_dive(transmission_number: int) -> bool:
+    """Run one LLM deep analysis for a saved transmission and persist the result."""
+    context = get_transmission_feedback_context(transmission_number)
+    if context is None:
+        return False
+
+    prompt = FEEDBACK_DIVE_PROMPT.format(
+        transmission_number=context.get("transmission_number"),
+        formatted_output=context.get("formatted_output") or "(not available)",
+        connection_description=context.get("connection_description")
+        or "(not available)",
+        seed_domain=context.get("seed_domain") or "(not available)",
+        jump_target_domain=context.get("jump_target_domain") or "(not available)",
+        seed_url=context.get("seed_url") or "(not available)",
+        seed_excerpt=context.get("seed_excerpt") or "(not available)",
+        target_url=context.get("target_url") or "(not available)",
+        target_excerpt=context.get("target_excerpt") or "(not available)",
+        adversarial_rubric=json.dumps(
+            context.get("adversarial_rubric") or {},
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+
+    llm_client = get_llm_client()
+    try:
+        response = llm_client.generate_content(
+            prompt,
+            generation_config={"max_output_tokens": 1500},
+        )
+        increment_llm_calls(1)
+        raw = response.text if getattr(response, "text", None) else ""
+        checked = check_llm_output(raw)
+        if checked is None:
+            dive_result = "Dive output failed safety checks."
+        else:
+            dive_result = checked.strip()
+    except Exception as e:
+        dive_result = f"Dive failed: {e}"
+
+    save_transmission_dive(transmission_number, dive_result)
+    print(f"[Dive] Saved deep analysis for transmission #{transmission_number}")
+    print(dive_result)
+    return True
 
 
 def _handle_convergence(
@@ -466,6 +574,52 @@ def main():
     args = parse_args()
 
     init_db()
+
+    feedback_action_count = sum(
+        [
+            args.star is not None,
+            args.dismiss is not None,
+            args.dive is not None,
+        ]
+    )
+    if feedback_action_count > 1:
+        print("  [!] Use only one of --star, --dismiss, or --dive at a time.")
+        sys.exit(1)
+    if args.note is not None and args.star is None and args.dismiss is None:
+        print("  [!] --note can only be used with --star or --dismiss.")
+        sys.exit(1)
+    for flag_name, tx_num in (
+        ("--star", args.star),
+        ("--dismiss", args.dismiss),
+        ("--dive", args.dive),
+    ):
+        if tx_num is not None and tx_num <= 0:
+            print(f"  [!] {flag_name} requires a positive transmission number.")
+            sys.exit(1)
+
+    if args.star is not None:
+        if not set_transmission_feedback(args.star, "starred", args.note):
+            print(f"  [!] Transmission #{args.star} not found.")
+            sys.exit(1)
+        print(f"[Feedback] Starred transmission #{args.star}")
+        if args.note is not None:
+            print("  [Feedback] Note saved.")
+        return
+
+    if args.dismiss is not None:
+        if not set_transmission_feedback(args.dismiss, "dismissed", args.note):
+            print(f"  [!] Transmission #{args.dismiss} not found.")
+            sys.exit(1)
+        print(f"[Feedback] Dismissed transmission #{args.dismiss}")
+        if args.note is not None:
+            print("  [Feedback] Note saved.")
+        return
+
+    if args.dive is not None:
+        if not _run_feedback_dive(args.dive):
+            print(f"  [!] Transmission #{args.dive} not found.")
+            sys.exit(1)
+        return
 
     if args.export:
         count = export_transmissions("transmissions_export.json")
