@@ -4,7 +4,7 @@
 
 BlackClaw is an AI agent that explores human knowledge autonomously — making lateral connections across unrelated domains and surfacing discoveries nobody has made before. It runs continuously, requires no prompting, and sends you transmissions when it finds something genuinely novel.
 
-OpenClaw does what you ask. BlackClaw does what nobody asked.
+OpenClaw does what you ask. BlackClaw does what nobody knows.
 
 ## How It Works
 
