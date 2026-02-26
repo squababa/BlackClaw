@@ -4,7 +4,7 @@ Cleans fetched web content before it touches the LLM.
 Defends against prompt injection, credential leakage, and malicious content.
 """
 import re
-from html import unescape
+from bs4 import BeautifulSoup
 # Max chars per web source sent to LLM
 MAX_CONTENT_LENGTH = 4000
 # Patterns that indicate prompt injection attempts
@@ -44,22 +44,15 @@ CREDENTIAL_PATTERNS = [
     r"eyJ[a-zA-Z0-9\-_]+\.eyJ",       # JWT tokens
 ]
 _CREDENTIAL_RE = [re.compile(p) for p in CREDENTIAL_PATTERNS]
-# HTML tags to strip
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-_SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE)
-_STYLE_RE = re.compile(r"<style[^>]*>.*?</style>", re.DOTALL | re.IGNORECASE)
-_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # Collapse whitespace
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 _MULTI_SPACE_RE = re.compile(r" {2,}")
 def strip_html(text: str) -> str:
-    """Remove HTML tags, scripts, styles, and comments."""
-    text = _SCRIPT_RE.sub("", text)
-    text = _STYLE_RE.sub("", text)
-    text = _COMMENT_RE.sub("", text)
-    text = _HTML_TAG_RE.sub(" ", text)
-    text = unescape(text)
-    return text
+    """Remove HTML tags and non-content nodes using BeautifulSoup."""
+    soup = BeautifulSoup(text, "html.parser")
+    for node in soup(["script", "style"]):
+        node.decompose()
+    return soup.get_text(separator=" ")
 def remove_injection_attempts(text: str) -> str:
     """Remove text segments containing prompt injection patterns."""
     for pattern in _INJECTION_RE:
