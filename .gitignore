@@ -21,6 +21,7 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+debug.log
 # Distribution
 dist/
 build/
