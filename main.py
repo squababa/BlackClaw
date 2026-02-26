@@ -25,6 +25,7 @@ from seed import pick_seed
 from explore import dive
 from jump import lateral_jump
 from score import score_connection, deep_dive_convergence
+from hypothesis_validation import validate_hypothesis
 from transmit import (
     format_transmission,
     format_convergence_transmission,
@@ -189,7 +190,15 @@ def _score_store_and_transmit(
             if isinstance(rewritten, str) and rewritten.strip():
                 rewritten_description = rewritten.strip()
 
-    should_transmit = passes_threshold and not boring
+    validation_ok = True
+    if passes_threshold and not boring:
+        validation_ok, validation_reasons = validate_hypothesis(connection)
+        if not validation_ok:
+            print("  [Validation] Rejected hypothesis — skipping transmission")
+            for reason in validation_reasons:
+                print(f"  [Validation] - {reason}")
+
+    should_transmit = passes_threshold and not boring and validation_ok
     exploration_id = save_exploration(
         seed_domain=source_domain,
         seed_category=source_category,
