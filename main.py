@@ -206,6 +206,7 @@ def _score_store_and_transmit(
         patterns_found=patterns_payload,
         jump_target_domain=target_domain,
         connection_description=rewritten_description,
+        scholarly_prior_art_summary=scores.get("scholarly_prior_art_summary"),
         chain_path=chain_path,
         novelty_score=scores["novelty"],
         distance_score=scores["distance"],

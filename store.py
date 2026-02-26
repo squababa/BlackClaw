@@ -28,6 +28,7 @@ def init_db():
             patterns_found TEXT,
             jump_target_domain TEXT,
             connection_description TEXT,
+            scholarly_prior_art_summary TEXT,
             chain_path TEXT,
             novelty_score REAL,
             distance_score REAL,
@@ -101,6 +102,8 @@ def init_db():
     }
     if "chain_path" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN chain_path TEXT")
+    if "scholarly_prior_art_summary" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN scholarly_prior_art_summary TEXT")
     transmission_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(transmissions)").fetchall()
     }
@@ -158,6 +161,7 @@ def save_exploration(
     patterns_found: list[dict] | None = None,
     jump_target_domain: str | None = None,
     connection_description: str | None = None,
+    scholarly_prior_art_summary: str | None = None,
     chain_path: list[str] | None = None,
     novelty_score: float | None = None,
     distance_score: float | None = None,
@@ -170,9 +174,9 @@ def save_exploration(
     cursor = conn.execute(
         """INSERT INTO explorations
         (timestamp, seed_domain, seed_category, patterns_found, jump_target_domain,
-         connection_description, chain_path,
+         connection_description, scholarly_prior_art_summary, chain_path,
          novelty_score, distance_score, depth_score, total_score, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
@@ -180,6 +184,7 @@ def save_exploration(
             json.dumps(patterns_found) if patterns_found else None,
             jump_target_domain,
             connection_description,
+            scholarly_prior_art_summary,
             json.dumps(chain_path) if chain_path else None,
             novelty_score,
             distance_score,
@@ -390,6 +395,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
             e.seed_domain,
             e.jump_target_domain,
             e.connection_description,
+            e.scholarly_prior_art_summary,
             e.novelty_score,
             e.depth_score,
             e.distance_score,
@@ -414,6 +420,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 "source_domain": row["seed_domain"],
                 "target_domain": row["jump_target_domain"],
                 "connection": row["connection_description"],
+                "scholarly_prior_art_summary": row["scholarly_prior_art_summary"],
                 "mechanism_signature": row["mechanism_signature"],
                 "cluster_id": row["signature_cluster_id"],
                 "scores": {
