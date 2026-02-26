@@ -26,6 +26,9 @@ from store import (
     get_transmission_feedback_context,
     save_transmission_dive,
     increment_llm_calls,
+    list_predictions,
+    get_prediction,
+    update_prediction_status,
 )
 from seed import pick_seed
 from explore import dive
@@ -142,7 +145,40 @@ def parse_args():
         "--note",
         type=str,
         default=None,
-        help="Optional note to store with --star or --dismiss",
+        help="Optional note to store with feedback or prediction status updates",
+    )
+    parser.add_argument(
+        "--predictions",
+        action="store_true",
+        help="List the latest 20 predictions and exit",
+    )
+    parser.add_argument(
+        "--prediction",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Show full details for a prediction id and exit",
+    )
+    parser.add_argument(
+        "--mark-supported",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a prediction as supported and exit",
+    )
+    parser.add_argument(
+        "--mark-failed",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a prediction as failed and exit",
+    )
+    parser.add_argument(
+        "--mark-unknown",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a prediction as unknown and exit",
     )
     return parser.parse_args()
 
@@ -382,6 +418,7 @@ def _score_store_and_transmit(
             exploration_id,
             formatted,
             mechanism_signature=signature,
+            connection_payload=tx_connection,
         )
         print_transmission(formatted)
         transmitted = True
@@ -582,19 +619,51 @@ def main():
             args.dive is not None,
         ]
     )
+    prediction_action_count = sum(
+        [
+            args.predictions,
+            args.prediction is not None,
+            args.mark_supported is not None,
+            args.mark_failed is not None,
+            args.mark_unknown is not None,
+        ]
+    )
     if feedback_action_count > 1:
         print("  [!] Use only one of --star, --dismiss, or --dive at a time.")
         sys.exit(1)
-    if args.note is not None and args.star is None and args.dismiss is None:
-        print("  [!] --note can only be used with --star or --dismiss.")
+    if prediction_action_count > 1:
+        print(
+            "  [!] Use only one of --predictions, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
+        )
+        sys.exit(1)
+    if feedback_action_count > 0 and prediction_action_count > 0:
+        print(
+            "  [!] Prediction actions cannot be combined with --star, --dismiss, or --dive."
+        )
+        sys.exit(1)
+    if (
+        args.note is not None
+        and args.star is None
+        and args.dismiss is None
+        and args.mark_supported is None
+        and args.mark_failed is None
+        and args.mark_unknown is None
+    ):
+        print(
+            "  [!] --note can only be used with --star, --dismiss, --mark-supported, --mark-failed, or --mark-unknown."
+        )
         sys.exit(1)
     for flag_name, tx_num in (
         ("--star", args.star),
         ("--dismiss", args.dismiss),
         ("--dive", args.dive),
+        ("--prediction", args.prediction),
+        ("--mark-supported", args.mark_supported),
+        ("--mark-failed", args.mark_failed),
+        ("--mark-unknown", args.mark_unknown),
     ):
         if tx_num is not None and tx_num <= 0:
-            print(f"  [!] {flag_name} requires a positive transmission number.")
+            print(f"  [!] {flag_name} requires a positive integer.")
             sys.exit(1)
 
     if args.star is not None:
@@ -619,6 +688,56 @@ def main():
         if not _run_feedback_dive(args.dive):
             print(f"  [!] Transmission #{args.dive} not found.")
             sys.exit(1)
+        return
+
+    if args.predictions:
+        rows = list_predictions(limit=20)
+        if not rows:
+            print("[Predictions] No predictions found.")
+            return
+        print("id\tstatus\ttransmission\tprediction")
+        for row in rows:
+            summary = (row.get("prediction") or "").replace("\n", " ").strip()
+            if len(summary) > 120:
+                summary = summary[:117].rstrip() + "..."
+            print(
+                f"{row.get('id')}\t{row.get('status')}\t{row.get('transmission_number')}\t{summary}"
+            )
+        return
+
+    if args.prediction is not None:
+        row = get_prediction(args.prediction)
+        if row is None:
+            print(f"  [!] Prediction #{args.prediction} not found.")
+            sys.exit(1)
+        print(json.dumps(row, ensure_ascii=False, indent=2))
+        return
+
+    if args.mark_supported is not None:
+        if not update_prediction_status(args.mark_supported, "supported", args.note):
+            print(f"  [!] Prediction #{args.mark_supported} not found.")
+            sys.exit(1)
+        print(f"[Predictions] Marked prediction #{args.mark_supported} as supported.")
+        if args.note is not None:
+            print("  [Predictions] Note saved.")
+        return
+
+    if args.mark_failed is not None:
+        if not update_prediction_status(args.mark_failed, "failed", args.note):
+            print(f"  [!] Prediction #{args.mark_failed} not found.")
+            sys.exit(1)
+        print(f"[Predictions] Marked prediction #{args.mark_failed} as failed.")
+        if args.note is not None:
+            print("  [Predictions] Note saved.")
+        return
+
+    if args.mark_unknown is not None:
+        if not update_prediction_status(args.mark_unknown, "unknown", args.note):
+            print(f"  [!] Prediction #{args.mark_unknown} not found.")
+            sys.exit(1)
+        print(f"[Predictions] Marked prediction #{args.mark_unknown} as unknown.")
+        if args.note is not None:
+            print("  [Predictions] Note saved.")
         return
 
     if args.export:

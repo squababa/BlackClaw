@@ -94,6 +94,24 @@ def init_db():
             ON explorations(seed_domain);
         CREATE INDEX IF NOT EXISTS idx_transmissions_number
             ON transmissions(transmission_number);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_transmissions_number_unique
+            ON transmissions(transmission_number);
+        CREATE TABLE IF NOT EXISTS predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transmission_number INTEGER NOT NULL,
+            prediction TEXT NOT NULL,
+            test TEXT NOT NULL,
+            metric TEXT,
+            status TEXT NOT NULL DEFAULT "unknown",
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (transmission_number) REFERENCES transmissions(transmission_number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_predictions_status
+            ON predictions(status);
+        CREATE INDEX IF NOT EXISTS idx_predictions_transmission
+            ON predictions(transmission_number);
         CREATE INDEX IF NOT EXISTS idx_api_usage_date
             ON api_usage(date);
         CREATE INDEX IF NOT EXISTS idx_convergences_key
@@ -237,6 +255,187 @@ def save_exploration(
     conn.commit()
     conn.close()
     return exploration_id
+
+
+def _prediction_text(value: object) -> str | None:
+    """Convert prediction/test payload fields into normalized text."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text if text else None
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True).strip()
+        return text if text else None
+    text = str(value).strip()
+    return text if text else None
+
+
+def _extract_metric(connection_payload: dict) -> str | None:
+    """Best-effort metric extraction from connection payload."""
+    metric = connection_payload.get("metric")
+    if metric is None and isinstance(connection_payload.get("test"), dict):
+        test = connection_payload.get("test", {})
+        metric = test.get("metric")
+        if metric is None:
+            metric = test.get("metrics")
+    return _prediction_text(metric)
+
+
+def create_prediction(
+    transmission_number: int,
+    prediction: str,
+    test: str,
+    metric: str | None = None,
+    notes: str | None = None,
+) -> int:
+    """Create one prediction record. Returns prediction id."""
+    conn = _connect()
+    prediction_id = _create_prediction_with_conn(
+        conn=conn,
+        transmission_number=transmission_number,
+        prediction=prediction,
+        test=test,
+        metric=metric,
+        notes=notes,
+    )
+    conn.commit()
+    conn.close()
+    return prediction_id
+
+
+def _create_prediction_with_conn(
+    conn: sqlite3.Connection,
+    transmission_number: int,
+    prediction: str,
+    test: str,
+    metric: str | None = None,
+    notes: str | None = None,
+) -> int:
+    """Create one prediction record using an existing transaction."""
+    now = _now()
+    cursor = conn.execute(
+        """INSERT INTO predictions
+        (transmission_number, prediction, test, metric, status, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?)""",
+        (
+            transmission_number,
+            prediction.strip(),
+            test.strip(),
+            metric.strip() if metric else None,
+            notes.strip() if notes else None,
+            now,
+            now,
+        ),
+    )
+    return cursor.lastrowid
+
+
+def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
+    """List predictions newest-first."""
+    conn = _connect()
+    safe_limit = max(1, int(limit))
+    if status is None:
+        rows = conn.execute(
+            """SELECT
+                id,
+                transmission_number,
+                prediction,
+                test,
+                metric,
+                status,
+                notes,
+                created_at,
+                updated_at
+            FROM predictions
+            ORDER BY id DESC
+            LIMIT ?""",
+            (safe_limit,),
+        ).fetchall()
+    else:
+        clean_status = (status or "").strip().lower()
+        if clean_status not in {"unknown", "supported", "failed"}:
+            conn.close()
+            raise ValueError("status must be one of: unknown, supported, failed")
+        rows = conn.execute(
+            """SELECT
+                id,
+                transmission_number,
+                prediction,
+                test,
+                metric,
+                status,
+                notes,
+                created_at,
+                updated_at
+            FROM predictions
+            WHERE status = ?
+            ORDER BY id DESC
+            LIMIT ?""",
+            (clean_status, safe_limit),
+        ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_prediction(id: int) -> dict | None:
+    """Get one prediction by id."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            id,
+            transmission_number,
+            prediction,
+            test,
+            metric,
+            status,
+            notes,
+            created_at,
+            updated_at
+        FROM predictions
+        WHERE id = ?
+        LIMIT 1""",
+        (id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_prediction_status(
+    id: int,
+    status: str,
+    notes: str | None = None,
+) -> bool:
+    """Update a prediction status and optional notes."""
+    clean_status = (status or "").strip().lower()
+    if clean_status not in {"unknown", "supported", "failed"}:
+        raise ValueError("status must be one of: unknown, supported, failed")
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT 1 FROM predictions WHERE id = ? LIMIT 1",
+        (id,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+    if notes is None:
+        conn.execute(
+            "UPDATE predictions SET status = ?, updated_at = ? WHERE id = ?",
+            (clean_status, _now(), id),
+        )
+    else:
+        clean_notes = notes.strip()
+        conn.execute(
+            """UPDATE predictions
+            SET status = ?, notes = ?, updated_at = ?
+            WHERE id = ?""",
+            (clean_status, clean_notes if clean_notes else None, _now(), id),
+        )
+    conn.commit()
+    conn.close()
+    return True
+
+
 # --- Transmissions ---
 def save_transmission(
     transmission_number: int,
@@ -244,6 +443,7 @@ def save_transmission(
     formatted_output: str,
     mechanism_signature: str | None = None,
     exportable: bool = True,
+    connection_payload: dict | None = None,
 ) -> int:
     """Save a transmission. Returns transmission id."""
     conn = _connect()
@@ -268,6 +468,18 @@ def save_transmission(
         ),
     )
     tid = cursor.lastrowid
+    if isinstance(connection_payload, dict):
+        prediction = _prediction_text(connection_payload.get("prediction"))
+        test = _prediction_text(connection_payload.get("test"))
+        if prediction and test:
+            _create_prediction_with_conn(
+                conn=conn,
+                transmission_number=transmission_number,
+                prediction=prediction,
+                test=test,
+                metric=_extract_metric(connection_payload),
+                notes=_prediction_text(connection_payload.get("assumptions")),
+            )
     conn.commit()
     conn.close()
     return tid
@@ -551,6 +763,39 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
         WHERE t.exportable = 1
         ORDER BY t.transmission_number ASC"""
     ).fetchall()
+    tx_numbers = [row["transmission_number"] for row in rows]
+    predictions_by_tx: dict[int, list[dict]] = {}
+    if tx_numbers:
+        placeholders = ",".join("?" for _ in tx_numbers)
+        pred_rows = conn.execute(
+            f"""SELECT
+                id,
+                transmission_number,
+                prediction,
+                test,
+                metric,
+                status,
+                notes,
+                created_at,
+                updated_at
+            FROM predictions
+            WHERE transmission_number IN ({placeholders})
+            ORDER BY id ASC""",
+            tx_numbers,
+        ).fetchall()
+        for pred_row in pred_rows:
+            predictions_by_tx.setdefault(pred_row["transmission_number"], []).append(
+                {
+                    "id": pred_row["id"],
+                    "prediction": pred_row["prediction"],
+                    "test": pred_row["test"],
+                    "metric": pred_row["metric"],
+                    "status": pred_row["status"],
+                    "notes": pred_row["notes"],
+                    "created_at": pred_row["created_at"],
+                    "updated_at": pred_row["updated_at"],
+                }
+            )
     conn.close()
     payload = []
     for row in rows:
@@ -604,6 +849,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 "user_notes": row["user_notes"],
                 "dive_result": dive_result,
                 "dive_timestamp": row["dive_timestamp"],
+                "predictions": predictions_by_tx.get(row["transmission_number"], []),
                 "is_convergence": "CONVERGENCE TRANSMISSION"
                 in (row["formatted_output"] or ""),
             }
