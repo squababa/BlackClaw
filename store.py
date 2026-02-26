@@ -391,6 +391,121 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _extract_variable_mapping_from_signature(signature: str | None) -> str:
+    """Extract variable_mapping component from stored mechanism signature text."""
+    if not signature:
+        return ""
+    for line in signature.splitlines():
+        if line.startswith("variable_mapping:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def list_near_misses(limit: int = 20) -> list[dict]:
+    """
+    List potential near-miss contradiction pairs.
+    v1 heuristic:
+    - same signature_cluster_id
+    - prediction text similarity is low, or variable_mapping text differs
+    - rows missing prediction text are skipped
+    """
+    conn = _connect()
+    rows = conn.execute(
+        """WITH latest_predictions AS (
+            SELECT transmission_number, MAX(id) AS max_id
+            FROM predictions
+            GROUP BY transmission_number
+        )
+        SELECT
+            t.transmission_number,
+            t.signature_cluster_id AS cluster_id,
+            t.mechanism_signature,
+            p.prediction
+        FROM transmissions t
+        INNER JOIN latest_predictions lp
+            ON lp.transmission_number = t.transmission_number
+        INNER JOIN predictions p
+            ON p.id = lp.max_id
+        WHERE COALESCE(TRIM(t.signature_cluster_id), '') <> ''
+        ORDER BY t.transmission_number ASC"""
+    ).fetchall()
+    conn.close()
+
+    grouped_by_cluster: dict[str, list[dict]] = {}
+    for row in rows:
+        cluster_id = (row["cluster_id"] or "").strip()
+        prediction = (row["prediction"] or "").strip()
+        if not cluster_id or not prediction:
+            continue
+        grouped_by_cluster.setdefault(cluster_id, []).append(
+            {
+                "transmission_number": row["transmission_number"],
+                "prediction": prediction,
+                "variable_mapping": _extract_variable_mapping_from_signature(
+                    row["mechanism_signature"]
+                ),
+            }
+        )
+
+    near_misses = []
+    similarity_threshold = 0.45
+    for cluster_id, entries in grouped_by_cluster.items():
+        if len(entries) < 2:
+            continue
+        ordered = sorted(entries, key=lambda item: item["transmission_number"])
+        for i in range(len(ordered) - 1):
+            for j in range(i + 1, len(ordered)):
+                a = ordered[i]
+                b = ordered[j]
+                prediction_similarity = _jaccard_similarity(
+                    a["prediction"], b["prediction"]
+                )
+                variable_mapping_mismatch = (
+                    a["variable_mapping"] != b["variable_mapping"]
+                )
+                if (
+                    prediction_similarity >= similarity_threshold
+                    and not variable_mapping_mismatch
+                ):
+                    continue
+                similarity_hint = (
+                    f"same_cluster_id;prediction_similarity={prediction_similarity:.2f}"
+                )
+                if variable_mapping_mismatch:
+                    similarity_hint += ";variable_mapping_mismatch"
+                near_misses.append(
+                    {
+                        "transmission_number_a": a["transmission_number"],
+                        "transmission_number_b": b["transmission_number"],
+                        "cluster_id": cluster_id,
+                        "similarity_hint": similarity_hint,
+                        "prediction_a": a["prediction"],
+                        "prediction_b": b["prediction"],
+                        "_prediction_similarity": prediction_similarity,
+                    }
+                )
+
+    near_misses.sort(
+        key=lambda item: (
+            item["_prediction_similarity"],
+            item["transmission_number_a"],
+            item["transmission_number_b"],
+        )
+    )
+    safe_limit = max(1, int(limit))
+    return [
+        {
+            "transmission_number_a": item["transmission_number_a"],
+            "transmission_number_b": item["transmission_number_b"],
+            "cluster_id": item["cluster_id"],
+            "similarity_hint": item["similarity_hint"],
+            "prediction_a": item["prediction_a"],
+            "prediction_b": item["prediction_b"],
+        }
+        for item in near_misses[:safe_limit]
+    ]
+
+
 def get_prediction(id: int) -> dict | None:
     """Get one prediction by id."""
     conn = _connect()

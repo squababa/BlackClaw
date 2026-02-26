@@ -28,6 +28,7 @@ from store import (
     save_transmission_dive,
     increment_llm_calls,
     list_predictions,
+    list_near_misses,
     get_prediction,
     update_prediction_status,
 )
@@ -157,6 +158,11 @@ def parse_args():
         "--predictions",
         action="store_true",
         help="List the latest 20 predictions and exit",
+    )
+    parser.add_argument(
+        "--near-misses",
+        action="store_true",
+        help="List near-miss contradiction pairs and exit",
     )
     parser.add_argument(
         "--prediction",
@@ -647,6 +653,7 @@ def main():
     prediction_action_count = sum(
         [
             args.predictions,
+            args.near_misses,
             args.prediction is not None,
             args.mark_supported is not None,
             args.mark_failed is not None,
@@ -658,7 +665,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --near-misses, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and prediction_action_count > 0:
@@ -727,6 +734,24 @@ def main():
                 summary = summary[:117].rstrip() + "..."
             print(
                 f"{row.get('id')}\t{row.get('status')}\t{row.get('transmission_number')}\t{summary}"
+            )
+        return
+
+    if args.near_misses:
+        rows = list_near_misses(limit=20)
+        if not rows:
+            print("[NearMisses] No near-miss pairs found.")
+            return
+        print("pair_id\tcluster_id\ttx_a\ttx_b\tshort_pred_a\tshort_pred_b")
+        for pair_id, row in enumerate(rows, start=1):
+            pred_a = (row.get("prediction_a") or "").replace("\n", " ").strip()
+            pred_b = (row.get("prediction_b") or "").replace("\n", " ").strip()
+            if len(pred_a) > 72:
+                pred_a = pred_a[:69].rstrip() + "..."
+            if len(pred_b) > 72:
+                pred_b = pred_b[:69].rstrip() + "..."
+            print(
+                f"{pair_id}\t{row.get('cluster_id')}\t{row.get('transmission_number_a')}\t{row.get('transmission_number_b')}\t{pred_a}\t{pred_b}"
             )
         return
 
