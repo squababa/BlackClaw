@@ -1,11 +1,102 @@
 """
-BlackClaw Transmission Formatting
+BlackClaw Transmission Formatting + Rewrite Pass
 Formats discoveries for terminal output using Rich.
 """
+import json
+import google.generativeai as genai
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
+from config import GEMINI_API_KEY, MODEL
+from sanitize import check_llm_output
+from store import increment_llm_calls
+from debug_log import log_gemini_output
+
 console = Console()
+genai.configure(api_key=GEMINI_API_KEY)
+_gemini_model = genai.GenerativeModel(MODEL)
+
+REWRITE_PROMPT = """Rewrite this discovery into a tight, compelling transmission. Rules:
+- Maximum 3 sentences
+- First sentence: state the connection as a surprising fact
+- Second sentence: explain the specific shared mechanism
+- Third sentence: state why this matters or what it implies
+- No jargon. A smart 16-year-old should understand it.
+- No hedge words (perhaps, might, could). State it directly.
+- If the connection is boring when stated plainly, say so and return {{"boring": true}}
+Connection to rewrite:
+Source domain: {source_domain}
+Target domain: {target_domain}
+Raw description: {raw_description}
+Respond with JSON: {{"boring": false, "rewritten": "your 3 sentences here"}} or {{"boring": true}}"""
+
+
+def _extract_json_substring(text: str) -> str | None:
+    """Extract parseable JSON from model output."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+    if cleaned.endswith("```"):
+        cleaned = cleaned.rsplit("```", 1)[0]
+    cleaned = cleaned.strip()
+    try:
+        json.loads(cleaned)
+        return cleaned
+    except Exception:
+        pass
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first == -1 or last == -1 or last <= first:
+        return None
+    candidate = cleaned[first:last + 1].strip()
+    try:
+        json.loads(candidate)
+        return candidate
+    except Exception:
+        return None
+
+
+def rewrite_transmission(
+    source_domain: str,
+    target_domain: str,
+    raw_description: str,
+) -> dict:
+    """
+    Rewrite a connection description into a concise transmission-ready form.
+    Returns: {"boring": bool, "rewritten": str | None}
+    """
+    prompt = REWRITE_PROMPT.format(
+        source_domain=source_domain,
+        target_domain=target_domain,
+        raw_description=raw_description or "No description available.",
+    )
+    try:
+        response = _gemini_model.generate_content(
+            prompt,
+            generation_config={
+                "max_output_tokens": 4096,
+                "response_mime_type": "application/json",
+            },
+        )
+        log_gemini_output("transmit", "rewrite", response)
+        increment_llm_calls(1)
+        raw = response.text if getattr(response, "text", None) else ""
+        checked = check_llm_output(raw)
+        if checked is None:
+            return {"boring": False, "rewritten": raw_description}
+        extracted = _extract_json_substring(checked)
+        if extracted is None:
+            return {"boring": False, "rewritten": raw_description}
+        data = json.loads(extracted)
+        if bool(data.get("boring", False)):
+            return {"boring": True, "rewritten": None}
+        rewritten = data.get("rewritten")
+        if isinstance(rewritten, str) and rewritten.strip():
+            return {"boring": False, "rewritten": rewritten.strip()}
+        return {"boring": False, "rewritten": raw_description}
+    except Exception:
+        return {"boring": False, "rewritten": raw_description}
+
+
 def format_transmission(
     transmission_number: int,
     source_domain: str,
@@ -29,29 +120,32 @@ def format_transmission(
 {path_str}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
     return text
+
+
 def format_convergence_transmission(
     transmission_number: int,
     domain_a: str,
     domain_b: str,
     times_found: int,
-    original_connections: list[str],
+    source_seeds: list[str],
     deep_dive_result: str,
 ) -> str:
-    """Format a higher-tier convergence transmission."""
-    if original_connections:
-        original_block = "\n".join(f"  - {line}" for line in original_connections[:5])
-    else:
-        original_block = "  - No original connections logged."
-    text = f""" ⚫ BLACKCLAW — CONVERGENCE TRANSMISSION #{transmission_number:04d}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Domains: {domain_a} ↔ {domain_b}
-  Independent discoveries: {times_found}
-  Original connections:
-{original_block}
-  Deep dive:
-  {deep_dive_result}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+    """Format a convergence transmission."""
+    cnum = f"C{transmission_number:03d}"
+    source_list = ", ".join(source_seeds) if source_seeds else "(unknown)"
+    border = '"' * 40
+    text = (
+        f" ! BLACKCLAW — CONVERGENCE TRANSMISSION #{cnum}\n"
+        f"{border}\n"
+        f"  {domain_a} ! {domain_b}\n"
+        f"  Independently discovered {times_found} times from: {source_list}\n"
+        f"  {deep_dive_result}\n"
+        f"  CONVERGENCE STRENGTH: {times_found}\n"
+        f"{border}"
+    )
     return text
+
+
 def print_transmission(formatted: str):
     """Print a formatted transmission to the terminal with Rich styling."""
     console.print()
@@ -63,6 +157,8 @@ def print_transmission(formatted: str):
         )
     )
     console.print()
+
+
 def print_cycle_status(
     cycle: int,
     seed_name: str,
@@ -81,6 +177,8 @@ def print_cycle_status(
         f"{status} | "
         f"Total: {total_transmissions}"
     )
+
+
 def print_startup():
     """Print startup banner."""
     banner = """
@@ -89,6 +187,8 @@ def print_startup():
     ───────────────────────────
     """
     console.print(banner, style="bold")
+
+
 def print_summary(stats: dict):
     """Print summary stats on shutdown."""
     console.print()

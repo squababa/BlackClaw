@@ -29,9 +29,13 @@ Criteria for REJECTING (not a real connection):
 - Surface-level analogy ("both involve growth")
 - Shared vocabulary but different mechanics
 - Common sense observations anyone would make
-- Also reject connections that would be obvious to someone with a college education in either field.
-- If a textbook in either domain already covers this overlap, it is not novel.
-- The goal is connections that would surprise an expert in both fields, not connections that confirm what they already know.
+ADDITIONAL REJECTION CRITERIA:
+- Reject connections that would be obvious to someone with a college education in either field
+- Reject connections where the shared pattern is a universal principle (emergence, feedback, networks, scaling, adaptation, evolution, optimization) — these connect everything to everything and are therefore meaningless
+- Reject if a textbook in either domain already covers this overlap
+- The goal is connections that would SURPRISE an expert in BOTH fields
+- If you have to use the word "both" more than once in your description, the connection is probably too vague
+- A good connection should make someone say "wait, really?" not "yeah, that makes sense"
 Be strict. Most jumps should fail. Only flag genuine structural parallels.
 Respond ONLY with valid JSON. No markdown. No explanation.
 If NO genuine connection: {{"no_connection": true}}

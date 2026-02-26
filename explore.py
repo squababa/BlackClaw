@@ -25,6 +25,10 @@ For each pattern, you MUST provide:
 - description: 1-2 sentences explaining the pattern in this domain
 - abstract_structure: Describe the SAME pattern using ZERO domain-specific language. Someone from a completely different field should understand the structure.
 - search_query: A 3-6 word search query designed to find this SAME abstract pattern in UNRELATED domains. Use no terms from the original domain.
+CRITICAL CONSTRAINTS:
+- Do NOT extract patterns that are generic across all systems (e.g., "feedback loops", "emergence", "self-organization", "network effects"). These are too broad to produce interesting lateral jumps.
+- Extract patterns that are SPECIFIC to this domain — the particular mathematical relationship, the specific mechanism, the exact dynamic. "Power law distribution with exponent ~2.5 in X" is good. "Things are connected in networks" is worthless.
+- The search_query must be specific enough that it would NOT match the original domain. If your search_query would return results about the original domain, rewrite it.
 Respond ONLY with valid JSON. No markdown. No explanation. Format:
 {{
   "patterns": [

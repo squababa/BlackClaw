@@ -10,9 +10,11 @@ from config import GEMINI_API_KEY, TAVILY_API_KEY, MODEL
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
 from debug_log import log_gemini_output
+
 genai.configure(api_key=GEMINI_API_KEY)
 _gemini_model = genai.GenerativeModel(MODEL)
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
+
 DISTANCE_PROMPT = """Rate the semantic distance between these two domains on a scale from 0.0 to 1.0.
 Domain A: {domain_a}
 Domain B: {domain_b}
@@ -24,17 +26,21 @@ Scale:
 0.8 = Rarely connected fields (e.g., music theory and thermodynamics)
 1.0 = No known relationship (e.g., medieval poetry and quantum computing)
 Respond with ONLY a JSON object: {{"distance": 0.X}}"""
-DEEP_DIVE_PROMPT = """This connection between {domain_a} and {domain_b} keeps appearing from different starting points. Why? What is the shared underlying mechanism?
-Original discovered connections:
-{connections}
-Provide a concise mechanism-level explanation."""
-NOVELTY_TERMS_PROMPT = """What would this connection be called in academic literature? Give me 3 alternative search terms that a researcher familiar with this overlap would use.
-Source domain: {source_domain}
-Target domain: {target_domain}
-Connection description:
-{connection_desc}
-Respond ONLY with valid JSON:
-{{"search_terms": ["term 1", "term 2", "term 3"]}}"""
+
+NOVELTY_QUERY_PROMPT = """I found a connection between {domain_a} and {domain_b}: {connection_description}
+What would researchers call this connection? Give me exactly 3 alternative search queries that an expert familiar with this overlap would use to find existing literature about it. Return ONLY a JSON object: {{"queries": ["query1", "query2", "query3"]}}"""
+
+PRIOR_ART_JUDGMENT_PROMPT = """Does this search result describe essentially the same connection as '{connection_description}' between {domain_a} and {domain_b}? Answer ONLY with JSON: {{"is_prior_art": true/false}}
+
+Search result title: {title}
+Search result excerpt:
+{excerpt}
+"""
+
+CONVERGENCE_DEEP_DIVE_PROMPT = """This connection between {domain_a} and {domain_b} has been independently discovered {times_found} times from different starting domains: {source_seeds_list}.
+The connection: {connection_description}
+Why does this keep appearing? What is the deeper underlying mechanism that makes these domains structurally related? Go beyond the surface pattern. What fundamental principle connects them that would explain why any exploration starting from unrelated fields keeps arriving here?
+Respond with a 3-5 sentence explanation."""
 
 
 def _extract_json_substring(text: str) -> str | None:
@@ -62,104 +68,137 @@ def _extract_json_substring(text: str) -> str | None:
         return None
 
 
-def _fallback_novelty_queries(
-    source_domain: str, target_domain: str, connection_desc: str
-) -> list[str]:
-    """Fallback search terms if term-generation JSON fails."""
-    desc = " ".join((connection_desc or "").split())
-    short_desc = desc[:120] if desc else "cross-domain shared mechanism"
-    return [
-        f"{source_domain} {target_domain} shared mechanism",
-        f"{source_domain} {target_domain} structural parallel",
-        short_desc,
-    ]
-
-
-def _generate_novelty_queries(
-    source_domain: str, target_domain: str, connection_desc: str
-) -> list[str]:
-    """Ask the LLM for three literature-native search terms."""
-    prompt = NOVELTY_TERMS_PROMPT.format(
-        source_domain=source_domain,
-        target_domain=target_domain,
-        connection_desc=connection_desc or "No connection description provided.",
-    )
+def _call_json(prompt: str, stage: str, max_output_tokens: int = 4096) -> dict | None:
+    """Run a JSON-only Gemini call and parse its response."""
     try:
         response = _gemini_model.generate_content(
             prompt,
             generation_config={
-                "max_output_tokens": 4096,
+                "max_output_tokens": max_output_tokens,
                 "response_mime_type": "application/json",
             },
         )
-        log_gemini_output("score", "novelty_terms", response)
+        log_gemini_output("score", stage, response)
         increment_llm_calls(1)
         raw = response.text if getattr(response, "text", None) else ""
         checked = check_llm_output(raw)
         if checked is None:
-            return []
+            return None
         extracted = _extract_json_substring(checked)
         if extracted is None:
-            return []
+            return None
         data = json.loads(extracted)
-        terms = data.get("search_terms", [])
-        if not isinstance(terms, list):
-            return []
-        out: list[str] = []
-        seen: set[str] = set()
-        for term in terms:
-            if not isinstance(term, str):
-                continue
-            clean = term.strip()
-            if not clean:
-                continue
-            key = clean.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(clean)
-            if len(out) == 3:
-                break
-        return out
+        if isinstance(data, dict):
+            return data
+        return None
     except Exception:
+        return None
+
+
+def _check_distance(source_domain: str, target_domain: str) -> float:
+    """Ask LLM to rate semantic distance between two domains."""
+    prompt = DISTANCE_PROMPT.format(domain_a=source_domain, domain_b=target_domain)
+    data = _call_json(prompt, "distance")
+    if not data:
+        return 0.5
+    try:
+        dist = float(data.get("distance", 0.5))
+        return max(0.0, min(1.0, dist))
+    except Exception:
+        return 0.5
+
+
+def _generate_novelty_queries(
+    source_domain: str,
+    target_domain: str,
+    connection_desc: str,
+) -> list[str]:
+    """Generate expert-level search terms for novelty lookup."""
+    prompt = NOVELTY_QUERY_PROMPT.format(
+        domain_a=source_domain,
+        domain_b=target_domain,
+        connection_description=connection_desc or "No connection description provided.",
+    )
+    data = _call_json(prompt, "novelty_queries")
+    if not data:
         return []
+    queries = data.get("queries", [])
+    if not isinstance(queries, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        if not isinstance(query, str):
+            continue
+        clean = " ".join(query.split())
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean)
+        if len(out) == 3:
+            break
+    return out
 
 
-def _is_relevant_prior_art(result: dict, query: str) -> bool:
-    """
-    Lightweight relevance gate for novelty search results.
-    Counts results that actually contain query terms, not just arbitrary hits.
-    """
+def _result_seems_relevant(result: dict, query: str) -> bool:
+    """Fast relevance filter before spending an LLM call."""
     title = (result.get("title", "") or "").strip()
     content = sanitize(result.get("content", "") or "")
-    text = f"{title} {content}".lower().strip()
-    if not text:
+    joined = f"{title} {content}".lower().strip()
+    if not joined:
         return False
-    tokens = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) >= 4]
+    tokens = [tok for tok in re.findall(r"[a-z0-9]+", query.lower()) if len(tok) >= 4]
     if not tokens:
         return True
-    unique_tokens = list(set(tokens))
-    matches = sum(1 for token in unique_tokens if token in text)
-    if len(unique_tokens) <= 2:
+    unique = list(set(tokens))
+    matches = sum(1 for tok in unique if tok in joined)
+    if len(unique) <= 2:
         return matches >= 1
     return matches >= 2
 
 
+def _judge_prior_art(
+    source_domain: str,
+    target_domain: str,
+    connection_desc: str,
+    result: dict,
+) -> bool:
+    """Use LLM to decide whether a result is true prior art for this connection."""
+    title = (result.get("title", "") or "Unknown")[:300]
+    excerpt = sanitize(result.get("content", "") or "")[:1200]
+    prompt = PRIOR_ART_JUDGMENT_PROMPT.format(
+        connection_description=connection_desc or "",
+        domain_a=source_domain,
+        domain_b=target_domain,
+        title=title,
+        excerpt=excerpt,
+    )
+    data = _call_json(prompt, "prior_art_judgment")
+    if not data:
+        return False
+    return bool(data.get("is_prior_art", False))
+
+
 def _check_novelty(
-    source_domain: str, target_domain: str, connection_desc: str
+    source_domain: str,
+    target_domain: str,
+    connection_desc: str,
 ) -> float:
     """
-    Check if this connection has been made before.
-    Search for prior art and return novelty score 0-1.
+    Smart novelty check using expert search terms + LLM prior-art judgment.
+    Scoring:
+      0 hits -> 1.0
+      1 hit  -> 0.6
+      2 hits -> 0.3
+      3+     -> 0.1
     """
-    queries = _generate_novelty_queries(
-        source_domain, target_domain, connection_desc
-    )
+    queries = _generate_novelty_queries(source_domain, target_domain, connection_desc)
     if not queries:
-        queries = _fallback_novelty_queries(
-            source_domain, target_domain, connection_desc
-        )
-    total_relevant = 0
+        return 0.5
+    prior_art_hits = 0
     for query in queries[:3]:
         try:
             results = _tavily.search(
@@ -169,69 +208,43 @@ def _check_novelty(
                 search_depth="basic",
             )
             increment_tavily_calls(1)
-            for result in results.get("results", []):
-                if _is_relevant_prior_art(result, query):
-                    total_relevant += 1
         except Exception:
             continue
-    # Drop novelty aggressively when prior-art results exist.
-    if total_relevant == 0:
+        for result in results.get("results", []):
+            if not _result_seems_relevant(result, query):
+                continue
+            if _judge_prior_art(source_domain, target_domain, connection_desc, result):
+                prior_art_hits += 1
+                if prior_art_hits >= 3:
+                    return 0.1
+    if prior_art_hits == 0:
         return 1.0
-    elif total_relevant <= 1:
-        return 0.25
-    elif total_relevant <= 3:
-        return 0.12
-    else:
-        return 0.05
-def _check_distance(source_domain: str, target_domain: str) -> float:
-    """Ask LLM to rate semantic distance between two domains."""
-    prompt = DISTANCE_PROMPT.format(domain_a=source_domain, domain_b=target_domain)
-    try:
-        response = _gemini_model.generate_content(
-            prompt,
-            generation_config={
-                "max_output_tokens": 4096,
-                "response_mime_type": "application/json",
-            },
-        )
-        log_gemini_output("score", "distance", response)
-        increment_llm_calls(1)
-        raw = response.text if getattr(response, "text", None) else ""
-        checked = check_llm_output(raw)
-        if checked is None:
-            return 0.5  # Default to mid if safety check fails
-        cleaned = checked.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[-1]
-        if cleaned.endswith("```"):
-            cleaned = cleaned.rsplit("```", 1)[0]
-        cleaned = cleaned.strip()
-        data = json.loads(cleaned)
-        dist = float(data.get("distance", 0.5))
-        return max(0.0, min(1.0, dist))
-    except Exception:
-        return 0.5  # Default on failure
+    if prior_art_hits == 1:
+        return 0.6
+    if prior_art_hits == 2:
+        return 0.3
+    return 0.1
+
+
 def score_connection(
-    connection: dict, source_domain: str, target_domain: str
+    connection: dict,
+    source_domain: str,
+    target_domain: str,
 ) -> dict:
     """
     Score a connection on three dimensions.
-    Returns: {
-        "novelty": float,
-        "distance": float,
-        "depth": float,
-        "total": float
-    }
+    Smart novelty check is only run when (depth + distance)/2 >= 0.4.
     """
-    novelty = _check_novelty(
-        source_domain,
-        target_domain,
-        connection.get("connection", ""),
-    )
     distance = _check_distance(source_domain, target_domain)
-    # Depth comes from the jump evaluation
     depth = float(connection.get("depth", 0.0))
-    # Weighted score
+    if ((depth + distance) / 2.0) < 0.4:
+        novelty = 0.5
+    else:
+        novelty = _check_novelty(
+            source_domain,
+            target_domain,
+            connection.get("connection", ""),
+        )
     total = (0.35 * novelty) + (0.30 * distance) + (0.35 * depth)
     return {
         "novelty": round(novelty, 3),
@@ -239,27 +252,30 @@ def score_connection(
         "depth": round(depth, 3),
         "total": round(total, 3),
     }
+
+
 def deep_dive_convergence(
-    domain_a: str, domain_b: str, original_connections: list[str]
+    domain_a: str,
+    domain_b: str,
+    times_found: int,
+    source_seeds_list: list[str],
+    connection_description: str,
 ) -> str:
     """Run a deep-dive explanation for repeated convergence findings."""
-    connections_text = "\n".join(
-        f"- {c}" for c in (original_connections or ["No prior connection text available."])
-    )
-    prompt = DEEP_DIVE_PROMPT.format(
+    seeds = ", ".join(source_seeds_list) if source_seeds_list else "(unknown seeds)"
+    prompt = CONVERGENCE_DEEP_DIVE_PROMPT.format(
         domain_a=domain_a,
         domain_b=domain_b,
-        connections=connections_text,
+        times_found=times_found,
+        source_seeds_list=seeds,
+        connection_description=connection_description or "No connection description available.",
     )
     try:
         response = _gemini_model.generate_content(
             prompt,
-            generation_config={
-                "max_output_tokens": 4096,
-                "response_mime_type": "application/json",
-            },
+            generation_config={"max_output_tokens": 1200},
         )
-        log_gemini_output("score", "deep_dive", response)
+        log_gemini_output("score", "convergence_deep_dive", response)
         increment_llm_calls(1)
         raw = response.text if getattr(response, "text", None) else ""
         checked = check_llm_output(raw)

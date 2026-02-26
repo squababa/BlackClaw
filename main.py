@@ -17,9 +17,9 @@ from store import (
     get_next_transmission_number,
     update_domain_visited,
     get_summary_stats,
-    record_convergence,
-    mark_convergence_deep_dive,
-    get_convergence_connections,
+    check_convergence,
+    save_deep_dive,
+    export_transmissions,
 )
 from seed import pick_seed
 from explore import dive
@@ -32,7 +32,10 @@ from transmit import (
     print_cycle_status,
     print_startup,
     print_summary,
+    rewrite_transmission,
 )
+
+
 def parse_args():
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
@@ -72,7 +75,14 @@ def parse_args():
         default=None,
         help="Use a custom seed topic instead of random picker (auto-generates search queries)",
     )
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="Export transmissions to transmissions_export.json and exit",
+    )
     return parser.parse_args()
+
+
 def build_custom_seed(topic: str) -> dict:
     """Build a seed object from a custom topic string."""
     topic = topic.strip()
@@ -84,6 +94,8 @@ def build_custom_seed(topic: str) -> dict:
             f"{topic} core mechanisms principles",
         ],
     }
+
+
 def build_derived_seed(topic: str) -> dict:
     """Build a derived seed from an intermediate hop target."""
     topic = topic.strip()
@@ -95,41 +107,132 @@ def build_derived_seed(topic: str) -> dict:
             f"{topic} core mechanisms principles",
         ],
     }
-def handle_convergence(
-    source_domain: str,
-    target_domain: str,
+
+
+def _effective_pattern_budget(pattern_count: int, max_patterns: int) -> int:
+    """Adaptive depth control based on pattern richness."""
+    safe_max = max(1, int(max_patterns))
+    if pattern_count >= 4:
+        return safe_max
+    if pattern_count >= 2:
+        return min(2, safe_max)
+    return 1
+
+
+def _handle_convergence(
+    domain_a: str,
+    domain_b: str,
+    source_seed: str,
+    connection_description: str,
     exploration_id: int,
 ) -> bool:
     """
-    Track convergence and emit a deep-dive convergence transmission when needed.
+    Track convergence and emit a convergence transmission when deep dive is triggered.
     Returns True if a convergence transmission was sent.
     """
-    convergence = record_convergence(source_domain, target_domain)
+    convergence = check_convergence(domain_a, domain_b, source_seed)
     if not convergence.get("needs_deep_dive", False):
         return False
-    original_connections = get_convergence_connections(
-        convergence["connection_key"],
-        target_domain,
-        limit=5,
-    )
     deep_dive_result = deep_dive_convergence(
         convergence["domain_a"],
         convergence["domain_b"],
-        original_connections,
+        int(convergence.get("times_found", 1)),
+        convergence.get("source_seeds", []),
+        connection_description,
     )
-    mark_convergence_deep_dive(convergence["connection_key"], deep_dive_result)
+    save_deep_dive(convergence["domain_a"], convergence["domain_b"], deep_dive_result)
     tx_num = get_next_transmission_number()
     formatted = format_convergence_transmission(
         transmission_number=tx_num,
         domain_a=convergence["domain_a"],
         domain_b=convergence["domain_b"],
-        times_found=convergence["times_found"],
-        original_connections=original_connections,
+        times_found=int(convergence.get("times_found", 1)),
+        source_seeds=convergence.get("source_seeds", []),
         deep_dive_result=deep_dive_result,
     )
     save_transmission(tx_num, exploration_id, formatted)
     print_transmission(formatted)
     return True
+
+
+def _score_store_and_transmit(
+    score_label: str,
+    source_domain: str,
+    source_category: str,
+    root_seed_name: str,
+    patterns_payload: list[dict],
+    connection: dict,
+    target_domain: str,
+    chain_path: list[str],
+    exploration_path: list[str],
+    threshold: float,
+) -> tuple[bool, float]:
+    """Score one connection, store it, run convergence handling, and transmit if valid."""
+    print(f"  [{score_label}] Evaluating...")
+    scores = score_connection(connection, source_domain, target_domain)
+    print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
+
+    passes_threshold = scores["total"] >= threshold
+    rewritten_description = connection.get("connection", "")
+    boring = False
+    if passes_threshold:
+        rewrite = rewrite_transmission(
+            source_domain=source_domain,
+            target_domain=target_domain,
+            raw_description=rewritten_description,
+        )
+        if rewrite.get("boring", False):
+            boring = True
+            print("  [Rewrite] Marked boring — skipping transmission")
+        else:
+            rewritten = rewrite.get("rewritten")
+            if isinstance(rewritten, str) and rewritten.strip():
+                rewritten_description = rewritten.strip()
+
+    should_transmit = passes_threshold and not boring
+    exploration_id = save_exploration(
+        seed_domain=source_domain,
+        seed_category=source_category,
+        patterns_found=patterns_payload,
+        jump_target_domain=target_domain,
+        connection_description=rewritten_description,
+        chain_path=chain_path,
+        novelty_score=scores["novelty"],
+        distance_score=scores["distance"],
+        depth_score=scores["depth"],
+        total_score=scores["total"],
+        transmitted=should_transmit,
+    )
+
+    transmitted = False
+    if _handle_convergence(
+        domain_a=source_domain,
+        domain_b=target_domain,
+        source_seed=root_seed_name,
+        connection_description=rewritten_description,
+        exploration_id=exploration_id,
+    ):
+        transmitted = True
+
+    if should_transmit:
+        tx_num = get_next_transmission_number()
+        tx_connection = dict(connection)
+        tx_connection["connection"] = rewritten_description
+        formatted = format_transmission(
+            transmission_number=tx_num,
+            source_domain=source_domain,
+            target_domain=target_domain,
+            connection=tx_connection,
+            scores=scores,
+            exploration_path=exploration_path,
+        )
+        save_transmission(tx_num, exploration_id, formatted)
+        print_transmission(formatted)
+        transmitted = True
+
+    return transmitted, scores["total"]
+
+
 def run_cycle(
     cycle_num: int,
     threshold: float,
@@ -144,140 +247,149 @@ def run_cycle(
     connections_found = 0
     max_hops_per_cycle = 2
     hops_completed = 0
-    # 1. Pick seed
+
     if custom_seed_topic:
         seed = build_custom_seed(custom_seed_topic)
     else:
         seed = pick_seed()
+
     print(f"\n  [Seed] {seed['name']} ({seed['category']})")
-    # Track domain visit
     update_domain_visited(seed["name"], seed["category"])
-    # 2. Dive — extract patterns
-    print(f"  [Dive] Searching and extracting patterns...")
+
+    print("  [Dive] Searching and extracting patterns...")
     patterns = dive(seed)
     print(f"  [Dive] Found {len(patterns)} patterns")
+
     if not patterns:
-        # Save failed exploration
         save_exploration(
             seed_domain=seed["name"],
             seed_category=seed["category"],
             patterns_found=None,
             chain_path=[seed["name"]],
         )
-        print_cycle_status(cycle_num, seed["name"], 0, 0, False, 
-                          get_next_transmission_number() - 1)
+        print_cycle_status(
+            cycle_num,
+            seed["name"],
+            0,
+            0,
+            False,
+            get_next_transmission_number() - 1,
+        )
         return False
-    # 3. For each pattern, attempt lateral jump
-    for i, pattern in enumerate(patterns[:max_patterns]):
+
+    effective_max = _effective_pattern_budget(len(patterns), max_patterns)
+    print(f"  [Adaptive] effective max patterns: {effective_max}")
+
+    consecutive_misses = 0
+    for i, pattern in enumerate(patterns[:effective_max]):
         if hops_completed >= max_hops_per_cycle:
             break
+
         print(f"  [Jump] Pattern {i+1}: {pattern['pattern_name']} → searching...")
         connection = lateral_jump(pattern, seed["name"], seed["category"])
         if connection is None:
-            print(f"  [Jump] No connection found")
+            print("  [Jump] No connection found")
+            consecutive_misses += 1
+            if consecutive_misses >= 2:
+                print("  [Abandon] 2 consecutive misses — moving on")
+                break
             continue
+
+        consecutive_misses = 0
         hops_completed += 1
         connections_found += 1
         target = connection.get("target_domain", "Unknown")
         print(f"  [Jump] Connection found: {seed['name']} ↔ {target}")
-        # 4. Score the connection
-        print(f"  [Score] Evaluating...")
-        scores = score_connection(connection, seed["name"], target)
-        print(f"  [Score] Total: {scores['total']:.3f} (threshold: {threshold})")
-        chain_path = [seed["name"], target]
-        # 5. Save exploration
-        exploration_id = save_exploration(
-            seed_domain=seed["name"],
-            seed_category=seed["category"],
-            patterns_found=patterns,
-            jump_target_domain=target,
-            connection_description=connection.get("connection"),
-            chain_path=chain_path,
-            novelty_score=scores["novelty"],
-            distance_score=scores["distance"],
-            depth_score=scores["depth"],
-            total_score=scores["total"],
-            transmitted=scores["total"] >= threshold,
+
+        tx_sent, _ = _score_store_and_transmit(
+            score_label="Score",
+            source_domain=seed["name"],
+            source_category=seed["category"],
+            root_seed_name=seed["name"],
+            patterns_payload=patterns,
+            connection=connection,
+            target_domain=target,
+            chain_path=[seed["name"], target],
+            exploration_path=[seed["name"], pattern.get("pattern_name", "Pattern"), target],
+            threshold=threshold,
         )
-        # 5b. Convergence tracking / deep dive
-        if handle_convergence(seed["name"], target, exploration_id):
+        if tx_sent:
             transmitted = True
-        # 6. Transmit if above threshold
-        if scores["total"] >= threshold:
-            tx_num = get_next_transmission_number()
-            path = [seed["name"], pattern["pattern_name"], target]
-            formatted = format_transmission(
-                transmission_number=tx_num,
-                source_domain=seed["name"],
-                target_domain=target,
-                connection=connection,
-                scores=scores,
-                exploration_path=path,
-            )
-            save_transmission(tx_num, exploration_id, formatted)
-            print_transmission(formatted)
-            transmitted = True
-        # 7. Multi-hop chain jump (A → B → C), capped at 2 hops total
+
+        # Multi-hop chain jump: A -> B -> C, max 2 hops total per cycle.
         if hops_completed >= max_hops_per_cycle:
             continue
+
         hop_seed = build_derived_seed(target)
         print(f"  [Hop-2 Seed] {hop_seed['name']} ({hop_seed['category']})")
         update_domain_visited(hop_seed["name"], hop_seed["category"])
-        print(f"  [Hop-2 Dive] Searching and extracting patterns...")
+
+        print("  [Hop-2 Dive] Searching and extracting patterns...")
         hop_patterns = dive(hop_seed)
         print(f"  [Hop-2 Dive] Found {len(hop_patterns)} patterns")
         if not hop_patterns:
             continue
-        for j, hop_pattern in enumerate(hop_patterns[:max_patterns]):
+
+        hop_effective_max = _effective_pattern_budget(len(hop_patterns), max_patterns)
+        hop_consecutive_misses = 0
+        first_pattern_name = (pattern.get("pattern_name", "") or "").strip().lower()
+        first_pattern_structure = (
+            (pattern.get("abstract_structure", "") or "").strip().lower()
+        )
+
+        for j, hop_pattern in enumerate(hop_patterns[:hop_effective_max]):
             if hops_completed >= max_hops_per_cycle:
                 break
-            print(f"  [Hop-2 Jump] Pattern {j+1}: {hop_pattern['pattern_name']} → searching...")
+
+            hop_name = (hop_pattern.get("pattern_name", "") or "").strip().lower()
+            hop_structure = (
+                (hop_pattern.get("abstract_structure", "") or "").strip().lower()
+            )
+
+            # Ensure hop-2 uses a different pattern than what connected A -> B.
+            if first_pattern_name and hop_name == first_pattern_name:
+                continue
+            if first_pattern_structure and hop_structure and hop_structure == first_pattern_structure:
+                continue
+
+            print(
+                f"  [Hop-2 Jump] Pattern {j+1}: "
+                f"{hop_pattern['pattern_name']} → searching..."
+            )
             second_connection = lateral_jump(
                 hop_pattern,
                 hop_seed["name"],
                 hop_seed["category"],
             )
             if second_connection is None:
-                print(f"  [Hop-2 Jump] No connection found")
+                print("  [Hop-2 Jump] No connection found")
+                hop_consecutive_misses += 1
+                if hop_consecutive_misses >= 2:
+                    print("  [Hop-2 Abandon] 2 consecutive misses — moving on")
+                    break
                 continue
+
             hops_completed += 1
             connections_found += 1
             target_2 = second_connection.get("target_domain", "Unknown")
             print(f"  [Hop-2 Jump] Connection found: {hop_seed['name']} ↔ {target_2}")
-            print(f"  [Hop-2 Score] Evaluating...")
-            scores_2 = score_connection(second_connection, hop_seed["name"], target_2)
-            print(f"  [Hop-2 Score] Total: {scores_2['total']:.3f} (threshold: {threshold})")
-            chain_path_2 = [seed["name"], target, target_2]
-            exploration_id_2 = save_exploration(
-                seed_domain=hop_seed["name"],
-                seed_category=hop_seed["category"],
-                patterns_found=hop_patterns,
-                jump_target_domain=target_2,
-                connection_description=second_connection.get("connection"),
-                chain_path=chain_path_2,
-                novelty_score=scores_2["novelty"],
-                distance_score=scores_2["distance"],
-                depth_score=scores_2["depth"],
-                total_score=scores_2["total"],
-                transmitted=scores_2["total"] >= threshold,
+
+            tx_sent_2, _ = _score_store_and_transmit(
+                score_label="Hop-2 Score",
+                source_domain=hop_seed["name"],
+                source_category=hop_seed["category"],
+                root_seed_name=seed["name"],
+                patterns_payload=hop_patterns,
+                connection=second_connection,
+                target_domain=target_2,
+                chain_path=[seed["name"], target, target_2],
+                exploration_path=[seed["name"], target, target_2],
+                threshold=threshold,
             )
-            if handle_convergence(hop_seed["name"], target_2, exploration_id_2):
-                transmitted = True
-            if scores_2["total"] >= threshold:
-                tx_num_2 = get_next_transmission_number()
-                formatted_2 = format_transmission(
-                    transmission_number=tx_num_2,
-                    source_domain=hop_seed["name"],
-                    target_domain=target_2,
-                    connection=second_connection,
-                    scores=scores_2,
-                    exploration_path=chain_path_2,
-                )
-                save_transmission(tx_num_2, exploration_id_2, formatted_2)
-                print_transmission(formatted_2)
+            if tx_sent_2:
                 transmitted = True
             break
-    # If we went through patterns but found no connections worth saving
+
     if connections_found == 0:
         save_exploration(
             seed_domain=seed["name"],
@@ -285,25 +397,41 @@ def run_cycle(
             patterns_found=patterns,
             chain_path=[seed["name"]],
         )
+
     total_tx = get_next_transmission_number() - 1
     print_cycle_status(
-        cycle_num, seed["name"], len(patterns), connections_found, transmitted, total_tx
+        cycle_num,
+        seed["name"],
+        len(patterns),
+        connections_found,
+        transmitted,
+        total_tx,
     )
     return transmitted
+
+
 def main():
     """Main entry point."""
     args = parse_args()
-    # Initialize database
+
     init_db()
-    # Startup
+
+    if args.export:
+        count = export_transmissions("transmissions_export.json")
+        print(f"[Export] Wrote {count} transmissions to transmissions_export.json")
+        return
+
     print_startup()
+
     if args.dry_run:
         print("  [!] Dry run mode not yet implemented. Exiting.")
         sys.exit(0)
+
     custom_seed = args.seed.strip() if args.seed else None
     if args.seed is not None and not custom_seed:
         print("  [!] --seed was provided but empty. Please provide a topic.")
         sys.exit(1)
+
     cycle = 1
     try:
         while True:
@@ -318,8 +446,10 @@ def main():
             cycle += 1
     except KeyboardInterrupt:
         pass
-    # Shutdown summary
+
     stats = get_summary_stats()
     print_summary(stats)
+
+
 if __name__ == "__main__":
     main()

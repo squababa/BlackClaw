@@ -40,6 +40,7 @@ def init_db():
             timestamp TEXT NOT NULL,
             exploration_id INTEGER NOT NULL,
             formatted_output TEXT NOT NULL,
+            exportable INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY (exploration_id) REFERENCES explorations(id)
         );
         CREATE TABLE IF NOT EXISTS domains_visited (
@@ -57,9 +58,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS convergences (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             connection_key TEXT NOT NULL UNIQUE,
+            domain_a TEXT NOT NULL,
+            domain_b TEXT NOT NULL,
             times_found INTEGER NOT NULL DEFAULT 1,
             first_found TEXT NOT NULL,
             last_found TEXT NOT NULL,
+            source_seeds TEXT NOT NULL,
             deep_dive_done INTEGER NOT NULL DEFAULT 0,
             deep_dive_result TEXT
         );
@@ -73,6 +77,8 @@ def init_db():
             ON api_usage(date);
         CREATE INDEX IF NOT EXISTS idx_convergences_key
             ON convergences(connection_key);
+        CREATE INDEX IF NOT EXISTS idx_convergences_times
+            ON convergences(times_found);
     """)
     # Migration for older DB files created before chain_path existed.
     existing_columns = {
@@ -80,6 +86,44 @@ def init_db():
     }
     if "chain_path" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN chain_path TEXT")
+    transmission_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(transmissions)").fetchall()
+    }
+    if "exportable" not in transmission_columns:
+        conn.execute(
+            "ALTER TABLE transmissions ADD COLUMN exportable INTEGER NOT NULL DEFAULT 1"
+        )
+    convergence_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(convergences)").fetchall()
+    }
+    if "domain_a" not in convergence_columns:
+        conn.execute("ALTER TABLE convergences ADD COLUMN domain_a TEXT")
+    if "domain_b" not in convergence_columns:
+        conn.execute("ALTER TABLE convergences ADD COLUMN domain_b TEXT")
+    if "source_seeds" not in convergence_columns:
+        conn.execute("ALTER TABLE convergences ADD COLUMN source_seeds TEXT")
+    conn.execute(
+        """UPDATE convergences
+        SET source_seeds = COALESCE(NULLIF(source_seeds, ''), '[]')"""
+    )
+    # Backfill missing normalized pair columns for older rows.
+    rows = conn.execute(
+        "SELECT connection_key, domain_a, domain_b FROM convergences"
+    ).fetchall()
+    for row in rows:
+        needs_fill = (row["domain_a"] is None) or (row["domain_b"] is None)
+        if not needs_fill:
+            continue
+        a, b = _split_connection_key(row["connection_key"])
+        conn.execute(
+            """UPDATE convergences
+            SET domain_a = COALESCE(domain_a, ?), domain_b = COALESCE(domain_b, ?)
+            WHERE connection_key = ?""",
+            (a, b, row["connection_key"]),
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_convergences_times ON convergences(times_found)"
+    )
     conn.commit()
     conn.close()
 def _now() -> str:
@@ -134,14 +178,21 @@ def save_transmission(
     transmission_number: int,
     exploration_id: int,
     formatted_output: str,
+    exportable: bool = True,
 ) -> int:
     """Save a transmission. Returns transmission id."""
     conn = _connect()
     cursor = conn.execute(
         """INSERT INTO transmissions
-        (transmission_number, timestamp, exploration_id, formatted_output)
-        VALUES (?, ?, ?, ?)""",
-        (transmission_number, _now(), exploration_id, formatted_output),
+        (transmission_number, timestamp, exploration_id, formatted_output, exportable)
+        VALUES (?, ?, ?, ?, ?)""",
+        (
+            transmission_number,
+            _now(),
+            exploration_id,
+            formatted_output,
+            1 if exportable else 0,
+        ),
     )
     tid = cursor.lastrowid
     conn.commit()
@@ -157,6 +208,61 @@ def get_next_transmission_number() -> int:
     if row and row["max_num"] is not None:
         return row["max_num"] + 1
     return 1
+
+
+def export_transmissions(path: str = "transmissions_export.json") -> int:
+    """Export all exportable transmissions as JSON for sharing."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT
+            t.transmission_number,
+            t.timestamp,
+            t.formatted_output,
+            e.seed_domain,
+            e.jump_target_domain,
+            e.connection_description,
+            e.novelty_score,
+            e.depth_score,
+            e.distance_score,
+            e.total_score,
+            e.chain_path
+        FROM transmissions t
+        LEFT JOIN explorations e ON e.id = t.exploration_id
+        WHERE t.exportable = 1
+        ORDER BY t.transmission_number ASC"""
+    ).fetchall()
+    conn.close()
+    payload = []
+    for row in rows:
+        try:
+            chain_path = json.loads(row["chain_path"]) if row["chain_path"] else []
+        except Exception:
+            chain_path = []
+        payload.append(
+            {
+                "number": row["transmission_number"],
+                "timestamp": row["timestamp"],
+                "source_domain": row["seed_domain"],
+                "target_domain": row["jump_target_domain"],
+                "connection": row["connection_description"],
+                "scores": {
+                    "novelty": row["novelty_score"],
+                    "depth": row["depth_score"],
+                    "distance": row["distance_score"],
+                    "total": row["total_score"],
+                },
+                "chain_path": chain_path,
+                "is_convergence": "CONVERGENCE TRANSMISSION"
+                in (row["formatted_output"] or ""),
+            }
+        )
+    export_path = Path(path)
+    export_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return len(payload)
 # --- Domains ---
 def update_domain_visited(domain_name: str, category: str):
     """Track that a domain was visited."""
@@ -190,59 +296,76 @@ def get_recent_domains(n: int = 20) -> list[str]:
     ).fetchall()
     conn.close()
     return [row["seed_domain"] for row in rows]
-def _connection_key(domain_a: str, domain_b: str) -> str:
-    """Build a canonical sorted key for a pair of domains."""
-    a = (domain_a or "").strip()
-    b = (domain_b or "").strip()
-    left, right = sorted([a, b], key=lambda x: x.lower())
-    return f"{left} || {right}"
+def get_connection_key(domain_a: str, domain_b: str) -> str:
+    """Create a normalized key from two domain names (sorted alphabetically)."""
+    pair = sorted(
+        [(domain_a or "").lower().strip(), (domain_b or "").lower().strip()]
+    )
+    return f"{pair[0]}::{pair[1]}"
+
+
 def _split_connection_key(connection_key: str) -> tuple[str, str]:
     """Split canonical key into domain names."""
-    parts = connection_key.split(" || ", 1)
+    if "::" in connection_key:
+        parts = connection_key.split("::", 1)
+    else:
+        parts = connection_key.split(" || ", 1)
     if len(parts) == 2:
         return parts[0], parts[1]
     return connection_key, ""
-def record_convergence(source_domain: str, target_domain: str) -> dict:
+
+
+def _sorted_pair(domain_a: str, domain_b: str) -> tuple[str, str]:
+    """Return a stable sorted domain pair preserving original text casing."""
+    clean_a = (domain_a or "").strip()
+    clean_b = (domain_b or "").strip()
+    ordered = sorted([clean_a, clean_b], key=lambda x: x.lower())
+    return ordered[0], ordered[1]
+
+
+def check_convergence(domain_a: str, domain_b: str, source_seed: str) -> dict:
     """
-    Track repeated discoveries of domain connections.
-    Similarity rule:
-    - exact pair match (source/target regardless of order), OR
-    - any prior convergence involving the same target domain.
-    Returns the convergence row as a dict plus:
-    - domain_a, domain_b
-    - needs_deep_dive (bool)
+    Check if this connection has been found before and update tracking.
+    Returns:
+      {"times_found": int, "is_new": bool, "needs_deep_dive": bool, ...}
     """
-    key = _connection_key(source_domain, target_domain)
+    key = get_connection_key(domain_a, domain_b)
     now = _now()
-    target_lower = (target_domain or "").strip().lower()
+    sorted_a, sorted_b = _sorted_pair(domain_a, domain_b)
+    seed = (source_seed or "").strip()
     conn = _connect()
     existing = conn.execute(
         "SELECT * FROM convergences WHERE connection_key = ?",
         (key,),
     ).fetchone()
+    is_new = existing is None
     if existing:
+        try:
+            seeds = json.loads(existing["source_seeds"] or "[]")
+            if not isinstance(seeds, list):
+                seeds = []
+        except Exception:
+            seeds = []
+        if seed and seed not in seeds:
+            seeds.append(seed)
         conn.execute(
             """UPDATE convergences
-            SET times_found = times_found + 1, last_found = ?
+            SET times_found = times_found + 1,
+                last_found = ?,
+                source_seeds = ?,
+                domain_a = COALESCE(NULLIF(domain_a, ''), ?),
+                domain_b = COALESCE(NULLIF(domain_b, ''), ?)
             WHERE connection_key = ?""",
-            (now, key),
+            (now, json.dumps(seeds), sorted_a, sorted_b, key),
         )
     else:
-        rows = conn.execute(
-            "SELECT connection_key FROM convergences"
-        ).fetchall()
-        similar_target_seen = False
-        for row in rows:
-            d1, d2 = _split_connection_key(row["connection_key"])
-            if target_lower in {d1.lower(), d2.lower()}:
-                similar_target_seen = True
-                break
-        initial_count = 2 if similar_target_seen else 1
+        seeds = [seed] if seed else []
         conn.execute(
             """INSERT INTO convergences
-            (connection_key, times_found, first_found, last_found, deep_dive_done, deep_dive_result)
-            VALUES (?, ?, ?, ?, 0, NULL)""",
-            (key, initial_count, now, now),
+            (connection_key, domain_a, domain_b, times_found, first_found, last_found,
+             source_seeds, deep_dive_done, deep_dive_result)
+            VALUES (?, ?, ?, 1, ?, ?, ?, 0, NULL)""",
+            (key, sorted_a, sorted_b, now, now, json.dumps(seeds)),
         )
     row = conn.execute(
         "SELECT * FROM convergences WHERE connection_key = ?",
@@ -251,32 +374,35 @@ def record_convergence(source_domain: str, target_domain: str) -> dict:
     conn.commit()
     conn.close()
     out = dict(row)
-    a, b = _split_connection_key(out["connection_key"])
-    out["domain_a"] = a
-    out["domain_b"] = b
+    try:
+        out["source_seeds"] = json.loads(out.get("source_seeds") or "[]")
+    except Exception:
+        out["source_seeds"] = []
+    out["is_new"] = is_new
     out["needs_deep_dive"] = (
         out["times_found"] >= 2 and not bool(out["deep_dive_done"])
     )
     return out
-def mark_convergence_deep_dive(connection_key: str, deep_dive_result: str):
-    """Mark convergence deep-dive as completed and store result."""
+
+
+def save_deep_dive(domain_a: str, domain_b: str, result: str):
+    """Save deep dive result for a convergent connection."""
+    key = get_connection_key(domain_a, domain_b)
     conn = _connect()
     conn.execute(
         """UPDATE convergences
         SET deep_dive_done = 1, deep_dive_result = ?, last_found = ?
         WHERE connection_key = ?""",
-        (deep_dive_result, _now(), connection_key),
+        (result, _now(), key),
     )
     conn.commit()
     conn.close()
+
+
 def get_convergence_connections(
-    connection_key: str, target_domain: str, limit: int = 5
+    domain_a: str, domain_b: str, limit: int = 5
 ) -> list[str]:
-    """
-    Get historical connection descriptions for a convergence pair.
-    Includes direct pair matches and entries involving the same target domain.
-    """
-    domain_a, domain_b = _split_connection_key(connection_key)
+    """Get historical connection descriptions for a convergence pair."""
     conn = _connect()
     rows = conn.execute(
         """SELECT seed_domain, jump_target_domain, connection_description
@@ -285,11 +411,10 @@ def get_convergence_connections(
           AND (
             (LOWER(seed_domain) = LOWER(?) AND LOWER(jump_target_domain) = LOWER(?))
             OR (LOWER(seed_domain) = LOWER(?) AND LOWER(jump_target_domain) = LOWER(?))
-            OR LOWER(jump_target_domain) = LOWER(?)
           )
         ORDER BY timestamp DESC
         LIMIT ?""",
-        (domain_a, domain_b, domain_b, domain_a, target_domain, limit),
+        (domain_a, domain_b, domain_b, domain_a, limit),
     ).fetchall()
     conn.close()
     out = []
@@ -298,6 +423,16 @@ def get_convergence_connections(
             f"{row['seed_domain']} → {row['jump_target_domain']}: {row['connection_description']}"
         )
     return out
+
+
+# Compatibility wrappers for existing call sites.
+def record_convergence(source_domain: str, target_domain: str) -> dict:
+    return check_convergence(source_domain, target_domain, source_domain)
+
+
+def mark_convergence_deep_dive(connection_key: str, deep_dive_result: str):
+    domain_a, domain_b = _split_connection_key(connection_key)
+    save_deep_dive(domain_a, domain_b, deep_dive_result)
 # --- API Usage Tracking ---
 def increment_tavily_calls(count: int = 1):
     """Track Tavily API usage for the day."""
