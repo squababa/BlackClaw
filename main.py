@@ -14,6 +14,7 @@ from store import (
     init_db,
     save_exploration,
     save_transmission,
+    build_mechanism_signature,
     get_next_transmission_number,
     update_domain_visited,
     get_summary_stats,
@@ -235,7 +236,13 @@ def _score_store_and_transmit(
             scores=scores,
             exploration_path=exploration_path,
         )
-        save_transmission(tx_num, exploration_id, formatted)
+        signature = build_mechanism_signature(tx_connection)
+        save_transmission(
+            tx_num,
+            exploration_id,
+            formatted,
+            mechanism_signature=signature,
+        )
         print_transmission(formatted)
         transmitted = True
 

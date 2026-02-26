@@ -4,6 +4,7 @@ SQLite storage for explorations, transmissions, and domain tracking.
 All queries use parameterized statements — no string interpolation.
 """
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,8 @@ def init_db():
             timestamp TEXT NOT NULL,
             exploration_id INTEGER NOT NULL,
             formatted_output TEXT NOT NULL,
+            mechanism_signature TEXT,
+            signature_cluster_id TEXT,
             exportable INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY (exploration_id) REFERENCES explorations(id)
         );
@@ -67,6 +70,14 @@ def init_db():
             deep_dive_done INTEGER NOT NULL DEFAULT 0,
             deep_dive_result TEXT
         );
+        CREATE TABLE IF NOT EXISTS signature_convergences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signature TEXT NOT NULL UNIQUE,
+            cluster_id TEXT,
+            times_found INTEGER NOT NULL DEFAULT 1,
+            first_found TEXT NOT NULL,
+            last_found TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_explorations_timestamp
             ON explorations(timestamp);
         CREATE INDEX IF NOT EXISTS idx_explorations_seed
@@ -79,6 +90,10 @@ def init_db():
             ON convergences(connection_key);
         CREATE INDEX IF NOT EXISTS idx_convergences_times
             ON convergences(times_found);
+        CREATE INDEX IF NOT EXISTS idx_signature_convergences_signature
+            ON signature_convergences(signature);
+        CREATE INDEX IF NOT EXISTS idx_signature_convergences_cluster
+            ON signature_convergences(cluster_id);
     """)
     # Migration for older DB files created before chain_path existed.
     existing_columns = {
@@ -93,6 +108,10 @@ def init_db():
         conn.execute(
             "ALTER TABLE transmissions ADD COLUMN exportable INTEGER NOT NULL DEFAULT 1"
         )
+    if "mechanism_signature" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN mechanism_signature TEXT")
+    if "signature_cluster_id" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN signature_cluster_id TEXT")
     convergence_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(convergences)").fetchall()
     }
@@ -178,19 +197,28 @@ def save_transmission(
     transmission_number: int,
     exploration_id: int,
     formatted_output: str,
+    mechanism_signature: str | None = None,
     exportable: bool = True,
 ) -> int:
     """Save a transmission. Returns transmission id."""
     conn = _connect()
+    cluster_id = None
+    clean_signature = (mechanism_signature or "").strip()
+    if clean_signature:
+        sig_result = _record_signature_convergence(conn, clean_signature)
+        cluster_id = sig_result.get("cluster_id")
     cursor = conn.execute(
         """INSERT INTO transmissions
-        (transmission_number, timestamp, exploration_id, formatted_output, exportable)
-        VALUES (?, ?, ?, ?, ?)""",
+        (transmission_number, timestamp, exploration_id, formatted_output,
+         mechanism_signature, signature_cluster_id, exportable)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             transmission_number,
             _now(),
             exploration_id,
             formatted_output,
+            clean_signature or None,
+            cluster_id,
             1 if exportable else 0,
         ),
     )
@@ -210,6 +238,145 @@ def get_next_transmission_number() -> int:
     return 1
 
 
+def _canonical_text(value) -> str:
+    """Normalize a signature component into stable text."""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value).strip()
+
+
+def build_mechanism_signature(connection: dict) -> str:
+    """
+    Build a signature string from mechanism + variable_mapping + prediction.
+    Falls back to existing fields to avoid empty signatures in current payloads.
+    """
+    mechanism = _canonical_text(
+        connection.get("mechanism") or connection.get("connection") or ""
+    )
+    variable_mapping = _canonical_text(connection.get("variable_mapping"))
+    prediction = _canonical_text(
+        connection.get("prediction") or connection.get("evidence") or ""
+    )
+    signature = (
+        f"mechanism:{mechanism}\n"
+        f"variable_mapping:{variable_mapping}\n"
+        f"prediction:{prediction}"
+    )
+    return signature.strip()
+
+
+def _signature_tokens(text: str) -> set[str]:
+    """Tokenize signature text for cheap lexical similarity."""
+    return {tok for tok in re.findall(r"[a-z0-9]+", text.lower()) if len(tok) >= 3}
+
+
+def _jaccard_similarity(text_a: str, text_b: str) -> float:
+    """Simple set overlap score in [0, 1]."""
+    a = _signature_tokens(text_a)
+    b = _signature_tokens(text_b)
+    if not a or not b:
+        return 0.0
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
+def _embedding_similarity_stub(text_a: str, text_b: str) -> float | None:
+    """Placeholder for future embedding-based signature similarity."""
+    _ = (text_a, text_b)
+    return None
+
+
+def _signature_similarity(text_a: str, text_b: str) -> float:
+    """Use lexical similarity now; swap to embeddings later."""
+    embedded = _embedding_similarity_stub(text_a, text_b)
+    if embedded is not None:
+        return embedded
+    return _jaccard_similarity(text_a, text_b)
+
+
+def _cluster_id_for_row(row: sqlite3.Row) -> str:
+    existing = (row["cluster_id"] or "").strip()
+    if existing:
+        return existing
+    return f"SIG{int(row['id']):04d}"
+
+
+def _record_signature_convergence(conn: sqlite3.Connection, signature: str) -> dict:
+    """
+    Compare against past mechanism signatures.
+    >0.92 => same discovery (increment times_found)
+    0.80-0.92 => same cluster (reuse cluster_id)
+    """
+    now = _now()
+    rows = conn.execute(
+        """SELECT id, signature, cluster_id, times_found
+        FROM signature_convergences"""
+    ).fetchall()
+    if not rows:
+        conn.execute(
+            """INSERT INTO signature_convergences
+            (signature, cluster_id, times_found, first_found, last_found)
+            VALUES (?, NULL, 1, ?, ?)""",
+            (signature, now, now),
+        )
+        return {"cluster_id": None, "similarity": 0.0, "is_same_discovery": False}
+
+    best_row = None
+    best_score = -1.0
+    for row in rows:
+        score = _signature_similarity(signature, row["signature"] or "")
+        if score > best_score:
+            best_score = score
+            best_row = row
+
+    if best_row is not None and best_score > 0.92:
+        cluster_id = _cluster_id_for_row(best_row)
+        conn.execute(
+            """UPDATE signature_convergences
+            SET times_found = times_found + 1,
+                last_found = ?,
+                cluster_id = ?
+            WHERE id = ?""",
+            (now, cluster_id, best_row["id"]),
+        )
+        return {
+            "cluster_id": cluster_id,
+            "similarity": best_score,
+            "is_same_discovery": True,
+        }
+
+    if best_row is not None and 0.80 <= best_score <= 0.92:
+        cluster_id = _cluster_id_for_row(best_row)
+        if not (best_row["cluster_id"] or "").strip():
+            conn.execute(
+                "UPDATE signature_convergences SET cluster_id = ? WHERE id = ?",
+                (cluster_id, best_row["id"]),
+            )
+        conn.execute(
+            """INSERT INTO signature_convergences
+            (signature, cluster_id, times_found, first_found, last_found)
+            VALUES (?, ?, 1, ?, ?)""",
+            (signature, cluster_id, now, now),
+        )
+        return {
+            "cluster_id": cluster_id,
+            "similarity": best_score,
+            "is_same_discovery": False,
+        }
+
+    conn.execute(
+        """INSERT INTO signature_convergences
+        (signature, cluster_id, times_found, first_found, last_found)
+        VALUES (?, NULL, 1, ?, ?)""",
+        (signature, now, now),
+    )
+    return {"cluster_id": None, "similarity": max(0.0, best_score), "is_same_discovery": False}
+
+
 def export_transmissions(path: str = "transmissions_export.json") -> int:
     """Export all exportable transmissions as JSON for sharing."""
     conn = _connect()
@@ -218,6 +385,8 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
             t.transmission_number,
             t.timestamp,
             t.formatted_output,
+            t.mechanism_signature,
+            t.signature_cluster_id,
             e.seed_domain,
             e.jump_target_domain,
             e.connection_description,
@@ -245,6 +414,8 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 "source_domain": row["seed_domain"],
                 "target_domain": row["jump_target_domain"],
                 "connection": row["connection_description"],
+                "mechanism_signature": row["mechanism_signature"],
+                "cluster_id": row["signature_cluster_id"],
                 "scores": {
                     "novelty": row["novelty_score"],
                     "depth": row["depth_score"],
