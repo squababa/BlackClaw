@@ -6,7 +6,80 @@ import argparse
 import json
 import sys
 import time
+import types
+import os
 from datetime import datetime, timezone
+
+
+def _maybe_run_audit_only_mode() -> None:
+    """Run reasoning audit before heavy imports when --audit-reasoning is requested."""
+    if "--audit-reasoning" not in sys.argv[1:]:
+        return
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--audit-reasoning", action="store_true")
+    parser.add_argument(
+        "--audit-reasoning-window",
+        "--audit-limit",
+        dest="audit_reasoning_window",
+        type=int,
+        default=200,
+    )
+    args, _ = parser.parse_known_args()
+    if not args.audit_reasoning:
+        return
+    if args.audit_reasoning_window <= 0:
+        print("  [!] --audit-reasoning-window requires a positive integer.")
+        sys.exit(1)
+
+    # Inject minimal config for store.py without requiring API keys.
+    if "config" not in sys.modules:
+        cfg = types.ModuleType("config")
+        cfg.DB_PATH = os.getenv("BLACKCLAW_DB_PATH", "blackclaw.db")
+        try:
+            cfg.INVARIANCE_KILL_THRESHOLD = float(
+                os.getenv("BLACKCLAW_INVARIANCE_KILL_THRESHOLD", "0.4")
+            )
+        except ValueError:
+            cfg.INVARIANCE_KILL_THRESHOLD = 0.4
+        sys.modules["config"] = cfg
+
+    from store import init_db, get_reasoning_failure_audit
+
+    init_db()
+    report = get_reasoning_failure_audit(limit=args.audit_reasoning_window)
+    if report.get("insufficient_data"):
+        print("Not enough data yet")
+        sys.exit(0)
+    run_at_utc = datetime.now(timezone.utc).isoformat()
+    sample_size = int(report.get("sample_size", 0))
+    total_explorations = int(report.get("total_explorations", 0))
+    print("reasoning_audit")
+    print(f"run_at_utc: {run_at_utc}")
+    print(f"window_used: {sample_size}")
+    print(f"window_requested: {int(report.get('limit', args.audit_reasoning_window))}")
+    print(f"total_explorations: {total_explorations}")
+    for stage_key, stage_label in (
+        ("validator", "validator_rejections"),
+        ("adversarial", "adversarial_kills"),
+        ("invariance", "invariance_kills"),
+    ):
+        stage = report.get(stage_key, {})
+        print(f"{stage_label}_total: {int(stage.get('total', 0))}")
+        print(f"{stage_label}_reason_total: {int(stage.get('reason_instances_total', 0))}")
+        print(f"{stage_label}_top10:")
+        top_reasons = stage.get("top_reasons") or []
+        if not top_reasons:
+            print("0\t(none)")
+            continue
+        for reason_row in top_reasons:
+            print(f"{int(reason_row.get('count', 0))}\t{reason_row.get('reason', '')}")
+    print(f"transmission_accepted_count: {int(report.get('transmission_accepted_count', 0))}")
+    sys.exit(0)
+
+
+_maybe_run_audit_only_mode()
+
 from config import (
     TRANSMIT_THRESHOLD,
     INVARIANCE_KILL_THRESHOLD,
