@@ -459,7 +459,8 @@ def get_reasoning_failure_audit(limit: int = 200) -> dict:
         """SELECT
             validation_json,
             adversarial_rubric_json,
-            invariance_json
+            invariance_json,
+            transmitted
         FROM explorations
         ORDER BY id DESC
         LIMIT ?""",
@@ -473,8 +474,12 @@ def get_reasoning_failure_audit(limit: int = 200) -> dict:
     validator_total = 0
     adversarial_total = 0
     invariance_total = 0
+    transmission_accepted_count = 0
 
     for row in rows:
+        if int(row["transmitted"] or 0) == 1:
+            transmission_accepted_count += 1
+
         validation = _json_object_or_empty(row["validation_json"])
         validation_list = _clean_reason_list(
             validation.get("rejection_reasons")
@@ -536,6 +541,7 @@ def get_reasoning_failure_audit(limit: int = 200) -> dict:
             "reason_instances_total": int(sum(invariance_reasons.values())),
             "top_reasons": _top_reason_rows(invariance_reasons, top_n=10),
         },
+        "transmission_accepted_count": transmission_accepted_count,
     }
 
 

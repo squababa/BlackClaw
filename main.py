@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from config import (
     TRANSMIT_THRESHOLD,
     INVARIANCE_KILL_THRESHOLD,
@@ -171,7 +172,9 @@ def parse_args():
         help="Report validator/adversarial/invariance failure reasons and exit",
     )
     parser.add_argument(
+        "--audit-reasoning-window",
         "--audit-limit",
+        dest="audit_reasoning_window",
         type=int,
         default=200,
         metavar="N",
@@ -694,8 +697,8 @@ def main():
             "  [!] Prediction/audit actions cannot be combined with --star, --dismiss, or --dive."
         )
         sys.exit(1)
-    if args.audit_reasoning and args.audit_limit <= 0:
-        print("  [!] --audit-limit requires a positive integer.")
+    if args.audit_reasoning and args.audit_reasoning_window <= 0:
+        print("  [!] --audit-reasoning-window requires a positive integer.")
         sys.exit(1)
     if (
         args.note is not None
@@ -780,32 +783,34 @@ def main():
         return
 
     if args.audit_reasoning:
-        report = get_reasoning_failure_audit(limit=args.audit_limit)
+        report = get_reasoning_failure_audit(limit=args.audit_reasoning_window)
         if report.get("insufficient_data"):
             print("Not enough data yet")
             return
-        sample_size = report.get("sample_size", 0)
-        total_explorations = report.get("total_explorations", 0)
-        print(
-            f"[ReasoningAudit] Last {sample_size} explorations (total stored: {total_explorations})"
-        )
+        run_at_utc = datetime.now(timezone.utc).isoformat()
+        sample_size = int(report.get("sample_size", 0))
+        total_explorations = int(report.get("total_explorations", 0))
+        print("reasoning_audit")
+        print(f"run_at_utc: {run_at_utc}")
+        print(f"window_used: {sample_size}")
+        print(f"window_requested: {int(report.get('limit', args.audit_reasoning_window))}")
+        print(f"total_explorations: {total_explorations}")
         for stage_key, stage_label in (
-            ("validator", "validator"),
-            ("adversarial", "adversarial"),
-            ("invariance", "invariance"),
+            ("validator", "validator_rejections"),
+            ("adversarial", "adversarial_kills"),
+            ("invariance", "invariance_kills"),
         ):
             stage = report.get(stage_key, {})
-            print(
-                f"{stage_label}\ttotal={stage.get('total', 0)}\treason_instances={stage.get('reason_instances_total', 0)}"
-            )
+            print(f"{stage_label}_total: {int(stage.get('total', 0))}")
+            print(f"{stage_label}_reason_total: {int(stage.get('reason_instances_total', 0))}")
+            print(f"{stage_label}_top10:")
             top_reasons = stage.get("top_reasons") or []
             if not top_reasons:
-                print("  none")
+                print("0\t(none)")
                 continue
             for reason_row in top_reasons:
-                print(
-                    f"  {reason_row.get('count', 0)}x\t{reason_row.get('reason', '')}"
-                )
+                print(f"{int(reason_row.get('count', 0))}\t{reason_row.get('reason', '')}")
+        print(f"transmission_accepted_count: {int(report.get('transmission_accepted_count', 0))}")
         return
 
     if args.prediction is not None:
