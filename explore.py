@@ -12,24 +12,51 @@ from debug_log import log_gemini_output
 
 _llm_client = get_llm_client()
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
-EXTRACT_PROMPT = """You are a pattern extraction engine. Your job is to find abstract, transferable patterns in a domain of knowledge.
-You are analyzing the domain of: {domain}
-Based on the following research material, extract 3-5 core patterns, structures, or principles that are FUNDAMENTAL to this domain. Focus specifically on:
-- Mathematical relationships (ratios, scaling laws, distributions)
-- Dynamic behaviors (feedback loops, oscillations, phase transitions)
-- Structural principles (hierarchies, networks, symmetries)
-- Information patterns (encoding, compression, signal propagation)
-- Emergence (how simple rules produce complex behavior)
-For each pattern, you MUST provide:
-- pattern_name: 2-5 word name
-- description: 1-2 sentences explaining the pattern in this domain
-- abstract_structure: Describe the SAME pattern using ZERO domain-specific language. Someone from a completely different field should understand the structure.
-- search_query: A 3-6 word search query designed to find this SAME abstract pattern in UNRELATED domains. Use no terms from the original domain.
-CRITICAL CONSTRAINTS:
-- Do NOT extract patterns that are generic across all systems (e.g., "feedback loops", "emergence", "self-organization", "network effects"). These are too broad to produce interesting lateral jumps.
-- Extract patterns that are SPECIFIC to this domain — the particular mathematical relationship, the specific mechanism, the exact dynamic. "Power law distribution with exponent ~2.5 in X" is good. "Things are connected in networks" is worthless.
-- The search_query must be specific enough that it would NOT match the original domain. If your search_query would return results about the original domain, rewrite it.
-Respond ONLY with valid JSON. No markdown. No explanation. Format:
+EXTRACT_PROMPT = """You are a pattern extraction engine. Your job is to extract 3-5 transferable, mechanism-level patterns from a domain.
+Domain: {domain}
+
+What counts as a strong pattern:
+- It captures a specific relationship, mechanism, or dynamic from the domain.
+- It can be rewritten without domain vocabulary and still preserve structure.
+- It is searchable in unrelated fields using neutral terms.
+
+Few-shot examples:
+GOOD (from "Ant Colony Foraging")
+- pattern_name: Pheromone-weighted path reinforcement
+- description: Ant traffic amplifies route choice via local pheromone deposition and decay, creating rapid convergence to efficient paths under changing constraints.
+- abstract_structure: Agents repeatedly choose among options using a shared, decaying memory field; each traversal increases local preference strength, producing positive feedback tempered by evaporation.
+- search_query: decaying reinforcement path selection
+Why GOOD: specific mechanism, explicit dynamics (deposit + decay), and transferable control logic.
+
+BAD (from "Ribosome Translation")
+- pattern_name: Protein synthesis sequence
+- description: Ribosomes read mRNA codons to build proteins.
+- abstract_structure: A system reads instructions in order.
+- search_query: sequential instruction processing
+Why BAD: mostly restates domain facts, abstract form is too generic, and query will retrieve broad computing/education material rather than a specific mechanism.
+
+GOOD (from "Ribosome Translation")
+- pattern_name: Triplet-coded error-tolerant decoding
+- description: Translation maps fixed-width codon units to amino acids with redundancy that dampens point-mutation impact on resulting proteins.
+- abstract_structure: A finite alphabet is decoded in fixed-size chunks through a many-to-one lookup, where neighborhood redundancy reduces output sensitivity to single-symbol perturbations.
+- search_query: fixed width redundant decoding robustness
+Why GOOD: concrete encoding/decoding structure, measurable robustness property, and non-domain-specific abstract form.
+
+BAD (from "Ant Colony Foraging")
+- pattern_name: Collective intelligence
+- description: Ants work together and self-organize.
+- abstract_structure: Many simple agents produce complex behavior.
+- search_query: emergence in multi agent systems
+Why BAD: universal principle with no distinctive mechanism.
+
+Rules:
+- Avoid universal catch-alls (feedback, emergence, adaptation, optimization, generic networks) unless tightly parameterized and distinctive.
+- Prefer explicit process constraints, measurable relationships, and mechanism details.
+- abstract_structure must use zero domain-specific terminology.
+- search_query must be 3-6 words and should avoid terms likely to retrieve the original domain.
+- Return ONLY valid JSON, no markdown, no extra text.
+
+Output schema:
 {{
   "patterns": [
     {{
