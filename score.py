@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from tavily import TavilyClient
-from config import TAVILY_API_KEY, INVARIANCE_KILL_THRESHOLD
+from config import TAVILY_API_KEY, INVARIANCE_KILL_THRESHOLD, SCHOLAR_NOVELTY_ENABLED
 from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
@@ -18,12 +18,6 @@ from debug_log import log_gemini_output
 
 _llm_client = get_llm_client()
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
-SCHOLAR_NOVELTY_ENABLED = os.getenv("SCHOLAR_NOVELTY", "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 SCHOLAR_CACHE_PATH = Path(os.getenv("SCHOLAR_CACHE_PATH", "scholar_cache.json"))
 SCHOLAR_CACHE_MAX_ENTRIES = 1000
 SCHOLAR_HTTP_TIMEOUT_SECONDS = 8
@@ -44,6 +38,21 @@ Respond with ONLY a JSON object: {{"distance": 0.X}}"""
 
 NOVELTY_QUERY_PROMPT = """I found a connection between {domain_a} and {domain_b}: {connection_description}
 What would researchers call this connection? Give me exactly 3 alternative search queries that an expert familiar with this overlap would use to find existing literature about it. Return ONLY a JSON object: {{"queries": ["query1", "query2", "query3"]}}"""
+
+DEPTH_CALIBRATION_PROMPT = """You are calibrating structural depth for a cross-domain mechanism hypothesis.
+Domain A: {domain_a}
+Domain B: {domain_b}
+Hypothesis JSON:
+{hypothesis_json}
+
+Strict rubric (score only the mechanism quality, not novelty):
+- 0.00-0.20: Surface analogy, no clear shared process.
+- 0.21-0.40: Some overlap language, but weak or missing variable mapping.
+- 0.41-0.60: Plausible shared mechanism with partial mapping or weak testability.
+- 0.61-0.80: Clear mechanism-level mapping (>=3 variables) and falsifiable test logic.
+- 0.81-1.00: Near-isomorphic process structure with explicit assumptions and boundaries.
+
+Return ONLY JSON: {{"depth": 0-1, "reason": "one short sentence"}}"""
 
 PRIOR_ART_JUDGMENT_PROMPT = """Does this search result describe essentially the same connection as '{connection_description}' between {domain_a} and {domain_b}? Answer ONLY with JSON: {{"is_prior_art": true/false}}
 Does prior work explain the SAME GENERATIVE PROCESS or merely similar vocabulary?
@@ -615,6 +624,25 @@ def _check_distance(source_domain: str, target_domain: str) -> float:
         return 0.5
 
 
+def _calibrate_depth(
+    connection: dict,
+    source_domain: str,
+    target_domain: str,
+) -> float:
+    """Calibrate mechanism depth with a strict rubric."""
+    if not isinstance(connection, dict):
+        return 0.0
+    prompt = DEPTH_CALIBRATION_PROMPT.format(
+        domain_a=source_domain,
+        domain_b=target_domain,
+        hypothesis_json=json.dumps(connection, ensure_ascii=False, sort_keys=True),
+    )
+    data = _call_json(prompt, "depth_calibration", max_output_tokens=1024)
+    if not isinstance(data, dict):
+        return 0.5
+    return _clamp_unit_score(data.get("depth"))
+
+
 def _generate_novelty_queries(
     source_domain: str,
     target_domain: str,
@@ -739,10 +767,10 @@ def score_connection(
 ) -> dict:
     """
     Score a connection on three dimensions.
-    Smart novelty check is only run when (depth + distance)/2 > 0.4.
+    Smart novelty checks run only for strong candidates.
     """
     distance = _check_distance(source_domain, target_domain)
-    depth = float(connection.get("depth", 0.0))
+    depth = _calibrate_depth(connection, source_domain, target_domain)
     strong_candidate = ((depth + distance) / 2.0) > 0.4
     scholarly_summary = None
 
@@ -761,7 +789,7 @@ def score_connection(
             connection_desc,
             queries=novelty_queries,
         )
-        if SCHOLAR_NOVELTY_ENABLED and novelty >= 0.6:
+        if SCHOLAR_NOVELTY_ENABLED:
             scholarly = _check_scholarly_novelty(
                 source_domain,
                 target_domain,

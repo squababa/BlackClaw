@@ -72,3 +72,9 @@ MAX_LLM_CALLS_PER_CYCLE: int = _optional("BLACKCLAW_MAX_LLM", 5)
 # --- Seed exclusion ---
 SEED_EXCLUSION_WINDOW: int = 20  # Avoid last N explored domains
 PERSONALIZATION: bool = str(_optional("PERSONALIZATION", "0")).strip() == "1"
+SCHOLAR_NOVELTY_ENABLED: bool = str(_optional("SCHOLAR_NOVELTY", "1")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
