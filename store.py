@@ -91,6 +91,7 @@ def init_db():
             timestamp TEXT NOT NULL,
             exploration_id INTEGER NOT NULL,
             formatted_output TEXT NOT NULL,
+            transmission_embedding TEXT,
             mechanism_signature TEXT,
             signature_cluster_id TEXT,
             exportable INTEGER NOT NULL DEFAULT 1,
@@ -196,6 +197,8 @@ def init_db():
         conn.execute(
             "ALTER TABLE transmissions ADD COLUMN exportable INTEGER NOT NULL DEFAULT 1"
         )
+    if "transmission_embedding" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN transmission_embedding TEXT")
     if "mechanism_signature" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN mechanism_signature TEXT")
     if "signature_cluster_id" not in transmission_columns:
@@ -247,6 +250,56 @@ def _now() -> str:
 def _today() -> str:
     """Current UTC date as YYYY-MM-DD."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def compute_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = math.sqrt(sum(a * a for a in vec_a))
+    norm_b = math.sqrt(sum(b * b for b in vec_b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+
+    similarity = dot / (norm_a * norm_b)
+    return max(-1.0, min(1.0, similarity))
+
+
+def is_semantic_duplicate(
+    new_embedding: list[float],
+    threshold: float = 0.88,
+) -> tuple[bool, float]:
+    """Check whether an embedding is too similar to a prior accepted transmission."""
+    if not new_embedding:
+        return False, 0.0
+
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT transmission_embedding
+        FROM transmissions
+        WHERE transmission_embedding IS NOT NULL
+          AND transmission_embedding != ''"""
+    ).fetchall()
+    conn.close()
+
+    max_similarity = 0.0
+    for row in rows:
+        raw_embedding = row["transmission_embedding"]
+        if not raw_embedding:
+            continue
+        try:
+            stored_embedding = json.loads(raw_embedding)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(stored_embedding, list) or not stored_embedding:
+            continue
+        similarity = compute_similarity(new_embedding, stored_embedding)
+        if similarity > max_similarity:
+            max_similarity = similarity
+
+    return max_similarity >= threshold, max_similarity
 # --- Explorations ---
 def save_exploration(
     seed_domain: str,
@@ -758,6 +811,7 @@ def save_transmission(
     transmission_number: int,
     exploration_id: int,
     formatted_output: str,
+    transmission_embedding: list[float] | None = None,
     mechanism_signature: str | None = None,
     exportable: bool = True,
     connection_payload: dict | None = None,
@@ -766,19 +820,25 @@ def save_transmission(
     conn = _connect()
     cluster_id = None
     clean_signature = (mechanism_signature or "").strip()
+    serialized_embedding = None
+    if transmission_embedding:
+        serialized_embedding = json.dumps(
+            [float(value) for value in transmission_embedding]
+        )
     if clean_signature:
         sig_result = _record_signature_convergence(conn, clean_signature)
         cluster_id = sig_result.get("cluster_id")
     cursor = conn.execute(
         """INSERT INTO transmissions
         (transmission_number, timestamp, exploration_id, formatted_output,
-         mechanism_signature, signature_cluster_id, exportable)
-        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+         transmission_embedding, mechanism_signature, signature_cluster_id, exportable)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             transmission_number,
             _now(),
             exploration_id,
             formatted_output,
+            serialized_embedding,
             clean_signature or None,
             cluster_id,
             1 if exportable else 0,

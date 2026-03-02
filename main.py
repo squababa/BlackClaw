@@ -10,6 +10,7 @@ from store import (
     init_db,
     save_exploration,
     save_transmission,
+    is_semantic_duplicate,
     build_mechanism_signature,
     get_next_transmission_number,
     update_domain_visited,
@@ -30,8 +31,8 @@ from store import (
 )
 
 
-def _parse_rut_args():
-    """Parse the report-only flags before any API-key-dependent imports."""
+def _parse_report_only_args():
+    """Parse report-only flags before any API-key-dependent imports."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--rut-report",
@@ -39,6 +40,16 @@ def _parse_rut_args():
     )
     parser.add_argument(
         "--rut-window",
+        type=int,
+        default=200,
+        metavar="N",
+    )
+    parser.add_argument(
+        "--audit-reasoning",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--audit-limit",
         type=int,
         default=200,
         metavar="N",
@@ -84,18 +95,57 @@ def _print_rut_report(report: dict):
             )
 
 
+def _print_reasoning_audit(report: dict):
+    """Render the reasoning-failure audit in plain text."""
+    if report.get("insufficient_data"):
+        print("Not enough data yet")
+        return
+
+    sample_size = report.get("sample_size", 0)
+    total_explorations = report.get("total_explorations", 0)
+    print(
+        f"[ReasoningAudit] Last {sample_size} explorations (total stored: {total_explorations})"
+    )
+    for stage_key, stage_label in (
+        ("validator", "validator"),
+        ("adversarial", "adversarial"),
+        ("invariance", "invariance"),
+    ):
+        stage = report.get(stage_key, {})
+        print(
+            f"{stage_label}\ttotal={stage.get('total', 0)}\treason_instances={stage.get('reason_instances_total', 0)}"
+        )
+        top_reasons = stage.get("top_reasons") or []
+        if not top_reasons:
+            print("  none")
+            continue
+        for reason_row in top_reasons:
+            print(
+                f"  {reason_row.get('count', 0)}x\t{reason_row.get('reason', '')}"
+            )
+
+
 if __name__ == "__main__":
-    _early_rut_args = _parse_rut_args()
-    if _early_rut_args.rut_window <= 0:
+    _early_report_args = _parse_report_only_args()
+    if _early_report_args.rut_report and _early_report_args.rut_window <= 0:
         print("  [!] --rut-window requires a positive integer.")
         sys.exit(1)
-    if _early_rut_args.rut_report:
+    if _early_report_args.audit_reasoning and _early_report_args.audit_limit <= 0:
+        print("  [!] --audit-limit requires a positive integer.")
+        sys.exit(1)
+    if _early_report_args.rut_report or _early_report_args.audit_reasoning:
         init_db()
-        _print_rut_report(rut_report(window=_early_rut_args.rut_window))
+        if _early_report_args.rut_report:
+            _print_rut_report(rut_report(window=_early_report_args.rut_window))
+        if _early_report_args.audit_reasoning:
+            _print_reasoning_audit(
+                get_reasoning_failure_audit(limit=_early_report_args.audit_limit)
+            )
         sys.exit(0)
 
 from config import (
     TRANSMIT_THRESHOLD,
+    EMBEDDING_DUP_THRESHOLD,
     INVARIANCE_KILL_THRESHOLD,
     CYCLE_COOLDOWN,
     MAX_PATTERNS_PER_CYCLE,
@@ -381,6 +431,14 @@ def _run_feedback_dive(transmission_number: int) -> bool:
     return True
 
 
+def _embed_transmission_text(text: str) -> list[float]:
+    """Compute the embedding used for semantic dedup checks."""
+    clean_text = (text or "").strip()
+    if not clean_text:
+        raise RuntimeError("Cannot compute embedding for empty transmission text.")
+    return get_llm_client().embed_content(clean_text)
+
+
 def _handle_convergence(
     domain_a: str,
     domain_b: str,
@@ -403,6 +461,17 @@ def _handle_convergence(
         connection_description,
     )
     save_deep_dive(convergence["domain_a"], convergence["domain_b"], deep_dive_result)
+    transmission_embedding = _embed_transmission_text(connection_description)
+    is_duplicate, similarity_score = is_semantic_duplicate(
+        transmission_embedding,
+        threshold=EMBEDDING_DUP_THRESHOLD,
+    )
+    if is_duplicate:
+        print(
+            "  [Dedup] Rejected convergence transmission "
+            f"(similarity: {similarity_score:.3f})"
+        )
+        return False
     tx_num = get_next_transmission_number()
     formatted = format_convergence_transmission(
         transmission_number=tx_num,
@@ -412,7 +481,12 @@ def _handle_convergence(
         source_seeds=convergence.get("source_seeds", []),
         deep_dive_result=deep_dive_result,
     )
-    save_transmission(tx_num, exploration_id, formatted)
+    save_transmission(
+        tx_num,
+        exploration_id,
+        formatted,
+        transmission_embedding=transmission_embedding,
+    )
     print_transmission(formatted)
     return True
 
@@ -444,6 +518,8 @@ def _score_store_and_transmit(
     invariance_ok = True
     invariance_result = None
     boring = False
+    semantic_duplicate = False
+    transmission_embedding = None
     if passes_threshold:
         validation_ok, validation_reasons = validate_hypothesis(connection)
         validation_log = {
@@ -494,8 +570,25 @@ def _score_store_and_transmit(
             if isinstance(rewritten, str) and rewritten.strip():
                 rewritten_description = rewritten.strip()
 
+    if passes_threshold and validation_ok and adversarial_ok and invariance_ok and not boring:
+        transmission_embedding = _embed_transmission_text(rewritten_description)
+        semantic_duplicate, similarity_score = is_semantic_duplicate(
+            transmission_embedding,
+            threshold=EMBEDDING_DUP_THRESHOLD,
+        )
+        if semantic_duplicate:
+            print(
+                "  [Dedup] Rejected semantic duplicate "
+                f"(similarity: {similarity_score:.3f})"
+            )
+
     should_transmit = (
-        passes_threshold and validation_ok and adversarial_ok and invariance_ok and not boring
+        passes_threshold
+        and validation_ok
+        and adversarial_ok
+        and invariance_ok
+        and not boring
+        and not semantic_duplicate
     )
     seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
     exploration_id = save_exploration(
@@ -547,6 +640,7 @@ def _score_store_and_transmit(
             tx_num,
             exploration_id,
             formatted,
+            transmission_embedding=transmission_embedding,
             mechanism_signature=signature,
             connection_payload=tx_connection,
         )
@@ -866,32 +960,7 @@ def main():
         return
 
     if args.audit_reasoning:
-        report = get_reasoning_failure_audit(limit=args.audit_limit)
-        if report.get("insufficient_data"):
-            print("Not enough data yet")
-            return
-        sample_size = report.get("sample_size", 0)
-        total_explorations = report.get("total_explorations", 0)
-        print(
-            f"[ReasoningAudit] Last {sample_size} explorations (total stored: {total_explorations})"
-        )
-        for stage_key, stage_label in (
-            ("validator", "validator"),
-            ("adversarial", "adversarial"),
-            ("invariance", "invariance"),
-        ):
-            stage = report.get(stage_key, {})
-            print(
-                f"{stage_label}\ttotal={stage.get('total', 0)}\treason_instances={stage.get('reason_instances_total', 0)}"
-            )
-            top_reasons = stage.get("top_reasons") or []
-            if not top_reasons:
-                print("  none")
-                continue
-            for reason_row in top_reasons:
-                print(
-                    f"  {reason_row.get('count', 0)}x\t{reason_row.get('reason', '')}"
-                )
+        _print_reasoning_audit(get_reasoning_failure_audit(limit=args.audit_limit))
         return
 
     if args.prediction is not None:

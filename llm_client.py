@@ -5,6 +5,8 @@ Central provider entrypoint for all LLM calls.
 import google.generativeai as genai
 from config import LLM_PROVIDER, MODEL, GEMINI_API_KEY
 
+EMBEDDING_MODEL = "models/embedding-001"
+
 
 class GeminiClient:
     """Thin wrapper around Google Gemini generate_content."""
@@ -16,6 +18,21 @@ class GeminiClient:
     def generate_content(self, prompt: str, generation_config: dict | None = None):
         return self._model.generate_content(prompt, generation_config=generation_config)
 
+    def embed_content(self, text: str) -> list[float]:
+        """Return a deterministic embedding vector for semantic dedup checks."""
+        response = genai.embed_content(
+            model=EMBEDDING_MODEL,
+            content=text,
+            task_type="semantic_similarity",
+        )
+        if isinstance(response, dict):
+            embedding = response.get("embedding")
+        else:
+            embedding = getattr(response, "embedding", None)
+        if not isinstance(embedding, list) or not embedding:
+            raise RuntimeError("Gemini embedding response missing embedding vector.")
+        return [float(value) for value in embedding]
+
 
 class ClaudeClient:
     """Placeholder client for future Anthropic/Claude support."""
@@ -25,6 +42,9 @@ class ClaudeClient:
 
     def generate_content(self, prompt: str, generation_config: dict | None = None):
         raise RuntimeError("Claude provider selected but not implemented yet.")
+
+    def embed_content(self, text: str) -> list[float]:
+        raise RuntimeError("Claude provider selected but embeddings are not implemented.")
 
 
 _CLIENT = None
