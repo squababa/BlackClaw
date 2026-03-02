@@ -6,12 +6,6 @@ import argparse
 import json
 import sys
 import time
-from config import (
-    TRANSMIT_THRESHOLD,
-    INVARIANCE_KILL_THRESHOLD,
-    CYCLE_COOLDOWN,
-    MAX_PATTERNS_PER_CYCLE,
-)
 from store import (
     init_db,
     save_exploration,
@@ -32,6 +26,79 @@ from store import (
     get_reasoning_failure_audit,
     get_prediction,
     update_prediction_status,
+    rut_report,
+)
+
+
+def _parse_rut_args():
+    """Parse the report-only flags before any API-key-dependent imports."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--rut-report",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--rut-window",
+        type=int,
+        default=200,
+        metavar="N",
+    )
+    args, _ = parser.parse_known_args()
+    return args
+
+
+def _print_rut_report(report: dict):
+    """Render the rut report in plain text."""
+    if report.get("status") == "not_enough_data":
+        print("Not enough data yet")
+        return
+
+    print(
+        f"[RutReport] Last {report.get('window_used', 0)} explorations "
+        f"(requested: {report.get('window_requested', 0)}, total stored: {report.get('total_explorations', 0)})"
+    )
+    print(f"Run at (UTC): {report.get('run_at_utc', '')}")
+    print(f"Unique primary domains: {report.get('unique_domains', 0)}")
+    print(f"Top 3 share: {report.get('top_3_share', 0.0) * 100:.1f}%")
+    print(f"Shannon entropy: {report.get('shannon_entropy', 0.0):.6f}")
+    if report.get("top_3_share", 0.0) > 0.6:
+        print("WARNING: Top 3 domains exceed 60% of the recent window.")
+
+    top_domains = report.get("top_10_domains") or []
+    print("Top domains:")
+    if not top_domains:
+        print("  none")
+    else:
+        for row in top_domains:
+            print(
+                f"  {row.get('domain', '')}: "
+                f"{row.get('count', 0)} ({row.get('percent', 0.0):.1f}%)"
+            )
+
+    repeated = report.get("repeated_convergence_keys") or []
+    if repeated:
+        print("Repeated convergence keys:")
+        for row in repeated:
+            print(
+                f"  {row.get('connection_key', '')}: {row.get('count', 0)}"
+            )
+
+
+if __name__ == "__main__":
+    _early_rut_args = _parse_rut_args()
+    if _early_rut_args.rut_window <= 0:
+        print("  [!] --rut-window requires a positive integer.")
+        sys.exit(1)
+    if _early_rut_args.rut_report:
+        init_db()
+        _print_rut_report(rut_report(window=_early_rut_args.rut_window))
+        sys.exit(0)
+
+from config import (
+    TRANSMIT_THRESHOLD,
+    INVARIANCE_KILL_THRESHOLD,
+    CYCLE_COOLDOWN,
+    MAX_PATTERNS_PER_CYCLE,
 )
 from seed import pick_seed
 from explore import dive
@@ -127,6 +194,18 @@ def parse_args():
         "--export",
         action="store_true",
         help="Export transmissions to transmissions_export.json and exit",
+    )
+    parser.add_argument(
+        "--rut-report",
+        action="store_true",
+        help="Print a rut-detection report and exit",
+    )
+    parser.add_argument(
+        "--rut-window",
+        type=int,
+        default=200,
+        metavar="N",
+        help="How many recent explorations to inspect for rut detection (default: 200)",
     )
     parser.add_argument(
         "--star",
@@ -662,6 +741,13 @@ def main():
     args = parse_args()
 
     init_db()
+
+    if args.rut_window <= 0:
+        print("  [!] --rut-window requires a positive integer.")
+        sys.exit(1)
+    if args.rut_report:
+        _print_rut_report(rut_report(window=args.rut_window))
+        return
 
     feedback_action_count = sum(
         [

@@ -5,11 +5,52 @@ All queries use parameterized statements — no string interpolation.
 """
 from collections import Counter
 import json
+import math
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from config import DB_PATH, INVARIANCE_KILL_THRESHOLD
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+
+def _load_env():
+    """Load .env file if python-dotenv is available."""
+    if load_dotenv is not None:
+        env_path = Path(__file__).parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+
+
+_load_env()
+
+
+def _optional_env(var: str, default):
+    """Get optional env var with fallback."""
+    val = os.getenv(var)
+    if val is None or val.strip() == "":
+        return default
+    if isinstance(default, int):
+        try:
+            return int(val)
+        except ValueError:
+            return default
+    if isinstance(default, float):
+        try:
+            return float(val)
+        except ValueError:
+            return default
+    return val.strip()
+
+
+DB_PATH: str = _optional_env("BLACKCLAW_DB_PATH", "blackclaw.db")
+INVARIANCE_KILL_THRESHOLD: float = _optional_env(
+    "BLACKCLAW_INVARIANCE_KILL_THRESHOLD",
+    0.4,
+)
 def _connect() -> sqlite3.Connection:
     """Get a database connection with row factory."""
     conn = sqlite3.connect(DB_PATH)
@@ -1435,6 +1476,99 @@ def get_today_usage() -> dict:
         return {"tavily": row["tavily_calls"], "llm": row["llm_calls"]}
     return {"tavily": 0, "llm": 0}
 # --- Stats ---
+def _primary_domain(row: sqlite3.Row) -> str:
+    """Pick one stable domain per exploration for rut reporting."""
+    seed_domain = (row["seed_domain"] or "").strip()
+    if seed_domain:
+        return seed_domain
+    return (row["jump_target_domain"] or "").strip()
+
+
+def _shannon_entropy(counts: Counter[str], total: int) -> float:
+    """Compute Shannon entropy over a discrete distribution."""
+    if total <= 0:
+        return 0.0
+    entropy = 0.0
+    for count in counts.values():
+        if count <= 0:
+            continue
+        probability = count / total
+        entropy -= probability * math.log(probability)
+    return entropy
+
+
+def rut_report(window: int = 200) -> dict:
+    """Summarize recent exploration concentration for rut detection."""
+    safe_window = max(1, int(window))
+    conn = _connect()
+    total_explorations = int(
+        conn.execute("SELECT COUNT(*) AS c FROM explorations").fetchone()["c"]
+    )
+    if total_explorations < 100:
+        conn.close()
+        return {
+            "status": "not_enough_data",
+            "total_explorations": total_explorations,
+        }
+
+    rows = conn.execute(
+        """SELECT seed_domain, jump_target_domain
+        FROM explorations
+        ORDER BY id DESC
+        LIMIT ?""",
+        (safe_window,),
+    ).fetchall()
+    conn.close()
+
+    domain_counter: Counter[str] = Counter()
+    convergence_counter: Counter[str] = Counter()
+    for row in rows:
+        primary_domain = _primary_domain(row)
+        if primary_domain:
+            domain_counter.update([primary_domain])
+        seed_domain = (row["seed_domain"] or "").strip()
+        target_domain = (row["jump_target_domain"] or "").strip()
+        if seed_domain and target_domain:
+            convergence_counter.update([get_connection_key(seed_domain, target_domain)])
+
+    window_used = len(rows)
+    domain_counts = {
+        domain: count for domain, count in domain_counter.most_common()
+    }
+    top_10_domains = [
+        {
+            "domain": domain,
+            "count": count,
+            "percent": round((count / window_used) * 100, 1) if window_used else 0.0,
+        }
+        for domain, count in domain_counter.most_common(10)
+    ]
+    top_3_share = (
+        round(sum(item["count"] for item in top_10_domains[:3]) / window_used, 3)
+        if window_used
+        else 0.0
+    )
+    report = {
+        "status": "ok",
+        "run_at_utc": _now(),
+        "window_requested": safe_window,
+        "window_used": window_used,
+        "total_explorations": total_explorations,
+        "domain_counts": domain_counts,
+        "unique_domains": len(domain_counter),
+        "top_10_domains": top_10_domains,
+        "top_3_share": top_3_share,
+        "shannon_entropy": round(_shannon_entropy(domain_counter, window_used), 6),
+    }
+
+    report["repeated_convergence_keys"] = [
+        {"connection_key": key, "count": count}
+        for key, count in convergence_counter.most_common(10)
+        if count > 1
+    ]
+    return report
+
+
 def get_summary_stats() -> dict:
     """Get overall BlackClaw stats for display."""
     conn = _connect()
