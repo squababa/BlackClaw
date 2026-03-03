@@ -1,4 +1,4 @@
-"""
+""""models/gemini-embedding-001"
 BlackClaw LLM Client Selector
 Central provider entrypoint for all LLM calls.
 """
@@ -6,7 +6,7 @@ import anthropic
 import google.generativeai as genai
 from config import ANTHROPIC_API_KEY, LLM_PROVIDER, MODEL, GEMINI_API_KEY
 
-EMBEDDING_MODEL = "models/text-embedding-004"
+EMBEDDING_MODEL = "models/gemini-embedding-001"
 
 
 class GeminiClient:
