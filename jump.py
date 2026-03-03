@@ -51,6 +51,8 @@ Requirements:
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
 - Provide a falsifiable test with metric + confirm + falsify.
+- The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Do not just describe a similarity - name the process.
+- The prediction must include a directional outcome (increase, decrease, higher, lower) and reference a measurable metric (rate, ratio, correlation, error, variance, etc.)
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
 Return ONLY valid JSON. No markdown.
@@ -64,7 +66,7 @@ If valid:
   "mechanism": "specific shared process",
   "variable_mapping": {{"a_in_source": "b_in_target", "c_in_source": "d_in_target", "e_in_source": "f_in_target"}},
   "prediction": "testable prediction implied by this mapping",
-  "test": {{"metric": "...", "confirm": "...", "falsify": "..."}},
+  "test": {{"data": "specific dataset or experiment to use", "metric": "measurable quantity", "confirm": "what result confirms the hypothesis", "falsify": "what result falsifies it"}},
   "assumptions": ["...", "..."],
   "boundary_conditions": "when this mapping should and should not hold",
   "evidence": "specific evidence from search results"
