@@ -582,6 +582,40 @@ def _score_store_and_transmit(
                 f"(similarity: {similarity_score:.3f})"
             )
 
+    seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
+    target_url = connection.get("target_url")
+    target_excerpt = connection.get("target_excerpt")
+    seed_url_ok = (
+        isinstance(seed_url, str)
+        and bool(seed_url.strip())
+        and seed_url.strip().lower() != "(not available)"
+    )
+    seed_excerpt_ok = (
+        isinstance(seed_excerpt, str)
+        and bool(seed_excerpt.strip())
+        and seed_excerpt.strip().lower() != "(not available)"
+    )
+    target_url_ok = (
+        isinstance(target_url, str)
+        and bool(target_url.strip())
+        and target_url.strip().lower() != "(not available)"
+    )
+    target_excerpt_ok = (
+        isinstance(target_excerpt, str)
+        and bool(target_excerpt.strip())
+        and target_excerpt.strip().lower() != "(not available)"
+    )
+    provenance_ok = bool(
+        seed_url_ok and seed_excerpt_ok and target_url_ok and target_excerpt_ok
+    )
+    if not provenance_ok:
+        print(
+            "  [Provenance] - missing: "
+            f"seed_url={'✓' if seed_url_ok else '✗'} "
+            f"seed_excerpt={'✓' if seed_excerpt_ok else '✗'} "
+            f"target_url={'✓' if target_url_ok else '✗'} "
+            f"target_excerpt={'✓' if target_excerpt_ok else '✗'}"
+        )
     should_transmit = (
         passes_threshold
         and validation_ok
@@ -589,8 +623,8 @@ def _score_store_and_transmit(
         and invariance_ok
         and not boring
         and not semantic_duplicate
+        and provenance_ok
     )
-    seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
     exploration_id = save_exploration(
         seed_domain=source_domain,
         seed_category=source_category,
@@ -601,8 +635,8 @@ def _score_store_and_transmit(
         chain_path=chain_path,
         seed_url=seed_url,
         seed_excerpt=seed_excerpt,
-        target_url=connection.get("target_url"),
-        target_excerpt=connection.get("target_excerpt"),
+        target_url=target_url,
+        target_excerpt=target_excerpt,
         novelty_score=scores["novelty"],
         distance_score=scores["distance"],
         depth_score=scores["depth"],
