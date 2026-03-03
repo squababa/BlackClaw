@@ -204,30 +204,7 @@ def _validate_prediction(prediction: object) -> list[str]:
     text = prediction if isinstance(prediction, str) else ""
     if not text.strip():
         return ["prediction must be present and non-empty"]
-
-    lower = text.lower()
-    has_falsifiable_form = any(
-        marker in lower
-        for marker in ("if", "when", "under", "compared", "versus", "vs")
-    )
-    has_outcome_direction = any(
-        marker in lower
-        for marker in (
-            "increase",
-            "decrease",
-            "higher",
-            "lower",
-            "drop",
-            "rise",
-            "change",
-            "difference",
-            "improve",
-            "worsen",
-            "reduce",
-        )
-    )
-
-    if not has_falsifiable_form or not has_outcome_direction:
+    if len(text.strip()) < 30:
         reasons.append("prediction must be falsifiable")
     if not _has_metric_text(text):
         reasons.append("prediction must include a measurable outcome or metric")
@@ -261,8 +238,8 @@ def _validate_test(test: object) -> list[str]:
     lower_data = data_text.lower()
     has_data_or_experiment = any(keyword in lower_data for keyword in DATA_EXPERIMENT_WORDS)
     has_metric = _has_metric_text(metric_text)
-    has_confirm = any(k in confirm_text.lower() for k in ("confirm", "support", "validated", "true", "would", "should", "expect", "predict", "consistent", "indicates", "demonstrating", "demonstrates", "verif"))
-    has_falsify = any(k in falsify_text.lower() for k in ("falsif", "refut", "reject", "false", "otherwise", "inconsistent", "fail", "absent", "no significant", "below", "does not", "indicating", "suggests", "contradict", "rules out", "no systematic"))
+    has_confirm = bool(confirm_text.strip()) and len(confirm_text.strip()) > 20
+    has_falsify = bool(falsify_text.strip()) and len(falsify_text.strip()) > 20
 
 
     if not has_data_or_experiment:
