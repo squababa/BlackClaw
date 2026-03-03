@@ -61,6 +61,23 @@ DATA_EXPERIMENT_WORDS = {
     "cohort",
     "sample",
     "study",
+    "compare",
+    "measure",
+    "analyze",
+    "calculate",
+    "observe",
+    "quantify",
+    "evaluate",
+    "assess",
+    "survey",
+    "census",
+    "corpus",
+    "database",
+    "archive",
+    "records",
+    "literature",
+    "review",
+    "meta-analysis",
 }
 
 
@@ -209,12 +226,13 @@ def _validate_test(test: object) -> list[str]:
     has_data_or_experiment = any(keyword in lower_data for keyword in DATA_EXPERIMENT_WORDS)
     has_metric = _has_metric_text(metric_text)
     has_confirm = any(
-        k in confirm_text.lower() for k in ("confirm", "support", "validated", "true")
+        k in confirm_text.lower() for k in ("confirm", "support", "validated", "true", "would", "should", "expect", "predict", "consistent", "indicates")
     )
     has_falsify = any(
         k in falsify_text.lower()
-        for k in ("falsif", "refut", "reject", "false", "otherwise")
+        for k in ("falsif", "refut", "reject", "false", "otherwise", "inconsistent", "fail", "absent", "no significant", "below", "does not")
     )
+
 
     if not has_data_or_experiment:
         reasons.append("test must specify data or experiment")
