@@ -25,6 +25,20 @@ PROCESS_CONNECTORS = {
     "couples",
     "transfers",
     "converts",
+    "governs",
+    "determines",
+    "constrains",
+    "triggers",
+    "generates",
+    "produces",
+    "controls",
+    "mediates",
+    "propagates",
+    "induces",
+    "suppresses",
+    "enables",
+    "limits",
+    "dictates",
 }
 
 METRIC_WORDS = {
@@ -47,6 +61,28 @@ METRIC_WORDS = {
     "p-value",
     "pvalue",
     "metric",
+    "fraction",
+    "coefficient",
+    "concentration",
+    "density",
+    "frequency",
+    "magnitude",
+    "percentage",
+    "proportion",
+    "threshold",
+    "index",
+    "score",
+    "count",
+    "distribution",
+    "mean",
+    "median",
+    "deviation",
+    "slope",
+    "diameter",
+    "efficiency",
+    "yield",
+    "velocity",
+    "strength",
 }
 
 DATA_EXPERIMENT_WORDS = {
@@ -225,13 +261,8 @@ def _validate_test(test: object) -> list[str]:
     lower_data = data_text.lower()
     has_data_or_experiment = any(keyword in lower_data for keyword in DATA_EXPERIMENT_WORDS)
     has_metric = _has_metric_text(metric_text)
-    has_confirm = any(
-        k in confirm_text.lower() for k in ("confirm", "support", "validated", "true", "would", "should", "expect", "predict", "consistent", "indicates")
-    )
-    has_falsify = any(
-        k in falsify_text.lower()
-        for k in ("falsif", "refut", "reject", "false", "otherwise", "inconsistent", "fail", "absent", "no significant", "below", "does not")
-    )
+    has_confirm = any(k in confirm_text.lower() for k in ("confirm", "support", "validated", "true", "would", "should", "expect", "predict", "consistent", "indicates", "demonstrating", "demonstrates", "verif"))
+    has_falsify = any(k in falsify_text.lower() for k in ("falsif", "refut", "reject", "false", "otherwise", "inconsistent", "fail", "absent", "no significant", "below", "does not", "indicating", "suggests", "contradict", "rules out", "no systematic"))
 
 
     if not has_data_or_experiment:
