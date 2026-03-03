@@ -107,17 +107,166 @@ def format_transmission(
     Format a transmission as a string.
     Returns the formatted text (also used for database storage).
     """
-    path_str = ""
+    connection = connection if isinstance(connection, dict) else {}
+    scores = scores if isinstance(scores, dict) else {}
+
+    def _clean_text(value) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return str(value)
+
+    def _first_nonempty(*values) -> str:
+        for value in values:
+            cleaned = _clean_text(value)
+            if cleaned is not None:
+                return cleaned
+        return "—"
+
+    def _format_score(value) -> str:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"{value:.2f}"
+        cleaned = _clean_text(value)
+        return cleaned if cleaned is not None else "—"
+
+    def _indent_block(value: str, prefix: str = "    ") -> str:
+        return "\n".join(f"{prefix}{line}" for line in str(value).splitlines())
+
+    def _json_block(value) -> str:
+        try:
+            return json.dumps(value, indent=2)
+        except (TypeError, ValueError):
+            return _first_nonempty(value)
+
+    source_data = connection.get("source")
+    if not isinstance(source_data, dict):
+        source_data = {}
+
+    target_data = connection.get("target")
+    if not isinstance(target_data, dict):
+        target_data = {}
+
+    source_url = _first_nonempty(
+        connection.get("source_url"),
+        connection.get("seed_url"),
+        source_data.get("url"),
+    )
+    source_excerpt = _first_nonempty(
+        connection.get("source_excerpt"),
+        connection.get("seed_excerpt"),
+        source_data.get("excerpt"),
+    )
+    target_url = _first_nonempty(
+        connection.get("target_url"),
+        target_data.get("url"),
+    )
+    target_excerpt = _first_nonempty(
+        connection.get("target_excerpt"),
+        target_data.get("excerpt"),
+    )
+
+    variable_mapping = connection.get("variable_mapping")
+    if isinstance(variable_mapping, (dict, list)):
+        variable_mapping_text = _json_block(variable_mapping)
+    elif isinstance(variable_mapping, str):
+        variable_mapping_text = variable_mapping.strip() or "—"
+    elif variable_mapping is None:
+        variable_mapping_text = "—"
+    else:
+        variable_mapping_text = str(variable_mapping)
+
+    mechanism_text = _first_nonempty(
+        connection.get("mechanism"),
+        connection.get("connection"),
+    )
+
+    test_value = connection.get("test")
+    test_data = test_value if isinstance(test_value, dict) else {}
+    prediction_text = _first_nonempty(
+        connection.get("prediction"),
+        test_data.get("prediction"),
+    )
+
+    if isinstance(test_value, dict):
+        key_lines = []
+        for key in ("metric", "horizon", "confirm", "falsify"):
+            if key in test_value:
+                key_lines.append(f"{key}: {_first_nonempty(test_value.get(key))}")
+        test_text = "\n".join(key_lines) if key_lines else _json_block(test_value)
+    elif isinstance(test_value, str):
+        test_text = test_value.strip() or "—"
+    elif test_value is None:
+        test_text = "—"
+    else:
+        cleaned_test = _clean_text(test_value)
+        test_text = cleaned_test if cleaned_test is not None else "—"
+
+    summary_text = _first_nonempty(connection.get("connection"))
+    scholarly_prior_art = _clean_text(scores.get("scholarly_prior_art_summary"))
+
+    lines = [
+        f" ⚫ BLACKCLAW — TRANSMISSION #{transmission_number:04d}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"  {source_domain} ↔ {target_domain}",
+    ]
+
     if exploration_path:
-        path_str = f"\n  Path: {' → '.join(exploration_path)}"
-    text = f""" ⚫ BLACKCLAW — TRANSMISSION #{transmission_number:04d}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  {source_domain} ↔ {target_domain}
-  {connection.get('connection', 'No description available.')}
-  NOVELTY: {scores['novelty']:.2f} | DEPTH: {scores['depth']:.2f} | DISTANCE: {scores['distance']:.2f} | TOTAL: {scores['total']:.2f}
-{path_str}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
-    return text
+        path_parts = []
+        for part in exploration_path:
+            cleaned_part = _clean_text(part)
+            if cleaned_part is not None:
+                path_parts.append(cleaned_part)
+        lines.append(f"  Path: {' → '.join(path_parts) if path_parts else '—'}")
+
+    lines.extend(
+        [
+            "",
+            "  1) SOURCE EVIDENCE",
+            f"    URL: {source_url}",
+            f"    EXCERPT: {source_excerpt}",
+            "",
+            "  2) TARGET EVIDENCE",
+            f"    URL: {target_url}",
+            f"    EXCERPT: {target_excerpt}",
+            "",
+            "  3) VARIABLE MAPPING",
+            _indent_block(variable_mapping_text),
+            "",
+            "  4) MECHANISM",
+            _indent_block(mechanism_text),
+            "",
+            "  5) PREDICTION",
+            _indent_block(prediction_text),
+            "",
+            "  6) TEST",
+            _indent_block(test_text),
+            "",
+            "  7) SCORES",
+            (
+                "    "
+                f"NOVELTY: {_format_score(scores.get('novelty'))} | "
+                f"DEPTH: {_format_score(scores.get('depth'))} | "
+                f"DISTANCE: {_format_score(scores.get('distance'))} | "
+                f"TOTAL: {_format_score(scores.get('total'))}"
+            ),
+        ]
+    )
+
+    if scholarly_prior_art is not None:
+        lines.append(f"    SCHOLARLY PRIOR ART: {scholarly_prior_art}")
+
+    lines.extend(
+        [
+            "",
+            "  8) OPTIONAL SUMMARY",
+            _indent_block(summary_text),
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+    )
+
+    return "\n".join(lines)
 
 
 def format_convergence_transmission(
