@@ -6,7 +6,7 @@ import anthropic
 import google.generativeai as genai
 from config import ANTHROPIC_API_KEY, LLM_PROVIDER, MODEL, GEMINI_API_KEY
 
-EMBEDDING_MODEL = "models/embedding-001"
+EMBEDDING_MODEL = "models/text-embedding-004"
 
 
 class GeminiClient:
