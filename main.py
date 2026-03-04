@@ -684,6 +684,8 @@ def _score_store_and_transmit(
     if should_transmit:
         tx_num = get_next_transmission_number()
         tx_connection = dict(connection)
+        tx_connection["seed_url"] = seed_url
+        tx_connection["seed_excerpt"] = seed_excerpt
         tx_connection["connection"] = rewritten_description
         formatted = format_transmission(
             transmission_number=tx_num,
