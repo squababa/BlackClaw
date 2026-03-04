@@ -617,7 +617,7 @@ def _score_store_and_transmit(
             f"target_excerpt={'✓' if target_excerpt_ok else '✗'}"
         )
     distance_score = scores.get("distance", 0)
-    distance_ok = distance_score >= 0.3
+    distance_ok = distance_score >= 0.5
     if not distance_ok:
         print(
             f"  [Distance] - rejected: distance {distance_score:.2f} below 0.3 minimum"
