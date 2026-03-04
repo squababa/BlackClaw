@@ -588,22 +588,22 @@ def _score_store_and_transmit(
     seed_url_ok = (
         isinstance(seed_url, str)
         and bool(seed_url.strip())
-        and seed_url.strip().lower() != "(not available)"
+        and seed_url.strip().lower() not in {"(not available)", "—"}
     )
     seed_excerpt_ok = (
         isinstance(seed_excerpt, str)
         and bool(seed_excerpt.strip())
-        and seed_excerpt.strip().lower() != "(not available)"
+        and seed_excerpt.strip().lower() not in {"(not available)", "—"}
     )
     target_url_ok = (
         isinstance(target_url, str)
         and bool(target_url.strip())
-        and target_url.strip().lower() != "(not available)"
+        and target_url.strip().lower() not in {"(not available)", "—"}
     )
     target_excerpt_ok = (
         isinstance(target_excerpt, str)
         and bool(target_excerpt.strip())
-        and target_excerpt.strip().lower() != "(not available)"
+        and target_excerpt.strip().lower() not in {"(not available)", "—"}
     )
     provenance_ok = bool(
         seed_url_ok and seed_excerpt_ok and target_url_ok and target_excerpt_ok
@@ -616,6 +616,28 @@ def _score_store_and_transmit(
             f"target_url={'✓' if target_url_ok else '✗'} "
             f"target_excerpt={'✓' if target_excerpt_ok else '✗'}"
         )
+    distance_score = scores.get("distance", 0)
+    distance_ok = distance_score >= 0.3
+    if not distance_ok:
+        print(
+            f"  [Distance] - rejected: distance {distance_score:.2f} below 0.3 minimum"
+        )
+    scholarly_prior_art_summary = scores.get("scholarly_prior_art_summary")
+    scholarly_prior_art_lower = (
+        scholarly_prior_art_summary.lower()
+        if isinstance(scholarly_prior_art_summary, str)
+        else None
+    )
+    white_detected = distance_score < 0.4 and (
+        scholarly_prior_art_summary is None
+        or (
+            scholarly_prior_art_lower is not None
+            and "no" in scholarly_prior_art_lower
+            and "match" in scholarly_prior_art_lower
+        )
+    )
+    if white_detected:
+        print("  [White] - low distance + no prior art = common knowledge, not novelty")
     should_transmit = (
         passes_threshold
         and validation_ok
@@ -624,6 +646,8 @@ def _score_store_and_transmit(
         and not boring
         and not semantic_duplicate
         and provenance_ok
+        and distance_ok
+        and not white_detected
     )
     exploration_id = save_exploration(
         seed_domain=source_domain,
@@ -631,14 +655,14 @@ def _score_store_and_transmit(
         patterns_found=patterns_payload,
         jump_target_domain=target_domain,
         connection_description=rewritten_description,
-        scholarly_prior_art_summary=scores.get("scholarly_prior_art_summary"),
+        scholarly_prior_art_summary=scholarly_prior_art_summary,
         chain_path=chain_path,
         seed_url=seed_url,
         seed_excerpt=seed_excerpt,
         target_url=target_url,
         target_excerpt=target_excerpt,
         novelty_score=scores["novelty"],
-        distance_score=scores["distance"],
+        distance_score=distance_score,
         depth_score=scores["depth"],
         total_score=scores["total"],
         validation_json=validation_log,

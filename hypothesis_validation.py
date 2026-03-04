@@ -236,7 +236,7 @@ def _validate_test(test: object) -> list[str]:
         falsify_text = text
 
     lower_data = data_text.lower()
-    has_data_or_experiment = any(keyword in lower_data for keyword in DATA_EXPERIMENT_WORDS)
+    has_data_or_experiment = bool(data_text.strip()) and len(data_text.strip()) > 20
     has_metric = _has_metric_text(metric_text)
     has_confirm = bool(confirm_text.strip()) and len(confirm_text.strip()) > 20
     has_falsify = bool(falsify_text.strip()) and len(falsify_text.strip()) > 20
