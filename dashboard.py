@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from html import escape
@@ -126,6 +127,23 @@ def _get_exploration(exploration_id: int) -> dict | None:
     ).fetchone()
     conn.close()
     return _row_to_dict(row)
+
+
+def _get_adversarial_rubric(exploration_id: int):
+    conn = _connect()
+    row = conn.execute(
+        """SELECT adversarial_rubric_json
+        FROM explorations
+        WHERE id = ?""",
+        (exploration_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    raw_value = row["adversarial_rubric_json"]
+    if raw_value is None:
+        return {"adversarial": None}
+    return {"adversarial": json.loads(raw_value)}
 
 
 def _get_kill_stats(window: int) -> dict:
@@ -339,6 +357,14 @@ def api_exploration(exploration_id: int):
     return jsonify(row)
 
 
+@app.get("/api/explorations/<int:exploration_id>/adversarial")
+def api_exploration_adversarial(exploration_id: int):
+    payload = _get_adversarial_rubric(exploration_id)
+    if payload is None:
+        return jsonify({"error": "exploration not found", "id": exploration_id}), 404
+    return jsonify(payload)
+
+
 @app.get("/api/stats")
 def api_stats():
     window = _parse_positive_int(request.args.get("window"), DEFAULT_STATS_WINDOW)
@@ -454,6 +480,35 @@ def index():
       font-size: 13px;
       min-width: 48px;
     }
+    .top-killed-row {
+      cursor: pointer;
+    }
+    .top-killed-row:hover {
+      background: #fafafa;
+    }
+    .adversarial-cell {
+      padding: 0;
+      border-bottom: 1px solid #e5e5e5;
+    }
+    .adversarial-detail {
+      margin: 8px 0 8px 16px;
+      padding: 12px 0 12px 12px;
+      border-left: 3px solid #d7d7d7;
+    }
+    .adversarial-detail h3 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+    .adversarial-detail p,
+    .adversarial-detail ol {
+      margin: 0 0 8px;
+    }
+    .adversarial-detail pre {
+      margin-top: 8px;
+      background: #fafafa;
+      padding: 8px;
+      border: 1px solid #e5e5e5;
+    }
   </style>
 </head>
 <body>
@@ -536,12 +591,17 @@ def index():
         return;
       }
       const body = rows.map((row) => `
-        <tr>
+        <tr class="top-killed-row" data-exploration-id="${escapeHtml(row.id)}" aria-expanded="false">
           <td>${escapeHtml(row.id)}</td>
           <td>${escapeHtml(formatScore(row.total_score))}</td>
           <td>${escapeHtml(row.seed_domain)}</td>
           <td>${escapeHtml(row.jump_target_domain)}</td>
           <td>${escapeHtml(row.connection_description)}</td>
+        </tr>
+        <tr class="top-killed-detail-row" hidden>
+          <td colspan="5" class="adversarial-cell">
+            <div class="adversarial-detail">Click row to load adversarial detail.</div>
+          </td>
         </tr>
       `).join("");
       document.getElementById("top-killed").innerHTML = `
@@ -558,6 +618,73 @@ def index():
           <tbody>${body}</tbody>
         </table>
       `;
+      attachTopKilledHandlers();
+    }
+
+    function renderAdversarialDetail(payload) {
+      if (!payload || payload.adversarial == null) {
+        return "<div>Killed before adversarial stage</div>";
+      }
+
+      const adversarial = payload.adversarial;
+      const killReasons = Array.isArray(adversarial.kill_reasons) ? adversarial.kill_reasons : [];
+      const killReasonsHtml = killReasons.length
+        ? `<ol>${killReasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ol>`
+        : "<p>None</p>";
+
+      const detailRows = [
+        ["mapping_integrity", adversarial.mapping_integrity],
+        ["invariant_validity", adversarial.invariant_validity],
+        ["assumption_fragility", adversarial.assumption_fragility],
+        ["test_discriminativeness", adversarial.test_discriminativeness],
+        ["survival_score", adversarial.survival_score],
+      ];
+
+      return `
+        <h3>Adversarial Detail</h3>
+        <p><strong>Kill reasons</strong></p>
+        ${killReasonsHtml}
+        ${detailRows.map(([label, value]) => `
+          <p><strong>${escapeHtml(label)}</strong>: ${escapeHtml(
+            value === undefined || value === null ? "n/a" : value
+          )}</p>
+        `).join("")}
+        <pre>${escapeHtml(JSON.stringify(adversarial, null, 2))}</pre>
+      `;
+    }
+
+    function attachTopKilledHandlers() {
+      document.querySelectorAll(".top-killed-row").forEach((row) => {
+        row.addEventListener("click", async () => {
+          const detailRow = row.nextElementSibling;
+          const detail = detailRow.querySelector(".adversarial-detail");
+          const explorationId = row.dataset.explorationId;
+
+          if (!detailRow.hidden) {
+            detailRow.hidden = true;
+            row.setAttribute("aria-expanded", "false");
+            return;
+          }
+
+          detailRow.hidden = false;
+          row.setAttribute("aria-expanded", "true");
+
+          if (detail.dataset.loaded === "true") {
+            return;
+          }
+
+          detail.textContent = "Loading adversarial detail...";
+          try {
+            const payload = await fetchJson(`/api/explorations/${explorationId}/adversarial`);
+            detail.innerHTML = renderAdversarialDetail(payload);
+            detail.dataset.loaded = "true";
+          } catch (error) {
+            detail.innerHTML = `<div class="error">${escapeHtml(
+              error instanceof Error ? error.message : "Failed to load adversarial detail"
+            )}</div>`;
+          }
+        });
+      });
     }
 
     function renderGradeSummary(rows) {
