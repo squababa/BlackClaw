@@ -26,3 +26,6 @@ debug.log
 dist/
 build/
 *.egg-info/
+blackclaw.db-shm
+blackclaw.db-wal
+scholar_cache.json
