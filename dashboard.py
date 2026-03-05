@@ -386,27 +386,91 @@ def index():
   <title>BlackClaw Dashboard</title>
   <style>
     :root {
-      color-scheme: light;
       font-family: Menlo, Monaco, Consolas, monospace;
+      color-scheme: dark;
+      --bg: #1a1a2e;
+      --panel-bg: #16213e;
+      --text: #e0e0e0;
+      --header-text: #ffffff;
+      --link-color: #4fc3f7;
+      --border-color: #333;
+      --muted: #a9b4c2;
+      --panel-alt: #1d2b4d;
+      --input-bg: #0f172a;
+      --accent: #00e676;
+      --kill-high: #ff6b6b;
+      --kill-low: #00e676;
+      --row-hover: #1d2b4d;
+    }
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f5f5f5;
+      --panel-bg: #ffffff;
+      --text: #111;
+      --header-text: #000;
+      --link-color: #0366d6;
+      --border-color: #d7d7d7;
+      --muted: #666;
+      --panel-alt: #fafafa;
+      --input-bg: #ffffff;
+      --accent: #008f4c;
+      --kill-high: #c0392b;
+      --kill-low: #008f4c;
+      --row-hover: #f3f7fb;
     }
     body {
       margin: 0;
       padding: 24px;
-      background: #f5f5f5;
-      color: #111;
+      background: var(--bg);
+      color: var(--text);
+    }
+    body,
+    section,
+    .stat,
+    details,
+    .transmission-item,
+    .theme-toggle,
+    .grade-controls select,
+    .grade-controls input,
+    .grade-controls button,
+    .adversarial-detail,
+    .adversarial-detail pre,
+    table,
+    th,
+    td {
+      transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    }
+    h1, h2, h3, th, summary {
+      color: var(--header-text);
+    }
+    a {
+      color: var(--link-color);
+    }
+    section {
+      background: var(--panel-bg);
+      border: 1px solid var(--border-color);
+      padding: 16px;
+      margin-bottom: 16px;
     }
     h1, h2 {
       margin: 0 0 12px;
     }
-    section {
-      background: #fff;
-      border: 1px solid #d7d7d7;
-      padding: 16px;
-      margin-bottom: 16px;
-    }
     .muted {
-      color: #666;
+      color: var(--muted);
       font-size: 14px;
+    }
+    .theme-toggle {
+      position: fixed;
+      top: 20px;
+      right: 24px;
+      z-index: 10;
+      font: inherit;
+      padding: 8px 12px;
+      background: var(--panel-bg);
+      color: var(--header-text);
+      border: 1px solid var(--border-color);
+      border-radius: 999px;
+      cursor: pointer;
     }
     .grid {
       display: grid;
@@ -414,15 +478,28 @@ def index():
       gap: 12px;
     }
     .stat {
-      border: 1px solid #e2e2e2;
+      border: 1px solid var(--border-color);
       padding: 12px;
-      background: #fafafa;
+      background: var(--panel-alt);
+    }
+    .stat-value {
+      font-weight: 600;
+    }
+    .score-accent,
+    .grade-summary {
+      color: var(--accent);
+    }
+    .kill-high {
+      color: var(--kill-high);
+    }
+    .kill-low {
+      color: var(--kill-low);
     }
     details {
-      border: 1px solid #e2e2e2;
+      border: 1px solid var(--border-color);
       padding: 10px 12px;
       margin-bottom: 10px;
-      background: #fafafa;
+      background: var(--panel-alt);
     }
     summary {
       cursor: pointer;
@@ -443,18 +520,18 @@ def index():
     th, td {
       text-align: left;
       padding: 8px;
-      border-bottom: 1px solid #e5e5e5;
+      border-bottom: 1px solid var(--border-color);
       vertical-align: top;
     }
     .error {
-      color: #8b0000;
+      color: var(--kill-high);
       white-space: pre-wrap;
     }
     .transmission-item {
-      border: 1px solid #e2e2e2;
+      border: 1px solid var(--border-color);
       padding: 12px;
       margin-bottom: 10px;
-      background: #fafafa;
+      background: var(--panel-alt);
     }
     .grade-summary {
       margin-bottom: 12px;
@@ -471,12 +548,15 @@ def index():
     .grade-controls button {
       font: inherit;
       padding: 6px 8px;
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--border-color);
     }
     .grade-controls input {
       min-width: 220px;
     }
     .grade-status {
-      color: #666;
+      color: var(--muted);
       font-size: 13px;
       min-width: 48px;
     }
@@ -484,16 +564,16 @@ def index():
       cursor: pointer;
     }
     .top-killed-row:hover {
-      background: #fafafa;
+      background: var(--row-hover);
     }
     .adversarial-cell {
       padding: 0;
-      border-bottom: 1px solid #e5e5e5;
+      border-bottom: 1px solid var(--border-color);
     }
     .adversarial-detail {
       margin: 8px 0 8px 16px;
       padding: 12px 0 12px 12px;
-      border-left: 3px solid #d7d7d7;
+      border-left: 3px solid var(--border-color);
     }
     .adversarial-detail h3 {
       margin: 0 0 8px;
@@ -505,13 +585,14 @@ def index():
     }
     .adversarial-detail pre {
       margin-top: 8px;
-      background: #fafafa;
+      background: var(--panel-alt);
       padding: 8px;
-      border: 1px solid #e5e5e5;
+      border: 1px solid var(--border-color);
     }
   </style>
 </head>
 <body>
+  <button id="theme-toggle" class="theme-toggle" type="button">Light Mode</button>
   <h1>BlackClaw Dashboard</h1>
   <p class="muted">Read-only view over transmissions, explorations, and kill stats.</p>
   <p><a href="/domains">Browse domains</a></p>
@@ -535,7 +616,13 @@ def index():
 
   <script>
     const GRADE_OPTIONS = ["A", "B+", "B", "B-", "C+", "C", "D", "F"];
+    let isDarkMode = true;
     let transmissionRows = [];
+
+    function applyTheme() {
+      document.documentElement.dataset.theme = isDarkMode ? "dark" : "light";
+      document.getElementById("theme-toggle").textContent = isDarkMode ? "Light Mode" : "Dark Mode";
+    }
 
     async function fetchJson(url) {
       const response = await fetch(url);
@@ -562,25 +649,31 @@ def index():
       return escapeHtml(String(value ?? "").replaceAll("\\n", " "));
     }
 
+    function killRateClass(count, total) {
+      const safeTotal = Number(total || 0);
+      const rate = safeTotal ? Number(count || 0) / safeTotal : 0;
+      return rate >= 0.5 ? "kill-high" : "kill-low";
+    }
+
     function renderStats(stats) {
       const items = [
-        ["Window", stats.window_requested],
-        ["Total explorations", stats.total_explorations],
-        ["Total transmitted", stats.total_transmitted],
-        ["Transmission rate", `${stats.transmission_rate}%`],
-        ["No patterns found", stats.no_patterns_found],
-        ["Below score threshold", stats.below_score_threshold],
-        ["Validation rejected", stats.validation_rejected],
-        ["Adversarial killed", stats.adversarial_killed],
-        ["Provenance missing", stats.provenance_missing],
-        ["Distance too low", stats.distance_too_low],
-        ["Avg total_score (all)", formatScore(stats.avg_total_score_all)],
-        ["Avg total_score (transmitted)", formatScore(stats.avg_total_score_transmitted)],
+        { label: "Window", value: stats.window_requested },
+        { label: "Total explorations", value: stats.total_explorations },
+        { label: "Total transmitted", value: stats.total_transmitted, valueClass: "score-accent" },
+        { label: "Transmission rate", value: `${stats.transmission_rate}%`, valueClass: "score-accent" },
+        { label: "No patterns found", value: stats.no_patterns_found, valueClass: killRateClass(stats.no_patterns_found, stats.total_explorations) },
+        { label: "Below score threshold", value: stats.below_score_threshold, valueClass: killRateClass(stats.below_score_threshold, stats.total_explorations) },
+        { label: "Validation rejected", value: stats.validation_rejected, valueClass: killRateClass(stats.validation_rejected, stats.total_explorations) },
+        { label: "Adversarial killed", value: stats.adversarial_killed, valueClass: killRateClass(stats.adversarial_killed, stats.total_explorations) },
+        { label: "Provenance missing", value: stats.provenance_missing, valueClass: killRateClass(stats.provenance_missing, stats.total_explorations) },
+        { label: "Distance too low", value: stats.distance_too_low, valueClass: killRateClass(stats.distance_too_low, stats.total_explorations) },
+        { label: "Avg total_score (all)", value: formatScore(stats.avg_total_score_all), valueClass: "score-accent" },
+        { label: "Avg total_score (transmitted)", value: formatScore(stats.avg_total_score_transmitted), valueClass: "score-accent" },
       ];
-      document.getElementById("stats").innerHTML = items.map(([label, value]) => `
+      document.getElementById("stats").innerHTML = items.map((item) => `
         <div class="stat">
-          <div class="muted">${escapeHtml(label)}</div>
-          <div>${escapeHtml(value)}</div>
+          <div class="muted">${escapeHtml(item.label)}</div>
+          <div class="stat-value ${item.valueClass || ""}">${escapeHtml(item.value)}</div>
         </div>
       `).join("");
     }
@@ -593,7 +686,7 @@ def index():
       const body = rows.map((row) => `
         <tr class="top-killed-row" data-exploration-id="${escapeHtml(row.id)}" aria-expanded="false">
           <td>${escapeHtml(row.id)}</td>
-          <td>${escapeHtml(formatScore(row.total_score))}</td>
+          <td class="score-accent">${escapeHtml(formatScore(row.total_score))}</td>
           <td>${escapeHtml(row.seed_domain)}</td>
           <td>${escapeHtml(row.jump_target_domain)}</td>
           <td>${escapeHtml(row.connection_description)}</td>
@@ -784,7 +877,7 @@ def index():
         <div class="transmission-item">
           <details>
             <summary>
-              Tx #${escapeHtml(row.transmission_number)} | score ${escapeHtml(formatScore(row.total_score))} | ${escapeHtml(row.seed_domain)} -> ${escapeHtml(row.jump_target_domain)}
+              Tx #${escapeHtml(row.transmission_number)} | score <span class="score-accent">${escapeHtml(formatScore(row.total_score))}</span> | ${escapeHtml(row.seed_domain)} -> ${escapeHtml(row.jump_target_domain)}
             </summary>
             <pre>${escapeHtml(row.formatted_output)}</pre>
           </details>
@@ -810,6 +903,12 @@ def index():
       const message = error instanceof Error ? error.message : String(error);
       document.body.insertAdjacentHTML("beforeend", `<section><div class="error">${escapeHtml(message)}</div></section>`);
     }
+
+    document.getElementById("theme-toggle").addEventListener("click", () => {
+      isDarkMode = !isDarkMode;
+      applyTheme();
+    });
+    applyTheme();
 
     Promise.all([
       fetchJson("/api/stats"),
@@ -857,29 +956,73 @@ def domains():
   <title>BlackClaw Domains</title>
   <style>
     :root {
-      color-scheme: light;
       font-family: Menlo, Monaco, Consolas, monospace;
+      color-scheme: dark;
+      --bg: #1a1a2e;
+      --panel-bg: #16213e;
+      --text: #e0e0e0;
+      --header-text: #ffffff;
+      --link-color: #4fc3f7;
+      --border-color: #333;
+      --muted: #a9b4c2;
+      --panel-alt: #1d2b4d;
+    }
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f5f5f5;
+      --panel-bg: #ffffff;
+      --text: #111;
+      --header-text: #000;
+      --link-color: #0366d6;
+      --border-color: #d7d7d7;
+      --muted: #666;
+      --panel-alt: #fafafa;
     }
     body {
       margin: 0;
       padding: 24px;
-      background: #f5f5f5;
-      color: #111;
+      background: var(--bg);
+      color: var(--text);
+    }
+    body,
+    section,
+    table,
+    th,
+    td,
+    .theme-toggle {
+      transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
     }
     section {
-      background: #fff;
-      border: 1px solid #d7d7d7;
+      background: var(--panel-bg);
+      border: 1px solid var(--border-color);
       padding: 16px;
     }
     h1 {
       margin: 0 0 12px;
+      color: var(--header-text);
     }
     p {
       margin: 0 0 12px;
     }
     .muted {
-      color: #666;
+      color: var(--muted);
       font-size: 14px;
+    }
+    a {
+      color: var(--link-color);
+    }
+    .theme-toggle {
+      position: fixed;
+      top: 20px;
+      right: 24px;
+      z-index: 10;
+      font: inherit;
+      padding: 8px 12px;
+      background: var(--panel-bg);
+      color: var(--header-text);
+      border: 1px solid var(--border-color);
+      border-radius: 999px;
+      cursor: pointer;
     }
     table {
       width: 100%;
@@ -889,7 +1032,7 @@ def domains():
     th, td {
       text-align: left;
       padding: 8px;
-      border-bottom: 1px solid #e5e5e5;
+      border-bottom: 1px solid var(--border-color);
       vertical-align: top;
     }
     th button {
@@ -898,11 +1041,12 @@ def domains():
       border: 0;
       padding: 0;
       cursor: pointer;
-      color: inherit;
+      color: var(--header-text);
     }
   </style>
 </head>
 <body>
+  <button id="theme-toggle" class="theme-toggle" type="button">Light Mode</button>
   <h1>Domains</h1>
   <p><a href="/">Back to dashboard</a></p>
   <section>
@@ -923,10 +1067,16 @@ def domains():
     </table>
   </section>
   <script>
+    let isDarkMode = true;
     const table = document.getElementById("domains-table");
     const tbody = table.querySelector("tbody");
     let currentIndex = 1;
     let currentDirection = "desc";
+
+    function applyTheme() {
+      document.documentElement.dataset.theme = isDarkMode ? "dark" : "light";
+      document.getElementById("theme-toggle").textContent = isDarkMode ? "Light Mode" : "Dark Mode";
+    }
 
     function compareValues(a, b, type) {
       if (type === "number") {
@@ -956,6 +1106,12 @@ def domains():
         rows.forEach((row) => tbody.appendChild(row));
       });
     });
+
+    document.getElementById("theme-toggle").addEventListener("click", () => {
+      isDarkMode = !isDarkMode;
+      applyTheme();
+    });
+    applyTheme();
   </script>
 </body>
 </html>""".replace("__ROWS__", "".join(rows_html))
@@ -998,29 +1154,71 @@ def explorations_page():
   <title>BlackClaw Explorations</title>
   <style>
     :root {
-      color-scheme: light;
       font-family: Menlo, Monaco, Consolas, monospace;
+      color-scheme: dark;
+      --bg: #1a1a2e;
+      --panel-bg: #16213e;
+      --text: #e0e0e0;
+      --header-text: #ffffff;
+      --link-color: #4fc3f7;
+      --border-color: #333;
+      --muted: #a9b4c2;
+    }
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f5f5f5;
+      --panel-bg: #ffffff;
+      --text: #111;
+      --header-text: #000;
+      --link-color: #0366d6;
+      --border-color: #d7d7d7;
+      --muted: #666;
     }
     body {
       margin: 0;
       padding: 24px;
-      background: #f5f5f5;
-      color: #111;
+      background: var(--bg);
+      color: var(--text);
+    }
+    body,
+    section,
+    table,
+    th,
+    td,
+    .theme-toggle {
+      transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
     }
     section {
-      background: #fff;
-      border: 1px solid #d7d7d7;
+      background: var(--panel-bg);
+      border: 1px solid var(--border-color);
       padding: 16px;
     }
     h1 {
       margin: 0 0 12px;
+      color: var(--header-text);
     }
     p {
       margin: 0 0 12px;
     }
     .muted {
-      color: #666;
+      color: var(--muted);
       font-size: 14px;
+    }
+    a {
+      color: var(--link-color);
+    }
+    .theme-toggle {
+      position: fixed;
+      top: 20px;
+      right: 24px;
+      z-index: 10;
+      font: inherit;
+      padding: 8px 12px;
+      background: var(--panel-bg);
+      color: var(--header-text);
+      border: 1px solid var(--border-color);
+      border-radius: 999px;
+      cursor: pointer;
     }
     table {
       width: 100%;
@@ -1030,12 +1228,13 @@ def explorations_page():
     th, td {
       text-align: left;
       padding: 8px;
-      border-bottom: 1px solid #e5e5e5;
+      border-bottom: 1px solid var(--border-color);
       vertical-align: top;
     }
   </style>
 </head>
 <body>
+  <button id="theme-toggle" class="theme-toggle" type="button">Light Mode</button>
   <h1>__HEADING__</h1>
   <p><a href="/">Back to dashboard</a> | <a href="/domains">Domains</a></p>
   <section>
@@ -1057,6 +1256,20 @@ def explorations_page():
       </tbody>
     </table>
   </section>
+  <script>
+    let isDarkMode = true;
+
+    function applyTheme() {
+      document.documentElement.dataset.theme = isDarkMode ? "dark" : "light";
+      document.getElementById("theme-toggle").textContent = isDarkMode ? "Light Mode" : "Dark Mode";
+    }
+
+    document.getElementById("theme-toggle").addEventListener("click", () => {
+      isDarkMode = !isDarkMode;
+      applyTheme();
+    });
+    applyTheme();
+  </script>
 </body>
 </html>""".replace("__HEADING__", escape(heading)).replace(
         "__SUMMARY__", escape(summary)
