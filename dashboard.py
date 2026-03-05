@@ -10,6 +10,7 @@ from flask import Flask, jsonify, request
 DEFAULT_EXPLORATION_LIMIT = 50
 DEFAULT_STATS_WINDOW = 200
 TOP_KILLED_LIMIT = 10
+VALID_GRADES = ("A", "B+", "B", "B-", "C+", "C", "D", "F")
 DB_PATH = (
     os.getenv("DB_PATH")
     or os.getenv("BLACKCLAW_DB_PATH")
@@ -19,12 +20,18 @@ DB_PATH = (
 app = Flask(__name__)
 
 
-def _db_uri() -> str:
-    return f"{Path(DB_PATH).resolve().as_uri()}?mode=ro"
+def _db_uri(mode: str = "ro") -> str:
+    return f"{Path(DB_PATH).resolve().as_uri()}?mode={mode}"
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_uri(), uri=True)
+    conn = sqlite3.connect(_db_uri("ro"), uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _connect_write() -> sqlite3.Connection:
+    conn = sqlite3.connect(_db_uri("rw"), uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -287,6 +294,36 @@ def api_transmissions():
     return jsonify(_get_transmissions())
 
 
+@app.post("/api/transmissions/<int:transmission_id>/grade")
+def api_grade_transmission(transmission_id: int):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "expected JSON object payload"}), 400
+    grade = str(payload.get("grade") or "").strip()
+    if grade not in VALID_GRADES:
+        return jsonify({"error": "grade must be one of: " + ", ".join(VALID_GRADES)}), 400
+
+    raw_notes = payload.get("notes")
+    if raw_notes is None:
+        clean_notes = None
+    else:
+        clean_notes = str(raw_notes).strip() or None
+
+    conn = _connect_write()
+    cursor = conn.execute(
+        """UPDATE transmissions
+        SET user_rating = ?, user_notes = ?
+        WHERE id = ?""",
+        (grade, clean_notes, transmission_id),
+    )
+    conn.commit()
+    conn.close()
+
+    if cursor.rowcount < 1:
+        return jsonify({"error": "transmission not found", "id": transmission_id}), 404
+    return jsonify({"ok": True})
+
+
 @app.get("/api/explorations")
 def api_explorations():
     limit = _parse_positive_int(request.args.get("limit"), DEFAULT_EXPLORATION_LIMIT)
@@ -387,6 +424,36 @@ def index():
       color: #8b0000;
       white-space: pre-wrap;
     }
+    .transmission-item {
+      border: 1px solid #e2e2e2;
+      padding: 12px;
+      margin-bottom: 10px;
+      background: #fafafa;
+    }
+    .grade-summary {
+      margin-bottom: 12px;
+    }
+    .grade-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+    }
+    .grade-controls select,
+    .grade-controls input,
+    .grade-controls button {
+      font: inherit;
+      padding: 6px 8px;
+    }
+    .grade-controls input {
+      min-width: 220px;
+    }
+    .grade-status {
+      color: #666;
+      font-size: 13px;
+      min-width: 48px;
+    }
   </style>
 </head>
 <body>
@@ -406,11 +473,15 @@ def index():
 
   <section>
     <h2>Transmissions</h2>
+    <div id="grade-summary" class="grade-summary muted" hidden></div>
     <p id="transmission-count" class="muted">Loading…</p>
     <div id="transmissions"></div>
   </section>
 
   <script>
+    const GRADE_OPTIONS = ["A", "B+", "B", "B-", "C+", "C", "D", "F"];
+    let transmissionRows = [];
+
     async function fetchJson(url) {
       const response = await fetch(url);
       const payload = await response.json();
@@ -430,6 +501,10 @@ def index():
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;");
+    }
+
+    function inputValue(value) {
+      return escapeHtml(String(value ?? "").replaceAll("\\n", " "));
     }
 
     function renderStats(stats) {
@@ -485,20 +560,123 @@ def index():
       `;
     }
 
+    function renderGradeSummary(rows) {
+      const summary = document.getElementById("grade-summary");
+      const counts = Object.fromEntries(GRADE_OPTIONS.map((grade) => [grade, 0]));
+      let graded = 0;
+      rows.forEach((row) => {
+        if (GRADE_OPTIONS.includes(row.user_rating)) {
+          counts[row.user_rating] += 1;
+          graded += 1;
+        }
+      });
+      if (!graded) {
+        summary.hidden = true;
+        summary.textContent = "";
+        return;
+      }
+      summary.hidden = false;
+      summary.textContent = GRADE_OPTIONS.map((grade) => `${grade}: ${counts[grade]}`).join(" | ");
+    }
+
+    function buildGradeOptions(selectedGrade) {
+      const options = ['<option value="">Grade</option>'];
+      GRADE_OPTIONS.forEach((grade) => {
+        const selected = grade === selectedGrade ? " selected" : "";
+        options.push(`<option value="${grade}"${selected}>${grade}</option>`);
+      });
+      return options.join("");
+    }
+
+    function attachGradeHandlers() {
+      document.querySelectorAll(".grade-save").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const controls = button.closest(".grade-controls");
+          const select = controls.querySelector(".grade-select");
+          const notes = controls.querySelector(".grade-notes");
+          const status = controls.querySelector(".grade-status");
+          const transmissionId = Number(button.dataset.transmissionId);
+          const grade = select.value;
+
+          if (!GRADE_OPTIONS.includes(grade)) {
+            status.textContent = "Pick grade";
+            return;
+          }
+
+          status.textContent = "Saving...";
+          button.disabled = true;
+          select.disabled = true;
+          notes.disabled = true;
+
+          try {
+            const response = await fetch(`/api/transmissions/${transmissionId}/grade`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                grade,
+                notes: notes.value,
+              }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.ok) {
+              throw new Error(payload.error || "Save failed");
+            }
+
+            const row = transmissionRows.find((item) => Number(item.id) === transmissionId);
+            if (row) {
+              row.user_rating = grade;
+              row.user_notes = notes.value;
+            }
+            renderGradeSummary(transmissionRows);
+            status.textContent = "Saved";
+            window.setTimeout(() => {
+              if (status.textContent === "Saved") {
+                status.textContent = "";
+              }
+            }, 1500);
+          } catch (error) {
+            status.textContent = error instanceof Error ? error.message : "Save failed";
+          } finally {
+            button.disabled = false;
+            select.disabled = false;
+            notes.disabled = false;
+          }
+        });
+      });
+    }
+
     function renderTransmissions(rows) {
+      transmissionRows = rows;
+      renderGradeSummary(rows);
       document.getElementById("transmission-count").textContent = `${rows.length} transmissions`;
       if (!rows.length) {
         document.getElementById("transmissions").innerHTML = "<p class=\\"muted\\">No transmissions found.</p>";
         return;
       }
       document.getElementById("transmissions").innerHTML = rows.map((row) => `
-        <details>
-          <summary>
-            Tx #${escapeHtml(row.transmission_number)} | score ${escapeHtml(formatScore(row.total_score))} | ${escapeHtml(row.seed_domain)} -> ${escapeHtml(row.jump_target_domain)}
-          </summary>
-          <pre>${escapeHtml(row.formatted_output)}</pre>
-        </details>
+        <div class="transmission-item">
+          <details>
+            <summary>
+              Tx #${escapeHtml(row.transmission_number)} | score ${escapeHtml(formatScore(row.total_score))} | ${escapeHtml(row.seed_domain)} -> ${escapeHtml(row.jump_target_domain)}
+            </summary>
+            <pre>${escapeHtml(row.formatted_output)}</pre>
+          </details>
+          <div class="grade-controls">
+            <select class="grade-select" aria-label="Grade for transmission ${escapeHtml(row.transmission_number)}">
+              ${buildGradeOptions(GRADE_OPTIONS.includes(row.user_rating) ? row.user_rating : "")}
+            </select>
+            <input
+              class="grade-notes"
+              type="text"
+              placeholder="Notes (optional)"
+              value="${inputValue(row.user_notes)}"
+            >
+            <button type="button" class="grade-save" data-transmission-id="${escapeHtml(row.id)}">Save</button>
+            <span class="grade-status"></span>
+          </div>
+        </div>
       `).join("");
+      attachGradeHandlers();
     }
 
     function renderError(error) {
