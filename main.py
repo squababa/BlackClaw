@@ -7,6 +7,7 @@ import json
 import sys
 import time
 from store import (
+    _connect,
     init_db,
     save_exploration,
     save_transmission,
@@ -34,6 +35,16 @@ from store import (
 def _parse_report_only_args():
     """Parse report-only flags before any API-key-dependent imports."""
     parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--kill-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=200,
+        metavar="N",
+    )
     parser.add_argument(
         "--rut-report",
         action="store_true",
@@ -125,16 +136,146 @@ def _print_reasoning_audit(report: dict):
             )
 
 
+def _get_kill_stats(window: int) -> dict:
+    """Query kill stats for the most recent exploration window."""
+    conn = _connect()
+    row = conn.execute(
+        """WITH recent AS (
+            SELECT
+                patterns_found,
+                total_score,
+                validation_json,
+                adversarial_rubric_json,
+                seed_url,
+                target_url,
+                distance_score,
+                transmitted
+            FROM explorations
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+        )
+        SELECT
+            COUNT(*) AS total_explorations,
+            COALESCE(SUM(transmitted), 0) AS total_transmitted,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN patterns_found IS NULL
+                        OR TRIM(patterns_found) IN ('', '[]', '{}')
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS no_patterns_found,
+            COALESCE(
+                SUM(CASE WHEN total_score < 0.6 THEN 1 ELSE 0 END),
+                0
+            ) AS below_score_threshold,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN validation_json IS NOT NULL AND transmitted = 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS validation_rejected,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN adversarial_rubric_json IS NOT NULL AND transmitted = 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS adversarial_killed,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN seed_url IS NULL OR target_url IS NULL
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS provenance_missing,
+            COALESCE(
+                SUM(CASE WHEN distance_score < 0.5 THEN 1 ELSE 0 END),
+                0
+            ) AS distance_too_low,
+            AVG(total_score) AS avg_total_score_all,
+            AVG(CASE WHEN transmitted = 1 THEN total_score END)
+                AS avg_total_score_transmitted
+        FROM recent""",
+        (window,),
+    ).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def _print_kill_stats(report: dict, window_requested: int):
+    """Render kill stats in plain text."""
+    total = int(report.get("total_explorations", 0) or 0)
+    transmitted = int(report.get("total_transmitted", 0) or 0)
+
+    def _pct(count: int) -> float:
+        if total == 0:
+            return 0.0
+        return (count / total) * 100.0
+
+    def _avg(value) -> str:
+        if value is None:
+            return "n/a"
+        return f"{float(value):.3f}"
+
+    print("[KillStats]")
+    print(f"Total explorations in window: {total}")
+    print(f"Window requested: {window_requested}")
+    print(f"Total transmitted: {transmitted}")
+    print(f"Transmission rate: {_pct(transmitted):.1f}%")
+    print("Kill rate by stage:")
+    for label, key in (
+        ("No patterns found", "no_patterns_found"),
+        ("Below score threshold", "below_score_threshold"),
+        ("Validation rejected", "validation_rejected"),
+        ("Adversarial killed", "adversarial_killed"),
+        ("Provenance missing", "provenance_missing"),
+        ("Distance too low", "distance_too_low"),
+    ):
+        count = int(report.get(key, 0) or 0)
+        print(f"  {label}: {count} ({_pct(count):.1f}%)")
+    print(f"Average total_score (all): {_avg(report.get('avg_total_score_all'))}")
+    print(
+        "Average total_score (transmitted only): "
+        f"{_avg(report.get('avg_total_score_transmitted'))}"
+    )
+
+
 if __name__ == "__main__":
     _early_report_args = _parse_report_only_args()
+    if _early_report_args.kill_stats and _early_report_args.window <= 0:
+        print("  [!] --window requires a positive integer.")
+        sys.exit(1)
     if _early_report_args.rut_report and _early_report_args.rut_window <= 0:
         print("  [!] --rut-window requires a positive integer.")
         sys.exit(1)
     if _early_report_args.audit_reasoning and _early_report_args.audit_limit <= 0:
         print("  [!] --audit-limit requires a positive integer.")
         sys.exit(1)
-    if _early_report_args.rut_report or _early_report_args.audit_reasoning:
+    if (
+        _early_report_args.kill_stats
+        or _early_report_args.rut_report
+        or _early_report_args.audit_reasoning
+    ):
         init_db()
+        if _early_report_args.kill_stats:
+            _print_kill_stats(
+                _get_kill_stats(window=_early_report_args.window),
+                _early_report_args.window,
+            )
         if _early_report_args.rut_report:
             _print_rut_report(rut_report(window=_early_report_args.rut_window))
         if _early_report_args.audit_reasoning:
@@ -256,6 +397,18 @@ def parse_args():
         default=200,
         metavar="N",
         help="How many recent explorations to inspect for rut detection (default: 200)",
+    )
+    parser.add_argument(
+        "--kill-stats",
+        action="store_true",
+        help="Print kill stats for recent explorations and exit",
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=200,
+        metavar="N",
+        help="How many recent explorations to inspect for kill stats (default: 200)",
     )
     parser.add_argument(
         "--star",
