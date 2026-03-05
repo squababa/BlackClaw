@@ -1,6 +1,8 @@
 import os
 import sqlite3
+from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
 from flask import Flask, jsonify, request
 
@@ -74,15 +76,35 @@ def _get_transmissions() -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _get_recent_explorations(limit: int) -> list[dict]:
+def _format_score(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{float(value):.3f}"
+
+
+def _get_recent_explorations(
+    limit: int,
+    seed_domain: str | None = None,
+) -> list[dict]:
+    clean_seed_domain = (seed_domain or "").strip() or None
     conn = _connect()
-    rows = conn.execute(
-        """SELECT *
-        FROM explorations
-        ORDER BY timestamp DESC, id DESC
-        LIMIT ?""",
-        (limit,),
-    ).fetchall()
+    if clean_seed_domain is None:
+        rows = conn.execute(
+            """SELECT *
+            FROM explorations
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT *
+            FROM explorations
+            WHERE seed_domain = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?""",
+            (clean_seed_domain, limit),
+        ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
@@ -199,6 +221,62 @@ def _get_top_killed(limit: int = TOP_KILLED_LIMIT) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _get_domain_stats() -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT
+            e.seed_domain,
+            COUNT(*) AS exploration_count,
+            COALESCE(SUM(e.transmitted), 0) AS transmitted_count,
+            AVG(e.total_score) AS avg_total_score,
+            (
+                SELECT e2.id
+                FROM explorations e2
+                WHERE e2.seed_domain = e.seed_domain
+                ORDER BY e2.total_score IS NULL ASC,
+                    e2.total_score DESC,
+                    e2.timestamp DESC,
+                    e2.id DESC
+                LIMIT 1
+            ) AS best_exploration_id,
+            (
+                SELECT e2.jump_target_domain
+                FROM explorations e2
+                WHERE e2.seed_domain = e.seed_domain
+                ORDER BY e2.total_score IS NULL ASC,
+                    e2.total_score DESC,
+                    e2.timestamp DESC,
+                    e2.id DESC
+                LIMIT 1
+            ) AS best_jump_target_domain,
+            (
+                SELECT e2.connection_description
+                FROM explorations e2
+                WHERE e2.seed_domain = e.seed_domain
+                ORDER BY e2.total_score IS NULL ASC,
+                    e2.total_score DESC,
+                    e2.timestamp DESC,
+                    e2.id DESC
+                LIMIT 1
+            ) AS best_connection_description,
+            (
+                SELECT e2.total_score
+                FROM explorations e2
+                WHERE e2.seed_domain = e.seed_domain
+                ORDER BY e2.total_score IS NULL ASC,
+                    e2.total_score DESC,
+                    e2.timestamp DESC,
+                    e2.id DESC
+                LIMIT 1
+            ) AS best_total_score
+        FROM explorations e
+        GROUP BY e.seed_domain
+        ORDER BY exploration_count DESC, e.seed_domain ASC"""
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 @app.errorhandler(sqlite3.OperationalError)
 def handle_db_error(exc):
     return jsonify({"error": str(exc), "db_path": DB_PATH}), 500
@@ -212,7 +290,8 @@ def api_transmissions():
 @app.get("/api/explorations")
 def api_explorations():
     limit = _parse_positive_int(request.args.get("limit"), DEFAULT_EXPLORATION_LIMIT)
-    return jsonify(_get_recent_explorations(limit))
+    seed_domain = request.args.get("seed_domain")
+    return jsonify(_get_recent_explorations(limit, seed_domain=seed_domain))
 
 
 @app.get("/api/explorations/<int:exploration_id>")
@@ -313,6 +392,7 @@ def index():
 <body>
   <h1>BlackClaw Dashboard</h1>
   <p class="muted">Read-only view over transmissions, explorations, and kill stats.</p>
+  <p><a href="/domains">Browse domains</a></p>
 
   <section>
     <h2>Kill Stats</h2>
@@ -440,6 +520,242 @@ def index():
   </script>
 </body>
 </html>"""
+
+
+@app.get("/domains")
+def domains():
+    rows = _get_domain_stats()
+    rows_html = []
+    for row in rows:
+        domain = row.get("seed_domain") or ""
+        domain_url = f"/explorations?seed_domain={quote(domain, safe='')}"
+        best_target = row.get("best_jump_target_domain") or ""
+        best_description = row.get("best_connection_description") or ""
+        best_connection = best_description or best_target or "n/a"
+        if best_target and best_description:
+            best_connection = f"{best_target}: {best_description}"
+        rows_html.append(
+            "<tr>"
+            f'<td data-sort="{escape(domain)}"><a href="{domain_url}">{escape(domain)}</a></td>'
+            f'<td data-sort="{int(row.get("exploration_count", 0) or 0)}">{int(row.get("exploration_count", 0) or 0)}</td>'
+            f'<td data-sort="{int(row.get("transmitted_count", 0) or 0)}">{int(row.get("transmitted_count", 0) or 0)}</td>'
+            f'<td data-sort="{float(row.get("avg_total_score", -1) or -1):.6f}">{escape(_format_score(row.get("avg_total_score")))}</td>'
+            f'<td data-sort="{escape(best_connection)}">{escape(best_connection)}</td>'
+            "</tr>"
+        )
+
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BlackClaw Domains</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Menlo, Monaco, Consolas, monospace;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #f5f5f5;
+      color: #111;
+    }
+    section {
+      background: #fff;
+      border: 1px solid #d7d7d7;
+      padding: 16px;
+    }
+    h1 {
+      margin: 0 0 12px;
+    }
+    p {
+      margin: 0 0 12px;
+    }
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 8px;
+      border-bottom: 1px solid #e5e5e5;
+      vertical-align: top;
+    }
+    th button {
+      font: inherit;
+      background: none;
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+      color: inherit;
+    }
+  </style>
+</head>
+<body>
+  <h1>Domains</h1>
+  <p><a href="/">Back to dashboard</a></p>
+  <section>
+    <p class="muted">Click a column header to sort. Click a domain to view matching explorations.</p>
+    <table id="domains-table">
+      <thead>
+        <tr>
+          <th><button type="button" data-index="0" data-type="text">Domain</button></th>
+          <th><button type="button" data-index="1" data-type="number">Explorations</button></th>
+          <th><button type="button" data-index="2" data-type="number">Transmitted</button></th>
+          <th><button type="button" data-index="3" data-type="number">Avg Score</button></th>
+          <th><button type="button" data-index="4" data-type="text">Best Connection</button></th>
+        </tr>
+      </thead>
+      <tbody>
+        __ROWS__
+      </tbody>
+    </table>
+  </section>
+  <script>
+    const table = document.getElementById("domains-table");
+    const tbody = table.querySelector("tbody");
+    let currentIndex = 1;
+    let currentDirection = "desc";
+
+    function compareValues(a, b, type) {
+      if (type === "number") {
+        return Number(a) - Number(b);
+      }
+      return String(a).localeCompare(String(b));
+    }
+
+    table.querySelectorAll("th button").forEach((button) => {
+      button.addEventListener("click", () => {
+        const index = Number(button.dataset.index);
+        const type = button.dataset.type || "text";
+        if (currentIndex === index) {
+          currentDirection = currentDirection === "asc" ? "desc" : "asc";
+        } else {
+          currentIndex = index;
+          currentDirection = type === "number" ? "desc" : "asc";
+        }
+
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+        rows.sort((leftRow, rightRow) => {
+          const leftValue = leftRow.children[index].dataset.sort || leftRow.children[index].textContent.trim();
+          const rightValue = rightRow.children[index].dataset.sort || rightRow.children[index].textContent.trim();
+          const result = compareValues(leftValue, rightValue, type);
+          return currentDirection === "asc" ? result : -result;
+        });
+        rows.forEach((row) => tbody.appendChild(row));
+      });
+    });
+  </script>
+</body>
+</html>""".replace("__ROWS__", "".join(rows_html))
+
+
+@app.get("/explorations")
+def explorations_page():
+    seed_domain = (request.args.get("seed_domain") or "").strip() or None
+    limit = _parse_positive_int(request.args.get("limit"), DEFAULT_EXPLORATION_LIMIT)
+    rows = _get_recent_explorations(limit, seed_domain=seed_domain)
+
+    rows_html = []
+    for row in rows:
+        exploration_id = int(row.get("id", 0) or 0)
+        rows_html.append(
+            "<tr>"
+            f'<td><a href="/api/explorations/{exploration_id}">{exploration_id}</a></td>'
+            f"<td>{escape(row.get('timestamp') or '')}</td>"
+            f"<td>{escape(row.get('seed_domain') or '')}</td>"
+            f"<td>{escape(row.get('jump_target_domain') or '')}</td>"
+            f"<td>{escape('yes' if row.get('transmitted') else 'no')}</td>"
+            f"<td>{escape(_format_score(row.get('total_score')))}</td>"
+            f"<td>{escape(row.get('connection_description') or '')}</td>"
+            "</tr>"
+        )
+
+    heading = "Explorations"
+    if seed_domain is not None:
+        heading = f"Explorations for {seed_domain}"
+    summary = f"Showing {len(rows)} exploration(s)"
+    if seed_domain is not None:
+        summary += f" for {seed_domain}"
+    summary += f" (limit {limit})."
+
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BlackClaw Explorations</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Menlo, Monaco, Consolas, monospace;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #f5f5f5;
+      color: #111;
+    }
+    section {
+      background: #fff;
+      border: 1px solid #d7d7d7;
+      padding: 16px;
+    }
+    h1 {
+      margin: 0 0 12px;
+    }
+    p {
+      margin: 0 0 12px;
+    }
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 8px;
+      border-bottom: 1px solid #e5e5e5;
+      vertical-align: top;
+    }
+  </style>
+</head>
+<body>
+  <h1>__HEADING__</h1>
+  <p><a href="/">Back to dashboard</a> | <a href="/domains">Domains</a></p>
+  <section>
+    <p class="muted">__SUMMARY__</p>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Timestamp</th>
+          <th>Seed</th>
+          <th>Target</th>
+          <th>Transmitted</th>
+          <th>Total Score</th>
+          <th>Connection</th>
+        </tr>
+      </thead>
+      <tbody>
+        __ROWS__
+      </tbody>
+    </table>
+  </section>
+</body>
+</html>""".replace("__HEADING__", escape(heading)).replace(
+        "__SUMMARY__", escape(summary)
+    ).replace("__ROWS__", "".join(rows_html))
 
 
 if __name__ == "__main__":
