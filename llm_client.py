@@ -5,8 +5,15 @@ Central provider entrypoint for all LLM calls.
 import anthropic
 import google.generativeai as genai
 from config import ANTHROPIC_API_KEY, LLM_PROVIDER, MODEL, GEMINI_API_KEY
+from store import record_llm_usage
 
 EMBEDDING_MODEL = "models/gemini-embedding-001"
+
+
+def _response_field(payload, field: str):
+    if isinstance(payload, dict):
+        return payload.get(field)
+    return getattr(payload, field, None)
 
 
 class GeminiClient:
@@ -67,6 +74,15 @@ class ClaudeClient:
                     "backticks, no explanation."
                 )
         response = self._client.messages.create(**kwargs)
+        usage = _response_field(response, "usage")
+        try:
+            record_llm_usage(
+                input_tokens=_response_field(usage, "input_tokens"),
+                output_tokens=_response_field(usage, "output_tokens"),
+                model=_response_field(response, "model") or self._model,
+            )
+        except Exception:
+            pass
         text = ""
         if getattr(response, "content", None):
             text = getattr(response.content[0], "text", "") or ""

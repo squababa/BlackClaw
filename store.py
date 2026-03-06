@@ -58,6 +58,44 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+def _ensure_api_usage_schema(conn: sqlite3.Connection):
+    """Create/migrate api_usage columns used for aggregate cost tracking."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS api_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            tavily_calls INTEGER NOT NULL DEFAULT 0,
+            llm_calls INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            model TEXT,
+            timestamp TEXT
+        )"""
+    )
+    existing_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(api_usage)").fetchall()
+    }
+    if "input_tokens" not in existing_columns:
+        conn.execute(
+            "ALTER TABLE api_usage ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0"
+        )
+    if "output_tokens" not in existing_columns:
+        conn.execute(
+            "ALTER TABLE api_usage ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0"
+        )
+    if "model" not in existing_columns:
+        conn.execute("ALTER TABLE api_usage ADD COLUMN model TEXT")
+    if "timestamp" not in existing_columns:
+        conn.execute("ALTER TABLE api_usage ADD COLUMN timestamp TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_api_usage_date ON api_usage(date)")
+
+
+def _coerce_usage_count(value) -> int:
+    """Normalize optional token counts into non-negative integers."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 def init_db():
     """Create tables if they don't exist. Idempotent."""
     conn = _connect()
@@ -111,7 +149,11 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT NOT NULL,
             tavily_calls INTEGER NOT NULL DEFAULT 0,
-            llm_calls INTEGER NOT NULL DEFAULT 0
+            llm_calls INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            model TEXT,
+            timestamp TEXT
         );
         CREATE TABLE IF NOT EXISTS convergences (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,6 +278,7 @@ def init_db():
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_result TEXT")
     if "dive_timestamp" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_timestamp TEXT")
+    _ensure_api_usage_schema(conn)
     convergence_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(convergences)").fetchall()
     }
@@ -1559,6 +1602,7 @@ def mark_convergence_deep_dive(connection_key: str, deep_dive_result: str):
 def increment_tavily_calls(count: int = 1):
     """Track Tavily API usage for the day."""
     conn = _connect()
+    _ensure_api_usage_schema(conn)
     today = _today()
     existing = conn.execute(
         "SELECT * FROM api_usage WHERE date = ?", (today,)
@@ -1578,6 +1622,7 @@ def increment_tavily_calls(count: int = 1):
 def increment_llm_calls(count: int = 1):
     """Track LLM API usage for the day."""
     conn = _connect()
+    _ensure_api_usage_schema(conn)
     today = _today()
     existing = conn.execute(
         "SELECT * FROM api_usage WHERE date = ?", (today,)
@@ -1591,6 +1636,60 @@ def increment_llm_calls(count: int = 1):
         conn.execute(
             "INSERT INTO api_usage (date, tavily_calls, llm_calls) VALUES (?, 0, ?)",
             (today, count),
+        )
+    conn.commit()
+    conn.close()
+def record_llm_usage(
+    input_tokens=None,
+    output_tokens=None,
+    model: str | None = None,
+    timestamp: str | None = None,
+):
+    """Aggregate Claude token usage into the existing daily api_usage row."""
+    conn = _connect()
+    _ensure_api_usage_schema(conn)
+    today = _today()
+    usage_timestamp = timestamp or _now()
+    safe_input_tokens = _coerce_usage_count(input_tokens)
+    safe_output_tokens = _coerce_usage_count(output_tokens)
+    safe_model = model.strip() if isinstance(model, str) and model.strip() else None
+    existing = conn.execute(
+        "SELECT * FROM api_usage WHERE date = ?", (today,)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """UPDATE api_usage
+            SET input_tokens = COALESCE(input_tokens, 0) + ?,
+                output_tokens = COALESCE(output_tokens, 0) + ?,
+                model = COALESCE(?, model),
+                timestamp = ?
+            WHERE date = ?""",
+            (
+                safe_input_tokens,
+                safe_output_tokens,
+                safe_model,
+                usage_timestamp,
+                today,
+            ),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO api_usage (
+                date,
+                tavily_calls,
+                llm_calls,
+                input_tokens,
+                output_tokens,
+                model,
+                timestamp
+            ) VALUES (?, 0, 0, ?, ?, ?, ?)""",
+            (
+                today,
+                safe_input_tokens,
+                safe_output_tokens,
+                safe_model,
+                usage_timestamp,
+            ),
         )
     conn.commit()
     conn.close()
