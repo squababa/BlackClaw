@@ -1,23 +1,23 @@
-# ScarMap
+# BlackClaw
 
-**ScarMap** is an evidence-grounded structural hypothesis engine that searches for deep cross-domain similarities, stress-tests them, and preserves the strongest survivors as auditable transmissions.
+**BlackClaw** is an evidence-grounded structural hypothesis engine built to generate useful transmissions: cross-domain insights that can create practical leverage, predictive value, transferable understanding, or decision advantage.
 
-It is not a content bot and not yet a full discovery engine. Its purpose is to generate distant structural candidates, ground them at the claim level, pressure them with validation and adversarial checks, and push surviving outputs toward falsifiable predictions.
+It is not a content bot and not yet a full discovery engine. Its purpose is to generate distant structural candidates, ground them at the claim level, pressure them with validation and adversarial checks, and preserve only the strongest transmissions — the ones that can actually help someone understand, predict, decide, optimize, or avoid loss.
 
-## Why ScarMap
+## Why BlackClaw
 
-Most systems either retrieve what is already known or generate endless interesting analogies. ScarMap is built for the harder middle ground:
+Most systems either retrieve what is already known or generate endless interesting analogies. BlackClaw is built for the harder middle ground:
 
 * find non-obvious structural similarities across unrelated domains,
 * reject shallow pattern-matching,
 * preserve evidence and contradictions,
-* and build toward prediction-bearing, proto-discovery outputs.
+* and push surviving outputs toward useful, testable transmissions.
 
-The name reflects the core philosophy of the project: the system should preserve structured traces of hard-won contact with difficult territory, not just polished final answers.
+The standard is not “is this cool?” The standard is “can anyone gain from this?”
 
-## What ScarMap Does
+## What BlackClaw Does
 
-ScarMap runs a loop that:
+BlackClaw runs a loop that:
 
 1. selects or derives a seed domain,
 2. explores source material for meaningful patterns,
@@ -64,9 +64,21 @@ High-quality candidates are formatted as transmissions rather than final claims.
 
 Results are written to SQLite for inspection, dashboarding, convergence tracking, and evaluation.
 
+## What Counts as a Good Transmission
+
+A strong BlackClaw transmission should:
+
+* identify a nontrivial cross-domain structural mapping,
+* provide claim-level evidence for that mapping,
+* articulate the mechanism family involved,
+* yield at least one falsifiable prediction,
+* and offer practical leverage, transferable insight, or real decision value.
+
+Interesting but unusable outputs are not the target.
+
 ## Epistemic Safeguards
 
-ScarMap is designed to avoid becoming a clever-analogy machine.
+BlackClaw is designed to avoid becoming a clever-analogy machine.
 
 Current and in-progress safeguards include:
 
@@ -77,11 +89,11 @@ Current and in-progress safeguards include:
 * cost and token tracking,
 * increasingly structured prediction enforcement.
 
-The goal is to move from interesting outputs toward evidence-grounded, testable structural hypotheses.
+The goal is to move from interesting outputs toward evidence-grounded, useful transmissions.
 
-## What ScarMap Is Not
+## What BlackClaw Is Not
 
-ScarMap is not:
+BlackClaw is not:
 
 * a general-purpose chatbot,
 * a social posting bot,
@@ -93,9 +105,9 @@ ScarMap is not:
 
 The project is moving through this progression:
 
-**structural hypothesis generation → epistemic grounding → prediction enforcement → mechanism typing → outcome learning → scar lineage**
+**structural hypothesis generation → epistemic grounding → prediction enforcement → mechanism typing → outcome learning → useful transmissions → proto-discovery**
 
-That means the near-term goal is not “discoveries on demand.” The near-term goal is a system whose strongest transmissions are grounded, testable, and worth revisiting.
+That means the near-term goal is not “discoveries on demand.” The near-term goal is a system whose strongest transmissions are grounded, testable, and worth acting on.
 
 ## Roadmap Snapshot
 
@@ -115,7 +127,8 @@ That means the near-term goal is not “discoveries on demand.” The near-term 
 * mechanism typing
 * prediction outcome tracking
 * credibility-weighted scoring
-* explicit scar lineage and helix memory
+* explicit lineage and convergence memory
+* stronger utility filtering
 
 ## Repository Structure
 
@@ -185,26 +198,19 @@ Current views include:
 
 ## Limitations
 
-ScarMap still has important limitations:
+BlackClaw still has important limitations:
 
 * claim-level provenance is still being tightened,
 * prediction quality is not yet central enough,
 * mechanism typing is not fully implemented,
 * outcome learning is not yet mature,
-* structural transfer remains research-adjacent.
+* structural transfer remains research-adjacent,
+* utility filtering still needs to become more explicit.
 
 ## Philosophy in One Paragraph
 
-ScarMap is built on the idea that the most valuable outputs are not polished monuments but durable traces of difficult contact with hard-to-map structure. The system should preserve evidence, contradictions, and lineage strongly enough that later loops can build on them, reject them, or elevate them.
+BlackClaw is built on the idea that distant domains can share real structure, and that some of those shared mechanisms can produce usable insight. The system should preserve evidence, contradictions, lineage, and predictions strongly enough that later loops can refine, reject, or elevate the transmission — but the goal is not just elegant output. The goal is useful signal.
 
-## Suggested Rename Notes
+## Bottom Line
 
-If you do rename the repo/project, the cleanest options are:
-
-1. **ScarMap** — strongest philosophical fit and best differentiation
-2. **HelixMap** — emphasizes repeated loops that elevate over time
-3. **ProtoClaw** — keeps some continuity with BlackClaw while sounding more experimental
-
-My recommendation is **ScarMap**.
-
-It is shorter, more distinctive, and better aligned with the actual product direction than BlackClaw.
+BlackClaw is trying to become a system that finds useful structural leverage across domains and rejects everything that is merely clever.
