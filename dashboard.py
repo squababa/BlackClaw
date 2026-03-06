@@ -1,11 +1,12 @@
 import json
 import os
+import re
 import sqlite3
 from html import escape
 from pathlib import Path
 from urllib.parse import quote
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 
 DEFAULT_EXPLORATION_LIMIT = 50
@@ -82,6 +83,29 @@ def _get_transmissions() -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+def _get_transmission_export_row(transmission_id: int) -> dict | None:
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            t.id,
+            t.transmission_number,
+            t.formatted_output,
+            e.seed_domain,
+            e.jump_target_domain,
+            e.connection_description,
+            e.novelty_score,
+            e.depth_score,
+            e.distance_score,
+            e.total_score
+        FROM transmissions t
+        LEFT JOIN explorations e ON e.id = t.exploration_id
+        WHERE t.id = ?""",
+        (transmission_id,),
+    ).fetchone()
+    conn.close()
+    return _row_to_dict(row)
 
 
 def _format_score(value) -> str:
@@ -302,6 +326,160 @@ def _get_domain_stats() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _extract_transmission_sections(formatted_output: str) -> dict[str, str]:
+    section_names = {
+        "3) VARIABLE MAPPING": "variable_mapping",
+        "4) MECHANISM": "mechanism",
+        "5) PREDICTION": "prediction",
+        "6) TEST": "test",
+        "8) OPTIONAL SUMMARY": "optional_summary",
+    }
+    sections: dict[str, str] = {}
+    current_section = None
+    buffer: list[str] = []
+
+    def _flush():
+        nonlocal buffer, current_section
+        if current_section is None:
+            return
+        cleaned_lines = []
+        for line in buffer:
+            if line.startswith("    "):
+                cleaned_lines.append(line[4:])
+            elif line.startswith("  "):
+                cleaned_lines.append(line[2:])
+            else:
+                cleaned_lines.append(line)
+        sections[current_section] = "\n".join(cleaned_lines).strip()
+
+    for raw_line in str(formatted_output or "").splitlines():
+        stripped = raw_line.strip()
+        if stripped in section_names:
+            _flush()
+            current_section = section_names[stripped]
+            buffer = []
+            continue
+        if current_section is not None:
+            buffer.append(raw_line.rstrip())
+    _flush()
+    return sections
+
+
+def _collapse_whitespace(value: str | None) -> str:
+    if value is None:
+        return "—"
+    collapsed = " ".join(str(value).split())
+    return collapsed or "—"
+
+
+def _first_sentence(value: str | None) -> str:
+    text = _collapse_whitespace(value)
+    if text == "—":
+        return text
+    match = re.search(r"^.*?[.!?](?=\s|$)", text)
+    return match.group(0).strip() if match else text
+
+
+def _format_mapping_lines(mapping_text: str | None) -> str:
+    if not mapping_text:
+        return "- —"
+    try:
+        parsed = json.loads(mapping_text)
+    except (TypeError, ValueError):
+        parsed = None
+
+    if isinstance(parsed, dict):
+        lines = []
+        for source, target in parsed.items():
+            source_text = _collapse_whitespace(source)
+            if isinstance(target, (dict, list)):
+                target_text = json.dumps(target, ensure_ascii=False)
+            else:
+                target_text = _collapse_whitespace(target)
+            lines.append(f"- {source_text} → {target_text}")
+        return "\n".join(lines) if lines else "- —"
+
+    if isinstance(parsed, list):
+        lines = []
+        for item in parsed:
+            if isinstance(item, dict):
+                source = item.get("source") or item.get("from") or item.get("left") or "—"
+                target = item.get("target") or item.get("to") or item.get("right") or "—"
+                lines.append(f"- {_collapse_whitespace(source)} → {_collapse_whitespace(target)}")
+            else:
+                lines.append(f"- {_collapse_whitespace(item)}")
+        return "\n".join(lines) if lines else "- —"
+
+    fallback_lines = [
+        f"- {_collapse_whitespace(line)}"
+        for line in str(mapping_text).splitlines()
+        if _collapse_whitespace(line) != "—"
+    ]
+    return "\n".join(fallback_lines) if fallback_lines else "- —"
+
+
+def _format_test_line(test_text: str | None) -> str:
+    if not test_text:
+        return "—"
+    parts: dict[str, str] = {}
+    for line in str(test_text).splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        parts[key.strip().lower()] = _collapse_whitespace(value)
+
+    segments = []
+    if parts.get("metric"):
+        segments.append(f"Metric: {parts['metric']}")
+    if parts.get("confirm"):
+        segments.append(f"Confirm: {parts['confirm']}")
+    if parts.get("falsify"):
+        segments.append(f"Falsify: {parts['falsify']}")
+
+    if segments:
+        return " ".join(segments)
+    return _collapse_whitespace(test_text)
+
+
+def _build_transmission_markdown(row: dict) -> str:
+    sections = _extract_transmission_sections(row.get("formatted_output") or "")
+    mechanism_text = _collapse_whitespace(sections.get("mechanism"))
+    hook_text = _first_sentence(
+        sections.get("optional_summary")
+        or row.get("connection_description")
+        or sections.get("mechanism")
+    )
+    prediction_text = _collapse_whitespace(sections.get("prediction"))
+    mapping_lines = _format_mapping_lines(sections.get("variable_mapping"))
+    test_line = _format_test_line(sections.get("test"))
+
+    lines = [
+        f"## {row.get('seed_domain') or 'Unknown Seed'} ↔ {row.get('jump_target_domain') or 'Unknown Target'}",
+        "",
+        f"**The hook:** {hook_text}",
+        "",
+        f"**The mechanism:** {mechanism_text}",
+        "",
+        "**Variable mapping:**",
+        mapping_lines,
+        "",
+        f"**Prediction:** {prediction_text}",
+        "",
+        f"**How to test it:** {test_line}",
+        "",
+        (
+            "**Scores:** "
+            f"Novelty {_format_score(row.get('novelty_score'))} | "
+            f"Depth {_format_score(row.get('depth_score'))} | "
+            f"Distance {_format_score(row.get('distance_score'))} | "
+            f"Total {_format_score(row.get('total_score'))}"
+        ),
+        "",
+        "*Found by BlackClaw — autonomous curiosity engine*",
+    ]
+    return "\n".join(lines)
+
+
 @app.errorhandler(sqlite3.OperationalError)
 def handle_db_error(exc):
     return jsonify({"error": str(exc), "db_path": DB_PATH}), 500
@@ -340,6 +518,17 @@ def api_grade_transmission(transmission_id: int):
     if cursor.rowcount < 1:
         return jsonify({"error": "transmission not found", "id": transmission_id}), 404
     return jsonify({"ok": True})
+
+
+@app.get("/api/transmissions/<int:transmission_id>/markdown")
+def api_transmission_markdown(transmission_id: int):
+    row = _get_transmission_export_row(transmission_id)
+    if row is None:
+        return jsonify({"error": "transmission not found", "id": transmission_id}), 404
+    return Response(
+        _build_transmission_markdown(row),
+        mimetype="text/plain",
+    )
 
 
 @app.get("/api/explorations")
@@ -560,6 +749,11 @@ def index():
       font-size: 13px;
       min-width: 48px;
     }
+    .copy-status {
+      color: var(--accent);
+      font-size: 13px;
+      min-width: 56px;
+    }
     .top-killed-row {
       cursor: pointer;
     }
@@ -629,6 +823,15 @@ def index():
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload.error || "Request failed");
+      }
+      return payload;
+    }
+
+    async function fetchText(url) {
+      const response = await fetch(url);
+      const payload = await response.text();
+      if (!response.ok) {
+        throw new Error(payload || "Request failed");
       }
       return payload;
     }
@@ -865,6 +1068,32 @@ def index():
       });
     }
 
+    function attachCopyHandlers() {
+      document.querySelectorAll(".copy-markdown").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const transmissionId = Number(button.dataset.transmissionId);
+          const status = button.parentElement.querySelector(".copy-status");
+          status.textContent = "Copying...";
+          button.disabled = true;
+
+          try {
+            const markdown = await fetchText(`/api/transmissions/${transmissionId}/markdown`);
+            await navigator.clipboard.writeText(markdown);
+            status.textContent = "Copied!";
+            window.setTimeout(() => {
+              if (status.textContent === "Copied!") {
+                status.textContent = "";
+              }
+            }, 1500);
+          } catch (error) {
+            status.textContent = error instanceof Error ? error.message : "Copy failed";
+          } finally {
+            button.disabled = false;
+          }
+        });
+      });
+    }
+
     function renderTransmissions(rows) {
       transmissionRows = rows;
       renderGradeSummary(rows);
@@ -893,10 +1122,13 @@ def index():
             >
             <button type="button" class="grade-save" data-transmission-id="${escapeHtml(row.id)}">Save</button>
             <span class="grade-status"></span>
+            <button type="button" class="copy-markdown" data-transmission-id="${escapeHtml(row.id)}">Copy MD</button>
+            <span class="copy-status"></span>
           </div>
         </div>
       `).join("");
       attachGradeHandlers();
+      attachCopyHandlers();
     }
 
     function renderError(error) {
