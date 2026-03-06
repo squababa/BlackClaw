@@ -4,6 +4,8 @@ Hard gate for transmission-quality hypotheses.
 """
 import re
 
+from prediction_enforcement import normalize_prediction_payload, prediction_summary_text
+
 UNIVERSAL_MECHANISM_WORDS = {
     "emergence",
     "feedback",
@@ -201,12 +203,18 @@ def _validate_mechanism(mechanism: object) -> list[str]:
 
 def _validate_prediction(prediction: object) -> list[str]:
     reasons: list[str] = []
-    text = prediction if isinstance(prediction, str) else ""
-    if not text.strip():
+    normalized_prediction = normalize_prediction_payload(prediction)
+    text = prediction_summary_text(normalized_prediction) or ""
+    observable = normalized_prediction.get("observable") or ""
+    magnitude = normalized_prediction.get("magnitude") or ""
+    check_text = " ".join(
+        value for value in (text, str(observable), str(magnitude)) if str(value).strip()
+    )
+    if not check_text.strip():
         return ["prediction must be present and non-empty"]
-    if len(text.strip()) < 30:
+    if len(check_text.strip()) < 30:
         reasons.append("prediction must be falsifiable")
-    if not _has_metric_text(text):
+    if not _has_metric_text(check_text):
         reasons.append("prediction must include a measurable outcome or metric")
     return reasons
 

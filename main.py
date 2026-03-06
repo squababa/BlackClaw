@@ -10,6 +10,11 @@ import re
 import sqlite3
 import sys
 import time
+from prediction_enforcement import (
+    evaluate_prediction_quality,
+    prediction_quality_label,
+    prediction_summary_text,
+)
 from store import (
     _connect,
     init_db,
@@ -52,6 +57,10 @@ def _parse_report_only_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--kill-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--check-predictions",
         action="store_true",
     )
     parser.add_argument(
@@ -205,6 +214,63 @@ def _print_eval_stats(summaries: list[dict]):
                 for key, value in sorted(counts_by_category.items())
             )
             print(f"  counts_by_category: {counts_text}")
+
+
+def _prediction_quality_from_row(row: dict) -> dict:
+    """Use stored prediction quality when present, otherwise evaluate live."""
+    stored = row.get("prediction_quality")
+    if isinstance(stored, dict) and stored:
+        return stored
+    prediction_payload = row.get("prediction_json") or row.get("prediction")
+    return evaluate_prediction_quality(
+        {
+            "prediction": prediction_payload,
+            "test": row.get("test"),
+        }
+    )
+
+
+def _prediction_summary_from_row(row: dict) -> str:
+    """Build a compact prediction summary for reports."""
+    summary = prediction_summary_text(row.get("prediction_json") or {})
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    text = str(row.get("prediction") or "").replace("\n", " ").strip()
+    return text or "—"
+
+
+def _print_prediction_check_report(limit: int):
+    """Inspect recent predictions and report weak or incomplete ones."""
+    rows = list_predictions(limit=max(1, int(limit)))
+    if not rows:
+        print("[PredictionCheck] No predictions found.")
+        return
+
+    weak_rows: list[tuple[dict, dict]] = []
+    for row in rows:
+        quality = _prediction_quality_from_row(row)
+        if not quality.get("passes"):
+            weak_rows.append((row, quality))
+
+    print(f"[PredictionCheck] Reviewed {len(rows)} recent predictions")
+    print(f"Passing: {len(rows) - len(weak_rows)}")
+    print(f"Weak or incomplete: {len(weak_rows)}")
+    if not weak_rows:
+        print("No weak predictions found in the inspected window.")
+        return
+
+    print("id\ttx\tstatus\tquality\tassessment\tissues\tprediction")
+    for row, quality in weak_rows[:20]:
+        issues = quality.get("blocking_reasons") or quality.get("issues") or []
+        issues_text = "; ".join(str(item) for item in issues[:3]) or "n/a"
+        summary = _prediction_summary_from_row(row)
+        if len(summary) > 90:
+            summary = summary[:87].rstrip() + "..."
+        print(
+            f"{row.get('id')}\t{row.get('transmission_number')}\t"
+            f"{row.get('status')}\t{float(quality.get('score', 0.0)):.2f}\t"
+            f"{prediction_quality_label(quality)}\t{issues_text}\t{summary}"
+        )
 
 
 def _get_kill_stats(window: int) -> dict:
@@ -480,7 +546,10 @@ def _print_kill_stats(report: dict, window_requested: int):
 
 if __name__ == "__main__":
     _early_report_args = _parse_report_only_args()
-    if _early_report_args.kill_stats and _early_report_args.window <= 0:
+    if (
+        (_early_report_args.kill_stats or _early_report_args.check_predictions)
+        and _early_report_args.window <= 0
+    ):
         print("  [!] --window requires a positive integer.")
         sys.exit(1)
     if _early_report_args.rut_report and _early_report_args.rut_window <= 0:
@@ -491,6 +560,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if (
         _early_report_args.kill_stats
+        or _early_report_args.check_predictions
         or _early_report_args.rut_report
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
@@ -501,6 +571,8 @@ if __name__ == "__main__":
                 _get_kill_stats(window=_early_report_args.window),
                 _early_report_args.window,
             )
+        if _early_report_args.check_predictions:
+            _print_prediction_check_report(limit=_early_report_args.window)
         if _early_report_args.rut_report:
             _print_rut_report(rut_report(window=_early_report_args.rut_window))
         if _early_report_args.audit_reasoning:
@@ -635,7 +707,7 @@ def parse_args():
         type=int,
         default=200,
         metavar="N",
-        help="How many recent explorations to inspect for kill stats (default: 200)",
+        help="How many recent rows to inspect for kill stats or prediction checks (default: 200)",
     )
     parser.add_argument(
         "--star",
@@ -668,6 +740,11 @@ def parse_args():
         "--predictions",
         action="store_true",
         help="List the latest 20 predictions and exit",
+    )
+    parser.add_argument(
+        "--check-predictions",
+        action="store_true",
+        help="Inspect recent predictions for weak or incomplete schema fields and exit",
     )
     parser.add_argument(
         "--near-misses",
@@ -1113,12 +1190,18 @@ def _evaluate_connection_candidate(
     print(f"  [{score_label}] Evaluating...")
     scores = score_connection(connection, source_domain, target_domain)
     print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
+    prediction_quality = (
+        scores.get("prediction_quality")
+        if isinstance(scores.get("prediction_quality"), dict)
+        else evaluate_prediction_quality(connection)
+    )
 
     passes_threshold = scores["total"] >= threshold
     rewritten_description = connection.get("connection", "")
     validation_ok = True
     validation_reasons: list[str] = []
     validation_log = None
+    prediction_quality_ok = True
     adversarial_ok = True
     adversarial_rubric = None
     invariance_ok = True
@@ -1129,9 +1212,23 @@ def _evaluate_connection_candidate(
 
     if passes_threshold:
         validation_ok, validation_reasons = validate_hypothesis(connection)
+        prediction_quality_ok = bool(prediction_quality.get("passes"))
+        if not prediction_quality_ok:
+            quality_reasons = (
+                prediction_quality.get("blocking_reasons")
+                or prediction_quality.get("issues")
+                or ["prediction quality below enforcement threshold"]
+            )
+            validation_reasons.extend(
+                reason
+                for reason in quality_reasons
+                if isinstance(reason, str) and reason not in validation_reasons
+            )
+            validation_ok = False
         validation_log = {
             "passed": validation_ok,
             "rejection_reasons": validation_reasons if not validation_ok else [],
+            "prediction_quality": prediction_quality,
         }
         if not validation_ok:
             print("  [Validation] Rejected hypothesis - skipping transmission")
@@ -1308,6 +1405,9 @@ def _evaluate_connection_candidate(
         "validation_ok": validation_ok,
         "validation_reasons": validation_reasons,
         "validation_log": validation_log,
+        "prediction_quality_ok": prediction_quality_ok,
+        "prediction_quality": prediction_quality,
+        "prediction_quality_score": prediction_quality.get("score"),
         "adversarial_ok": adversarial_ok,
         "adversarial_rubric": adversarial_rubric,
         "invariance_ok": invariance_ok,
@@ -1682,6 +1782,7 @@ def _score_store_and_transmit(
             transmission_embedding=candidate["transmission_embedding"],
             mechanism_signature=signature,
             connection_payload=tx_connection,
+            prediction_quality=candidate["prediction_quality"],
         )
         print_transmission(formatted)
         transmitted = True
@@ -1895,6 +1996,7 @@ def main():
     prediction_action_count = sum(
         [
             args.predictions,
+            args.check_predictions,
             args.near_misses,
             args.audit_reasoning,
             args.prediction is not None,
@@ -1926,7 +2028,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --check-predictions, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and prediction_action_count > 0:
@@ -2002,14 +2104,20 @@ def main():
         if not rows:
             print("[Predictions] No predictions found.")
             return
-        print("id\tstatus\ttransmission\tprediction")
+        print("id\tstatus\ttransmission\tquality\tassessment\tprediction")
         for row in rows:
-            summary = (row.get("prediction") or "").replace("\n", " ").strip()
+            quality = _prediction_quality_from_row(row)
+            summary = _prediction_summary_from_row(row)
             if len(summary) > 120:
                 summary = summary[:117].rstrip() + "..."
             print(
-                f"{row.get('id')}\t{row.get('status')}\t{row.get('transmission_number')}\t{summary}"
+                f"{row.get('id')}\t{row.get('status')}\t{row.get('transmission_number')}\t"
+                f"{float(quality.get('score', 0.0)):.2f}\t{prediction_quality_label(quality)}\t{summary}"
             )
+        return
+
+    if args.check_predictions:
+        _print_prediction_check_report(limit=args.window)
         return
 
     if args.near_misses:
@@ -2039,6 +2147,8 @@ def main():
         if row is None:
             print(f"  [!] Prediction #{args.prediction} not found.")
             sys.exit(1)
+        if not row.get("prediction_quality"):
+            row["prediction_quality"] = _prediction_quality_from_row(row)
         print(json.dumps(row, ensure_ascii=False, indent=2))
         return
 

@@ -50,9 +50,12 @@ Requirements:
 - Keep target_domain aligned with Stage 1.
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
+- Provide `prediction` as a structured object with these keys:
+  observable, time_horizon, direction, magnitude, confidence,
+  falsification_condition, utility_rationale, who_benefits.
 - Provide a falsifiable test with metric + confirm + falsify.
 - The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Do not just describe a similarity - name the process.
-- The prediction must include a directional outcome (increase, decrease, higher, lower) and reference a measurable metric (rate, ratio, correlation, error, variance, etc.)
+- The prediction must include a directional outcome (increase, decrease, higher, lower), a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
 Return ONLY valid JSON. No markdown.
@@ -65,8 +68,17 @@ If valid:
   "connection": "2-4 sentence mechanism-level explanation",
   "mechanism": "specific shared process",
   "variable_mapping": {{"a_in_source": "b_in_target", "c_in_source": "d_in_target", "e_in_source": "f_in_target"}},
-  "prediction": "testable prediction implied by this mapping",
-  "test": {{"data": "specific dataset or experiment to use", "metric": "measurable quantity", "confirm": "what result confirms the hypothesis", "falsify": "what result falsifies it"}},
+  "prediction": {{
+    "observable": "measurable quantity or event",
+    "time_horizon": "when the observable should move",
+    "direction": "increase/decrease/higher/lower",
+    "magnitude": "expected effect size or threshold",
+    "confidence": "low/medium/high or numeric confidence",
+    "falsification_condition": "what concrete result would falsify the prediction",
+    "utility_rationale": "why this prediction is useful to test or act on",
+    "who_benefits": "who can use this prediction"
+  }},
+  "test": {{"data": "specific dataset or experiment to use", "metric": "measurable quantity", "horizon": "same or compatible time horizon", "confirm": "what result confirms the hypothesis", "falsify": "what result falsifies it"}},
   "assumptions": ["...", "..."],
   "boundary_conditions": "when this mapping should and should not hold",
   "evidence": "specific evidence from search results"
@@ -222,6 +234,33 @@ def _missing_required_fields(data: dict) -> list[str]:
             return has_metric and has_confirm and has_falsify
         return False
 
+    def _prediction_missing_fields(prediction: object) -> list[str]:
+        if not isinstance(prediction, dict):
+            return [
+                "prediction.observable",
+                "prediction.time_horizon",
+                "prediction.direction",
+                "prediction.magnitude",
+                "prediction.confidence",
+                "prediction.falsification_condition",
+                "prediction.utility_rationale",
+                "prediction.who_benefits",
+            ]
+        missing = []
+        for field in (
+            "observable",
+            "time_horizon",
+            "direction",
+            "magnitude",
+            "confidence",
+            "falsification_condition",
+            "utility_rationale",
+            "who_benefits",
+        ):
+            if not _is_non_empty(prediction.get(field)):
+                missing.append(f"prediction.{field}")
+        return missing
+
     missing: list[str] = []
     for field in ("source_domain", "target_domain", "connection"):
         if field not in data or not _is_non_empty(data.get(field)):
@@ -230,8 +269,7 @@ def _missing_required_fields(data: dict) -> list[str]:
         missing.append("mechanism")
     if _mapping_count(data.get("variable_mapping")) < 3:
         missing.append("variable_mapping")
-    if not _is_non_empty(data.get("prediction")):
-        missing.append("prediction")
+    missing.extend(_prediction_missing_fields(data.get("prediction")))
     if not _test_has_metric_confirm_falsify(data.get("test")):
         missing.append("test")
     if _assumptions_count(data.get("assumptions")) < 2:

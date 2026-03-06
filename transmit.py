@@ -6,6 +6,7 @@ import json
 from rich.console import Console
 from rich.panel import Panel
 from llm_client import get_llm_client
+from prediction_enforcement import format_prediction_block, prediction_quality_label, normalize_prediction_payload
 from sanitize import check_llm_output
 from store import increment_llm_calls
 from debug_log import log_gemini_output
@@ -184,9 +185,12 @@ def format_transmission(
 
     test_value = connection.get("test")
     test_data = test_value if isinstance(test_value, dict) else {}
-    prediction_text = _first_nonempty(
-        connection.get("prediction"),
-        test_data.get("prediction"),
+    normalized_prediction = normalize_prediction_payload(connection)
+    prediction_text = format_prediction_block(normalized_prediction)
+    prediction_quality = (
+        scores.get("prediction_quality")
+        if isinstance(scores.get("prediction_quality"), dict)
+        else {}
     )
 
     if isinstance(test_value, dict):
@@ -249,10 +253,30 @@ def format_transmission(
                 f"NOVELTY: {_format_score(scores.get('novelty'))} | "
                 f"DEPTH: {_format_score(scores.get('depth'))} | "
                 f"DISTANCE: {_format_score(scores.get('distance'))} | "
+                f"PRED_QUALITY: {_format_score(scores.get('prediction_quality_score'))} | "
                 f"TOTAL: {_format_score(scores.get('total'))}"
             ),
         ]
     )
+
+    if scores.get("base_total") is not None or prediction_quality:
+        lines.append(
+            "    "
+            f"BASE_TOTAL: {_format_score(scores.get('base_total'))} | "
+            f"PREDICTION_GATE: {prediction_quality_label(prediction_quality).upper()}"
+        )
+    if prediction_quality:
+        components = prediction_quality.get("components") or {}
+        lines.append(
+            "    "
+            f"PRED_BREAKDOWN: completeness {_format_score(components.get('completeness'))} | "
+            f"specificity {_format_score(components.get('specificity'))} | "
+            f"falsifiability {_format_score(components.get('falsifiability'))} | "
+            f"utility {_format_score(components.get('utility'))}"
+        )
+        issues = prediction_quality.get("blocking_reasons") or prediction_quality.get("issues") or []
+        if issues:
+            lines.append(f"    PRED_ISSUES: {'; '.join(str(item) for item in issues[:4])}")
 
     if scholarly_prior_art is not None:
         lines.append(f"    SCHOLARLY PRIOR ART: {scholarly_prior_art}")

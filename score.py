@@ -12,6 +12,7 @@ from pathlib import Path
 from tavily import TavilyClient
 from config import TAVILY_API_KEY, INVARIANCE_KILL_THRESHOLD, SCHOLAR_NOVELTY_ENABLED
 from llm_client import get_llm_client
+from prediction_enforcement import evaluate_prediction_quality
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
 from debug_log import log_gemini_output
@@ -23,6 +24,7 @@ SCHOLAR_CACHE_MAX_ENTRIES = 1000
 SCHOLAR_HTTP_TIMEOUT_SECONDS = 8
 SCHOLAR_WORKS_PER_QUERY = 5
 SCHOLAR_MAX_WORKS_TO_JUDGE = 10
+PREDICTION_QUALITY_WEIGHT = 0.2
 
 DISTANCE_PROMPT = """Rate the semantic distance between these two domains on a scale from 0.0 to 1.0.
 Domain A: {domain_a}
@@ -801,11 +803,19 @@ def score_connection(
                 if isinstance(scholarly_score, (int, float)):
                     novelty = min(novelty, float(scholarly_score))
                 scholarly_summary = scholarly.get("summary")
-    total = (0.35 * novelty) + (0.30 * distance) + (0.35 * depth)
+    prediction_quality = evaluate_prediction_quality(connection)
+    base_total = (0.35 * novelty) + (0.30 * distance) + (0.35 * depth)
+    total = (
+        ((1.0 - PREDICTION_QUALITY_WEIGHT) * base_total)
+        + (PREDICTION_QUALITY_WEIGHT * prediction_quality["score"])
+    )
     result = {
         "novelty": round(novelty, 3),
         "distance": round(distance, 3),
         "depth": round(depth, 3),
+        "base_total": round(base_total, 3),
+        "prediction_quality_score": round(prediction_quality["score"], 3),
+        "prediction_quality": prediction_quality,
         "total": round(total, 3),
     }
     if isinstance(scholarly_summary, str) and scholarly_summary.strip():

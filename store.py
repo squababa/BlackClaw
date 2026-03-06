@@ -16,6 +16,12 @@ try:
 except ImportError:
     load_dotenv = None
 
+from prediction_enforcement import (
+    normalize_prediction_payload,
+    prediction_summary_text,
+    prediction_test_text,
+)
+
 
 def _load_env():
     """Load .env file if python-dotenv is available."""
@@ -208,6 +214,9 @@ def init_db():
             prediction TEXT NOT NULL,
             test TEXT NOT NULL,
             metric TEXT,
+            prediction_json TEXT,
+            prediction_quality_json TEXT,
+            prediction_quality_score REAL,
             status TEXT NOT NULL DEFAULT "unknown",
             notes TEXT,
             created_at TEXT NOT NULL,
@@ -278,6 +287,15 @@ def init_db():
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_result TEXT")
     if "dive_timestamp" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_timestamp TEXT")
+    prediction_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()
+    }
+    if "prediction_json" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN prediction_json TEXT")
+    if "prediction_quality_json" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN prediction_quality_json TEXT")
+    if "prediction_quality_score" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN prediction_quality_score REAL")
     _ensure_api_usage_schema(conn)
     convergence_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(convergences)").fetchall()
@@ -522,6 +540,8 @@ def create_prediction(
     test: str,
     metric: str | None = None,
     notes: str | None = None,
+    prediction_json: dict | None = None,
+    prediction_quality: dict | None = None,
 ) -> int:
     """Create one prediction record. Returns prediction id."""
     conn = _connect()
@@ -532,6 +552,8 @@ def create_prediction(
         test=test,
         metric=metric,
         notes=notes,
+        prediction_json=prediction_json,
+        prediction_quality=prediction_quality,
     )
     conn.commit()
     conn.close()
@@ -545,18 +567,38 @@ def _create_prediction_with_conn(
     test: str,
     metric: str | None = None,
     notes: str | None = None,
+    prediction_json: dict | None = None,
+    prediction_quality: dict | None = None,
 ) -> int:
     """Create one prediction record using an existing transaction."""
     now = _now()
     cursor = conn.execute(
         """INSERT INTO predictions
-        (transmission_number, prediction, test, metric, status, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?)""",
+        (transmission_number, prediction, test, metric, prediction_json,
+         prediction_quality_json, prediction_quality_score, status, notes,
+         created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?)""",
         (
             transmission_number,
             prediction.strip(),
             test.strip(),
             metric.strip() if metric else None,
+            (
+                json.dumps(prediction_json, ensure_ascii=False)
+                if isinstance(prediction_json, dict) and prediction_json
+                else None
+            ),
+            (
+                json.dumps(prediction_quality, ensure_ascii=False)
+                if isinstance(prediction_quality, dict) and prediction_quality
+                else None
+            ),
+            (
+                float(prediction_quality.get("score"))
+                if isinstance(prediction_quality, dict)
+                and prediction_quality.get("score") is not None
+                else None
+            ),
             notes.strip() if notes else None,
             now,
             now,
@@ -577,6 +619,9 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 prediction,
                 test,
                 metric,
+                prediction_json,
+                prediction_quality_json,
+                prediction_quality_score,
                 status,
                 notes,
                 created_at,
@@ -598,6 +643,9 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 prediction,
                 test,
                 metric,
+                prediction_json,
+                prediction_quality_json,
+                prediction_quality_score,
                 status,
                 notes,
                 created_at,
@@ -609,7 +657,7 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
             (clean_status, safe_limit),
         ).fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    return [_prediction_row_to_dict(row) for row in rows]
 
 
 def _json_object_or_empty(value: object) -> dict:
@@ -626,6 +674,34 @@ def _json_object_or_empty(value: object) -> dict:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _prediction_row_to_dict(row: sqlite3.Row | dict) -> dict:
+    """Parse prediction row JSON payloads while keeping legacy text fields intact."""
+    payload = dict(row)
+    parsed_prediction = _json_object_or_empty(payload.get("prediction_json"))
+    if not parsed_prediction:
+        parsed_prediction = normalize_prediction_payload(
+            payload.get("prediction"),
+            payload.get("test"),
+        )
+    parsed_quality = _json_object_or_empty(payload.get("prediction_quality_json"))
+    quality_score = payload.get("prediction_quality_score")
+    try:
+        payload["prediction_quality_score"] = (
+            round(float(quality_score), 3) if quality_score is not None else None
+        )
+    except Exception:
+        payload["prediction_quality_score"] = None
+    if payload["prediction_quality_score"] is None and parsed_quality.get("score") is not None:
+        try:
+            payload["prediction_quality_score"] = round(float(parsed_quality["score"]), 3)
+        except Exception:
+            payload["prediction_quality_score"] = None
+    payload["prediction_json"] = parsed_prediction
+    payload["prediction_quality"] = parsed_quality if parsed_quality else None
+    payload.pop("prediction_quality_json", None)
+    return payload
 
 
 def _clean_reason_list(value: object) -> list[str]:
@@ -870,6 +946,9 @@ def get_prediction(id: int) -> dict | None:
             prediction,
             test,
             metric,
+            prediction_json,
+            prediction_quality_json,
+            prediction_quality_score,
             status,
             notes,
             created_at,
@@ -880,7 +959,7 @@ def get_prediction(id: int) -> dict | None:
         (id,),
     ).fetchone()
     conn.close()
-    return dict(row) if row else None
+    return _prediction_row_to_dict(row) if row else None
 
 
 def update_prediction_status(
@@ -927,6 +1006,7 @@ def save_transmission(
     mechanism_signature: str | None = None,
     exportable: bool = True,
     connection_payload: dict | None = None,
+    prediction_quality: dict | None = None,
 ) -> int:
     """Save a transmission. Returns transmission id."""
     conn = _connect()
@@ -958,8 +1038,14 @@ def save_transmission(
     )
     tid = cursor.lastrowid
     if isinstance(connection_payload, dict):
-        prediction = _prediction_text(connection_payload.get("prediction"))
-        test = _prediction_text(connection_payload.get("test"))
+        normalized_prediction = normalize_prediction_payload(connection_payload)
+        prediction = prediction_summary_text(normalized_prediction) or _prediction_text(
+            connection_payload.get("prediction")
+        )
+        test = prediction_test_text(
+            connection_payload.get("test"),
+            normalized_prediction,
+        ) or _prediction_text(connection_payload.get("test"))
         if prediction and test:
             _create_prediction_with_conn(
                 conn=conn,
@@ -968,6 +1054,8 @@ def save_transmission(
                 test=test,
                 metric=_extract_metric(connection_payload),
                 notes=_prediction_text(connection_payload.get("assumptions")),
+                prediction_json=normalized_prediction,
+                prediction_quality=prediction_quality,
             )
     conn.commit()
     conn.close()
@@ -1264,6 +1352,9 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 prediction,
                 test,
                 metric,
+                prediction_json,
+                prediction_quality_json,
+                prediction_quality_score,
                 status,
                 notes,
                 created_at,
@@ -1275,16 +1366,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
         ).fetchall()
         for pred_row in pred_rows:
             predictions_by_tx.setdefault(pred_row["transmission_number"], []).append(
-                {
-                    "id": pred_row["id"],
-                    "prediction": pred_row["prediction"],
-                    "test": pred_row["test"],
-                    "metric": pred_row["metric"],
-                    "status": pred_row["status"],
-                    "notes": pred_row["notes"],
-                    "created_at": pred_row["created_at"],
-                    "updated_at": pred_row["updated_at"],
-                }
+                _prediction_row_to_dict(pred_row)
             )
     conn.close()
     payload = []
