@@ -141,6 +141,57 @@ def format_transmission(
         except (TypeError, ValueError):
             return _first_nonempty(value)
 
+    def _format_evidence_map_block(value) -> str:
+        if not isinstance(value, dict):
+            return "—"
+
+        variable_entries = value.get("variable_mappings")
+        if not isinstance(variable_entries, list):
+            variable_entries = []
+        mechanism_entries = value.get("mechanism_assertions")
+        if not isinstance(mechanism_entries, list):
+            mechanism_entries = []
+
+        if not variable_entries and not mechanism_entries:
+            return "—"
+
+        lines: list[str] = []
+        if variable_entries:
+            lines.append("VARIABLE MAPPINGS:")
+            for idx, entry in enumerate(variable_entries, start=1):
+                if not isinstance(entry, dict):
+                    continue
+                source_variable = _first_nonempty(entry.get("source_variable"))
+                target_variable = _first_nonempty(entry.get("target_variable"))
+                claim = _first_nonempty(entry.get("claim"))
+                evidence_snippet = _first_nonempty(entry.get("evidence_snippet"))
+                source_reference = _first_nonempty(entry.get("source_reference"))
+                support_level = _clean_text(entry.get("support_level"))
+                lines.append(f"[{idx}] {source_variable} -> {target_variable}")
+                lines.append(f"  claim: {claim}")
+                lines.append(f"  evidence: {evidence_snippet}")
+                lines.append(f"  source: {source_reference}")
+                if support_level is not None:
+                    lines.append(f"  support: {support_level}")
+        else:
+            lines.append("VARIABLE MAPPINGS: —")
+
+        if mechanism_entries:
+            lines.append("MECHANISM ASSERTIONS:")
+            for idx, entry in enumerate(mechanism_entries, start=1):
+                if not isinstance(entry, dict):
+                    continue
+                mechanism_claim = _first_nonempty(entry.get("mechanism_claim"))
+                evidence_snippet = _first_nonempty(entry.get("evidence_snippet"))
+                source_reference = _first_nonempty(entry.get("source_reference"))
+                lines.append(f"[{idx}] claim: {mechanism_claim}")
+                lines.append(f"  evidence: {evidence_snippet}")
+                lines.append(f"  source: {source_reference}")
+        else:
+            lines.append("MECHANISM ASSERTIONS: —")
+
+        return "\n".join(lines) if lines else "—"
+
     source_data = connection.get("source")
     if not isinstance(source_data, dict):
         source_data = {}
@@ -209,6 +260,7 @@ def format_transmission(
 
     summary_text = _first_nonempty(connection.get("connection"))
     scholarly_prior_art = _clean_text(scores.get("scholarly_prior_art_summary"))
+    evidence_map_text = _format_evidence_map_block(connection.get("evidence_map"))
 
     lines = [
         f" ⚫ BLACKCLAW — TRANSMISSION #{transmission_number:04d}",
@@ -277,6 +329,11 @@ def format_transmission(
         issues = prediction_quality.get("blocking_reasons") or prediction_quality.get("issues") or []
         if issues:
             lines.append(f"    PRED_ISSUES: {'; '.join(str(item) for item in issues[:4])}")
+    if evidence_map_text == "—":
+        lines.append("    CLAIM_EVIDENCE_MAP: —")
+    else:
+        lines.append("    CLAIM_EVIDENCE_MAP:")
+        lines.append(_indent_block(evidence_map_text, "      "))
 
     if scholarly_prior_art is not None:
         lines.append(f"    SCHOLARLY PRIOR ART: {scholarly_prior_art}")

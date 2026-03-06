@@ -127,6 +127,7 @@ def init_db():
             validation_json TEXT,
             adversarial_rubric_json TEXT,
             invariance_json TEXT,
+            evidence_map_json TEXT,
             transmitted INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS transmissions (
@@ -143,6 +144,7 @@ def init_db():
             user_notes TEXT,
             dive_result TEXT,
             dive_timestamp TEXT,
+            evidence_map_json TEXT,
             FOREIGN KEY (exploration_id) REFERENCES explorations(id)
         );
         CREATE TABLE IF NOT EXISTS domains_visited (
@@ -266,6 +268,8 @@ def init_db():
         conn.execute("ALTER TABLE explorations ADD COLUMN adversarial_rubric_json TEXT")
     if "invariance_json" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN invariance_json TEXT")
+    if "evidence_map_json" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN evidence_map_json TEXT")
     transmission_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(transmissions)").fetchall()
     }
@@ -287,6 +291,8 @@ def init_db():
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_result TEXT")
     if "dive_timestamp" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_timestamp TEXT")
+    if "evidence_map_json" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN evidence_map_json TEXT")
     prediction_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()
     }
@@ -450,6 +456,7 @@ def save_exploration(
     validation_json: dict | str | None = None,
     adversarial_rubric: dict | None = None,
     invariance_json: dict | str | None = None,
+    evidence_map: dict | None = None,
     transmitted: bool = False,
 ) -> int:
     """Save an exploration attempt. Returns the exploration id."""
@@ -460,8 +467,8 @@ def save_exploration(
          connection_description, scholarly_prior_art_summary, chain_path, seed_url,
          seed_excerpt, target_url, target_excerpt, novelty_score, distance_score,
          depth_score, total_score, validation_json, adversarial_rubric_json,
-         invariance_json, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         invariance_json, evidence_map_json, transmitted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
@@ -499,6 +506,11 @@ def save_exploration(
                     if isinstance(invariance_json, str) and invariance_json.strip()
                     else None
                 )
+            ),
+            (
+                json.dumps(evidence_map, ensure_ascii=False)
+                if isinstance(evidence_map, dict)
+                else None
             ),
             1 if transmitted else 0,
         ),
@@ -821,14 +833,35 @@ def get_reasoning_failure_audit(limit: int = 200) -> dict:
     }
 
 
-def _extract_variable_mapping_from_signature(signature: str | None) -> str:
-    """Extract variable_mapping component from stored mechanism signature text."""
+def _extract_signature_component(signature: str | None, field_name: str) -> str:
+    """Extract one named component from stored mechanism signature text."""
     if not signature:
         return ""
-    for line in signature.splitlines():
-        if line.startswith("variable_mapping:"):
-            return line.split(":", 1)[1].strip()
-    return ""
+    prefixes = ("mechanism:", "variable_mapping:", "prediction:")
+    target_prefix = f"{field_name}:"
+    lines = str(signature).splitlines()
+    collecting = False
+    buffer: list[str] = []
+    for line in lines:
+        if line.startswith(target_prefix):
+            collecting = True
+            buffer.append(line.split(":", 1)[1].strip())
+            continue
+        if collecting and any(line.startswith(prefix) for prefix in prefixes):
+            break
+        if collecting:
+            buffer.append(line.rstrip())
+    return "\n".join(part for part in buffer if part).strip()
+
+
+def _extract_variable_mapping_from_signature(signature: str | None) -> str:
+    """Extract variable_mapping component from stored mechanism signature text."""
+    return _extract_signature_component(signature, "variable_mapping")
+
+
+def _extract_mechanism_from_signature(signature: str | None) -> str:
+    """Extract mechanism component from stored mechanism signature text."""
+    return _extract_signature_component(signature, "mechanism")
 
 
 def list_near_misses(limit: int = 20) -> list[dict]:
@@ -936,6 +969,49 @@ def list_near_misses(limit: int = 20) -> list[dict]:
     ]
 
 
+def list_recent_transmission_provenance(limit: int = 20) -> list[dict]:
+    """List recent transmissions with stored claim-level provenance payloads."""
+    conn = _connect()
+    safe_limit = max(1, int(limit))
+    rows = conn.execute(
+        """SELECT
+            t.transmission_number,
+            t.timestamp,
+            t.evidence_map_json,
+            t.mechanism_signature,
+            e.seed_domain,
+            e.jump_target_domain
+        FROM transmissions t
+        LEFT JOIN explorations e ON e.id = t.exploration_id
+        ORDER BY t.transmission_number DESC
+        LIMIT ?""",
+        (safe_limit,),
+    ).fetchall()
+    conn.close()
+
+    payload = []
+    for row in rows:
+        evidence_map_raw = row["evidence_map_json"]
+        payload.append(
+            {
+                "transmission_number": row["transmission_number"],
+                "timestamp": row["timestamp"],
+                "source_domain": row["seed_domain"],
+                "target_domain": row["jump_target_domain"],
+                "has_evidence_map": isinstance(evidence_map_raw, str)
+                and bool(evidence_map_raw.strip()),
+                "evidence_map": _json_object_or_empty(evidence_map_raw),
+                "mechanism": _extract_mechanism_from_signature(
+                    row["mechanism_signature"]
+                ),
+                "variable_mapping": _extract_variable_mapping_from_signature(
+                    row["mechanism_signature"]
+                ),
+            }
+        )
+    return payload
+
+
 def get_prediction(id: int) -> dict | None:
     """Get one prediction by id."""
     conn = _connect()
@@ -1007,6 +1083,7 @@ def save_transmission(
     exportable: bool = True,
     connection_payload: dict | None = None,
     prediction_quality: dict | None = None,
+    evidence_map: dict | None = None,
 ) -> int:
     """Save a transmission. Returns transmission id."""
     conn = _connect()
@@ -1020,11 +1097,22 @@ def save_transmission(
     if clean_signature:
         sig_result = _record_signature_convergence(conn, clean_signature)
         cluster_id = sig_result.get("cluster_id")
+    stored_evidence_map = (
+        evidence_map
+        if isinstance(evidence_map, dict)
+        else (
+            connection_payload.get("evidence_map")
+            if isinstance(connection_payload, dict)
+            and isinstance(connection_payload.get("evidence_map"), dict)
+            else None
+        )
+    )
     cursor = conn.execute(
         """INSERT INTO transmissions
         (transmission_number, timestamp, exploration_id, formatted_output,
-         transmission_embedding, mechanism_signature, signature_cluster_id, exportable)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+         transmission_embedding, mechanism_signature, signature_cluster_id, exportable,
+         evidence_map_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             transmission_number,
             _now(),
@@ -1034,6 +1122,11 @@ def save_transmission(
             clean_signature or None,
             cluster_id,
             1 if exportable else 0,
+            (
+                json.dumps(stored_evidence_map, ensure_ascii=False)
+                if isinstance(stored_evidence_map, dict)
+                else None
+            ),
         ),
     )
     tid = cursor.lastrowid
@@ -1117,6 +1210,7 @@ def get_transmission_feedback_context(transmission_number: int) -> dict | None:
             t.user_notes,
             t.dive_result,
             t.dive_timestamp,
+            t.evidence_map_json,
             e.seed_domain,
             e.jump_target_domain,
             e.connection_description,
@@ -1144,6 +1238,7 @@ def get_transmission_feedback_context(transmission_number: int) -> dict | None:
     except Exception:
         adversarial = {}
     out["adversarial_rubric"] = adversarial
+    out["evidence_map"] = _json_object_or_empty(out.get("evidence_map_json"))
     return out
 
 
@@ -1317,6 +1412,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
             t.formatted_output,
             t.mechanism_signature,
             t.signature_cluster_id,
+            t.evidence_map_json,
             t.user_rating,
             t.user_notes,
             t.dive_result,
@@ -1394,6 +1490,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 )
             except Exception:
                 invariance_json = invariance_json
+        evidence_map = _json_object_or_empty(row["evidence_map_json"])
         dive_result = row["dive_result"]
         if isinstance(dive_result, str) and len(dive_result) > 4000:
             dive_result = dive_result[:4000].rstrip() + "\n[...truncated]"
@@ -1411,6 +1508,7 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 "target_excerpt": row["target_excerpt"],
                 "mechanism_signature": row["mechanism_signature"],
                 "cluster_id": row["signature_cluster_id"],
+                "evidence_map": evidence_map if evidence_map else None,
                 "scores": {
                     "novelty": row["novelty_score"],
                     "depth": row["depth_score"],

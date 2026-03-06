@@ -15,6 +15,11 @@ from prediction_enforcement import (
     prediction_quality_label,
     prediction_summary_text,
 )
+from hypothesis_validation import (
+    normalize_evidence_map,
+    summarize_evidence_map_provenance,
+    validate_hypothesis,
+)
 from store import (
     _connect,
     init_db,
@@ -40,6 +45,7 @@ from store import (
     rut_report,
     save_evaluation,
     list_evaluation_run_summaries,
+    list_recent_transmission_provenance,
 )
 
 CLAUDE_SONNET_INPUT_RATE_PER_MTOK = 3.0
@@ -61,6 +67,10 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--check-predictions",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--check-provenance",
         action="store_true",
     )
     parser.add_argument(
@@ -270,6 +280,57 @@ def _print_prediction_check_report(limit: int):
             f"{row.get('id')}\t{row.get('transmission_number')}\t"
             f"{row.get('status')}\t{float(quality.get('score', 0.0)):.2f}\t"
             f"{prediction_quality_label(quality)}\t{issues_text}\t{summary}"
+        )
+
+
+def _print_provenance_check_report(limit: int):
+    """Inspect recent transmissions for claim-level evidence coverage."""
+    rows = list_recent_transmission_provenance(limit=max(1, int(limit)))
+    if not rows:
+        print("[ProvenanceCheck] No transmissions found.")
+        return
+
+    def _truncate(text: str, limit: int) -> str:
+        cleaned = " ".join(str(text or "").split()).strip()
+        if len(cleaned) <= limit:
+            return cleaned or "—"
+        return cleaned[: limit - 3].rstrip() + "..."
+
+    print(f"[ProvenanceCheck] Reviewed {len(rows)} recent transmissions")
+    print("tx\tstatus\tvariables\tmechanism\tdomains\tissues")
+    for row in rows:
+        summary = summarize_evidence_map_provenance(
+            {
+                "variable_mapping": row.get("variable_mapping"),
+                "mechanism": row.get("mechanism"),
+                "evidence_map": row.get("evidence_map"),
+            }
+        )
+        has_evidence_map = bool(row.get("has_evidence_map"))
+        if not has_evidence_map:
+            status = "legacy"
+            issues_text = "evidence_map not stored for this transmission"
+        else:
+            status = "pass" if summary.get("passes") else "fail"
+            issues = summary.get("issues") or []
+            issues_text = "; ".join(str(item) for item in issues[:3]) or "—"
+
+        variables_text = (
+            f"{int(summary.get('supported_critical_mapping_count', 0))}/"
+            f"{int(summary.get('critical_mapping_count', 0))}"
+        )
+        mechanism_text = (
+            f"{min(int(summary.get('supported_mechanism_assertion_count', 0)), 1)}/"
+            f"{int(summary.get('required_mechanism_assertion_count', 0))}"
+        )
+        domains_text = (
+            f"{row.get('source_domain') or 'Unknown'} → "
+            f"{row.get('target_domain') or 'Unknown'}"
+        )
+        print(
+            f"{row.get('transmission_number')}\t{status}\t{variables_text}\t"
+            f"{mechanism_text}\t{_truncate(domains_text, 42)}\t"
+            f"{_truncate(issues_text, 110)}"
         )
 
 
@@ -547,7 +608,11 @@ def _print_kill_stats(report: dict, window_requested: int):
 if __name__ == "__main__":
     _early_report_args = _parse_report_only_args()
     if (
-        (_early_report_args.kill_stats or _early_report_args.check_predictions)
+        (
+            _early_report_args.kill_stats
+            or _early_report_args.check_predictions
+            or _early_report_args.check_provenance
+        )
         and _early_report_args.window <= 0
     ):
         print("  [!] --window requires a positive integer.")
@@ -561,6 +626,7 @@ if __name__ == "__main__":
     if (
         _early_report_args.kill_stats
         or _early_report_args.check_predictions
+        or _early_report_args.check_provenance
         or _early_report_args.rut_report
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
@@ -573,6 +639,8 @@ if __name__ == "__main__":
             )
         if _early_report_args.check_predictions:
             _print_prediction_check_report(limit=_early_report_args.window)
+        if _early_report_args.check_provenance:
+            _print_provenance_check_report(limit=_early_report_args.window)
         if _early_report_args.rut_report:
             _print_rut_report(rut_report(window=_early_report_args.rut_window))
         if _early_report_args.audit_reasoning:
@@ -599,7 +667,6 @@ from score import (
     run_adversarial_rubric,
     run_invariance_check,
 )
-from hypothesis_validation import validate_hypothesis
 from llm_client import get_llm_client
 from sanitize import check_llm_output
 from transmit import (
@@ -745,6 +812,11 @@ def parse_args():
         "--check-predictions",
         action="store_true",
         help="Inspect recent predictions for weak or incomplete schema fields and exit",
+    )
+    parser.add_argument(
+        "--check-provenance",
+        action="store_true",
+        help="Inspect recent transmissions for claim-level evidence coverage and exit",
     )
     parser.add_argument(
         "--near-misses",
@@ -1187,6 +1259,10 @@ def _evaluate_connection_candidate(
     dedup_enabled: bool = True,
 ) -> dict:
     """Run scoring and all gating logic for one candidate connection."""
+    connection = dict(connection) if isinstance(connection, dict) else {}
+    connection["evidence_map"] = normalize_evidence_map(connection.get("evidence_map"))
+    claim_provenance = summarize_evidence_map_provenance(connection)
+
     print(f"  [{score_label}] Evaluating...")
     scores = score_connection(connection, source_domain, target_domain)
     print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
@@ -1201,6 +1277,7 @@ def _evaluate_connection_candidate(
     validation_ok = True
     validation_reasons: list[str] = []
     validation_log = None
+    claim_provenance_ok = bool(claim_provenance.get("passes"))
     prediction_quality_ok = True
     adversarial_ok = True
     adversarial_rubric = None
@@ -1229,6 +1306,7 @@ def _evaluate_connection_candidate(
             "passed": validation_ok,
             "rejection_reasons": validation_reasons if not validation_ok else [],
             "prediction_quality": prediction_quality,
+            "claim_provenance": claim_provenance,
         }
         if not validation_ok:
             print("  [Validation] Rejected hypothesis - skipping transmission")
@@ -1316,10 +1394,10 @@ def _evaluate_connection_candidate(
         and bool(target_excerpt.strip())
         and target_excerpt.strip().lower() not in {"(not available)", "-", "\u2014"}
     )
-    provenance_ok = bool(
+    source_target_provenance_ok = bool(
         seed_url_ok and seed_excerpt_ok and target_url_ok and target_excerpt_ok
     )
-    if not provenance_ok:
+    if not source_target_provenance_ok:
         print(
             "  [Provenance] - missing: "
             f"seed_url={'yes' if seed_url_ok else 'no'} "
@@ -1327,6 +1405,18 @@ def _evaluate_connection_candidate(
             f"target_url={'yes' if target_url_ok else 'no'} "
             f"target_excerpt={'yes' if target_excerpt_ok else 'no'}"
         )
+    if not claim_provenance_ok:
+        print(
+            "  [ProvenanceMap] - critical mappings "
+            f"{int(claim_provenance.get('supported_critical_mapping_count', 0))}/"
+            f"{int(claim_provenance.get('critical_mapping_count', 0))}; "
+            "mechanism "
+            f"{min(int(claim_provenance.get('supported_mechanism_assertion_count', 0)), 1)}/"
+            f"{int(claim_provenance.get('required_mechanism_assertion_count', 0))}"
+        )
+        for issue in (claim_provenance.get("issues") or [])[:4]:
+            print(f"  [ProvenanceMap] - {issue}")
+    provenance_ok = bool(source_target_provenance_ok and claim_provenance_ok)
 
     distance_score = scores.get("distance", 0)
     distance_ok = distance_score >= 0.5
@@ -1368,6 +1458,7 @@ def _evaluate_connection_candidate(
     prepared_connection["seed_url"] = seed_url
     prepared_connection["seed_excerpt"] = seed_excerpt
     prepared_connection["connection"] = rewritten_description
+    prepared_connection["evidence_map"] = claim_provenance.get("evidence_map")
 
     stage_failures: list[str] = []
     if not passes_threshold:
@@ -1388,6 +1479,10 @@ def _evaluate_connection_candidate(
         stage_failures.append("rewrite:boring")
     if semantic_duplicate:
         stage_failures.append("dedup:semantic_duplicate")
+    if not claim_provenance_ok:
+        for issue in claim_provenance.get("issues") or []:
+            if issue and issue not in validation_reasons:
+                stage_failures.append(f"claim_provenance:{issue}")
     if not provenance_ok:
         stage_failures.append("provenance:incomplete")
     if not distance_ok:
@@ -1408,6 +1503,7 @@ def _evaluate_connection_candidate(
         "prediction_quality_ok": prediction_quality_ok,
         "prediction_quality": prediction_quality,
         "prediction_quality_score": prediction_quality.get("score"),
+        "claim_provenance": claim_provenance,
         "adversarial_ok": adversarial_ok,
         "adversarial_rubric": adversarial_rubric,
         "invariance_ok": invariance_ok,
@@ -1463,6 +1559,16 @@ def _build_eval_notes(
     prior_art = candidate.get("scholarly_prior_art_summary")
     if isinstance(prior_art, str) and prior_art.strip():
         lines.append(f"scholarly_prior_art={prior_art.strip()}")
+    claim_provenance = candidate.get("claim_provenance") or {}
+    if claim_provenance:
+        lines.append(
+            "claim_provenance="
+            f"vars {int(claim_provenance.get('supported_critical_mapping_count', 0))}/"
+            f"{int(claim_provenance.get('critical_mapping_count', 0))}; "
+            "mechanism "
+            f"{min(int(claim_provenance.get('supported_mechanism_assertion_count', 0)), 1)}/"
+            f"{int(claim_provenance.get('required_mechanism_assertion_count', 0))}"
+        )
 
     return "\n".join(line for line in lines if line)
 
@@ -1750,6 +1856,7 @@ def _score_store_and_transmit(
         validation_json=candidate["validation_log"],
         adversarial_rubric=candidate["adversarial_rubric"],
         invariance_json=candidate["invariance_result"],
+        evidence_map=candidate["prepared_connection"].get("evidence_map"),
         transmitted=candidate["should_transmit"],
     )
 
@@ -1783,6 +1890,7 @@ def _score_store_and_transmit(
             mechanism_signature=signature,
             connection_payload=tx_connection,
             prediction_quality=candidate["prediction_quality"],
+            evidence_map=tx_connection.get("evidence_map"),
         )
         print_transmission(formatted)
         transmitted = True
@@ -1997,6 +2105,7 @@ def main():
         [
             args.predictions,
             args.check_predictions,
+            args.check_provenance,
             args.near_misses,
             args.audit_reasoning,
             args.prediction is not None,
@@ -2028,7 +2137,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --check-predictions, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --check-predictions, --check-provenance, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and prediction_action_count > 0:
@@ -2118,6 +2227,10 @@ def main():
 
     if args.check_predictions:
         _print_prediction_check_report(limit=args.window)
+        return
+
+    if args.check_provenance:
+        _print_provenance_check_report(limit=args.window)
         return
 
     if args.near_misses:

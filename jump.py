@@ -7,6 +7,7 @@ Two-stage process:
 import json
 from tavily import TavilyClient
 from config import TAVILY_API_KEY
+from hypothesis_validation import normalize_evidence_map
 from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
@@ -50,6 +51,11 @@ Requirements:
 - Keep target_domain aligned with Stage 1.
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
+- Provide evidence_map with claim-level evidence:
+  - evidence_map.variable_mappings must cover each critical mapping in variable_mapping (at least 3 entries).
+  - Each variable mapping entry must include source_variable, target_variable, claim, evidence_snippet, source_reference, and may include support_level.
+  - evidence_map.mechanism_assertions must include at least 1 entry with mechanism_claim, evidence_snippet, and source_reference.
+  - Keep evidence_snippet short and grounded in SEARCH RESULTS. Use a result title or URL for source_reference. Do not invent sources.
 - Provide `prediction` as a structured object with these keys:
   observable, time_horizon, direction, magnitude, confidence,
   falsification_condition, utility_rationale, who_benefits.
@@ -68,6 +74,25 @@ If valid:
   "connection": "2-4 sentence mechanism-level explanation",
   "mechanism": "specific shared process",
   "variable_mapping": {{"a_in_source": "b_in_target", "c_in_source": "d_in_target", "e_in_source": "f_in_target"}},
+  "evidence_map": {{
+    "variable_mappings": [
+      {{
+        "source_variable": "a_in_source",
+        "target_variable": "b_in_target",
+        "claim": "why this mapped variable corresponds across domains",
+        "evidence_snippet": "short supporting evidence from search results",
+        "source_reference": "title or URL from search results",
+        "support_level": "direct"
+      }}
+    ],
+    "mechanism_assertions": [
+      {{
+        "mechanism_claim": "the core causal/shared process",
+        "evidence_snippet": "short supporting evidence from search results",
+        "source_reference": "title or URL from search results"
+      }}
+    ]
+  }},
   "prediction": {{
     "observable": "measurable quantity or event",
     "time_horizon": "when the observable should move",
@@ -278,6 +303,11 @@ def _missing_required_fields(data: dict) -> list[str]:
         missing.append("boundary_conditions")
     if not _is_non_empty(data.get("evidence")):
         missing.append("evidence")
+    evidence_map = normalize_evidence_map(data.get("evidence_map"))
+    if len(evidence_map.get("variable_mappings", [])) < 3:
+        missing.append("evidence_map.variable_mappings")
+    if len(evidence_map.get("mechanism_assertions", [])) < 1:
+        missing.append("evidence_map.mechanism_assertions")
     return missing
 
 
@@ -383,6 +413,8 @@ def _stage_two_hypothesize(
         if _missing_required_fields(repaired):
             return None
         data = repaired
+
+    data["evidence_map"] = normalize_evidence_map(data.get("evidence_map"))
 
     # Jump output must never self-grade depth.
     data.pop("depth", None)
