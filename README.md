@@ -1,144 +1,210 @@
-# ⚫ BlackClaw
+# ScarMap
 
-**Autonomous Curiosity Engine**
+**ScarMap** is an evidence-grounded structural hypothesis engine that searches for deep cross-domain similarities, stress-tests them, and preserves the strongest survivors as auditable transmissions.
 
-BlackClaw is an AI agent that explores human knowledge autonomously — making lateral connections across unrelated domains and surfacing discoveries nobody has made before. It runs continuously, requires no prompting, and sends you transmissions when it finds something genuinely novel.
+It is not a content bot and not yet a full discovery engine. Its purpose is to generate distant structural candidates, ground them at the claim level, pressure them with validation and adversarial checks, and push surviving outputs toward falsifiable predictions.
 
-OpenClaw does what you ask. BlackClaw finds what nobody knows.
+## Why ScarMap
 
-## How It Works
+Most systems either retrieve what is already known or generate endless interesting analogies. ScarMap is built for the harder middle ground:
 
-BlackClaw runs a continuous exploration loop:
+* find non-obvious structural similarities across unrelated domains,
+* reject shallow pattern-matching,
+* preserve evidence and contradictions,
+* and build toward prediction-bearing, proto-discovery outputs.
 
-1. **Seed** — Picks a random domain of knowledge
-2. **Dive** — Searches and extracts core patterns from that domain
-3. **Jump** — Takes an abstract pattern and searches for it in completely unrelated fields
-4. **Score** — Evaluates novelty, cross-domain distance, and structural depth
-5. **Transmit** — If the connection is genuinely novel, outputs a transmission
+The name reflects the core philosophy of the project: the system should preserve structured traces of hard-won contact with difficult territory, not just polished final answers.
 
-## Quick Start
+## What ScarMap Does
+
+ScarMap runs a loop that:
+
+1. selects or derives a seed domain,
+2. explores source material for meaningful patterns,
+3. performs lateral jumps into distant domains,
+4. scores and validates candidate mappings,
+5. transmits the strongest candidates,
+6. stores results, convergences, and evaluation data for later review.
+
+## Current Capabilities
+
+* Autonomous exploration loop
+* Cross-domain jump generation
+* Score breakdowns for candidate transmissions
+* Validation and kill logic for weak candidates
+* Provenance-oriented workflow
+* SQLite-backed storage for explorations, transmissions, convergences, API usage, and evaluations
+* Dashboard with kill stats, cost stats, and transmission timeline
+* Golden-pair evaluation framework with stored eval runs
+* Token/cost tracking for LLM usage
+
+## Pipeline Overview
+
+### 1) Seed
+
+A topic or domain is selected either directly or through derived seed logic.
+
+### 2) Explore
+
+The system extracts patterns, mechanisms, and structural cues from the seed space.
+
+### 3) Jump
+
+It searches for distant domains that may instantiate a similar structural pattern.
+
+### 4) Validate
+
+Candidate mappings are stress-tested using score thresholds, adversarial checks, provenance requirements, and transmission criteria.
+
+### 5) Transmit
+
+High-quality candidates are formatted as transmissions rather than final claims.
+
+### 6) Store
+
+Results are written to SQLite for inspection, dashboarding, convergence tracking, and evaluation.
+
+## Epistemic Safeguards
+
+ScarMap is designed to avoid becoming a clever-analogy machine.
+
+Current and in-progress safeguards include:
+
+* provenance requirements,
+* golden-pair evaluation runs,
+* adversarial checks,
+* dashboard observability,
+* cost and token tracking,
+* increasingly structured prediction enforcement.
+
+The goal is to move from interesting outputs toward evidence-grounded, testable structural hypotheses.
+
+## What ScarMap Is Not
+
+ScarMap is not:
+
+* a general-purpose chatbot,
+* a social posting bot,
+* a pure retrieval engine,
+* a finished scientific discovery engine,
+* or a system that treats rhetorical elegance as proof.
+
+## Current Direction
+
+The project is moving through this progression:
+
+**structural hypothesis generation → epistemic grounding → prediction enforcement → mechanism typing → outcome learning → scar lineage**
+
+That means the near-term goal is not “discoveries on demand.” The near-term goal is a system whose strongest transmissions are grounded, testable, and worth revisiting.
+
+## Roadmap Snapshot
+
+### Built or partially built
+
+* core exploration pipeline
+* validation and transmission flow
+* convergence tracking foundations
+* dashboard observability
+* cost tracking
+* golden evaluation framework
+
+### Next major priorities
+
+* stronger prediction enforcement
+* claim-level evidence maps
+* mechanism typing
+* prediction outcome tracking
+* credibility-weighted scoring
+* explicit scar lineage and helix memory
+
+## Repository Structure
+
+Typical key files include:
+
+* `main.py` — main exploration loop, CLI, eval runner
+* `dashboard.py` — dashboard and JSON endpoints
+* `store.py` — SQLite schema and persistence helpers
+* `llm_client.py` — model provider client and usage logging
+* `seed.py` — seed selection logic
+* `explore.py` — pattern extraction from source material
+* `jump.py` — distant-domain connection generation
+* `score.py` — candidate scoring
+* `transmit.py` — transmission formatting
+* `sanitize.py` — content sanitization
+* `golden_eval_pairs.json` — evaluation set
+* `domains.json` — seed/domain source list
+
+## Getting Started
+
+### 1) Install dependencies
 
 ```bash
-# Clone
-git clone https://github.com/YOUR_USERNAME/blackclaw.git
-cd blackclaw
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Set up environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# Run single cycle (for testing)
-python main.py --once
-
-# Run continuously
-python main.py
 ```
 
-## Required API Keys
+### 2) Set environment variables
 
-- **Gemini API Key** — set `GEMINI_API_KEY` (currently active provider)
-- **Tavily API Key** — [tavily.com](https://tavily.com) (free tier: 1000 searches/month)
+Copy `.env.example` to `.env` and provide the required keys.
 
-Anthropic/Claude support is planned later. When enabled, it will use `ANTHROPIC_API_KEY`.
+### 3) Initialize and run
 
-## Provider Selection
-
-Set `LLM_PROVIDER` in `.env`:
-
-- `gemini` (default) — requires `GEMINI_API_KEY`
-- `claude` — requires `ANTHROPIC_API_KEY` (provider stub is present; calls not implemented yet)
-
-## Usage
+Run a single cycle:
 
 ```bash
-# Single exploration cycle
 python main.py --once
+```
 
-# Continuous with default settings (5 min cooldown)
+Run continuously:
+
+```bash
 python main.py
-
-# Custom cooldown and threshold
-python main.py --cooldown 60 --threshold 0.5
-
-# More patterns per cycle
-python main.py --max-patterns 5
 ```
 
-## Transmissions
+Open the dashboard using the project’s normal dashboard entrypoint.
 
-When BlackClaw finds a novel connection, it outputs a transmission:
+## Useful CLI Commands
 
-```
-⚫ BLACKCLAW — TRANSMISSION #0047
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Examples may include:
 
-  Ant colony foraging ↔ Medieval rumor propagation
-
-  Both systems spread information through networks without
-  central coordination. Both follow nearly identical decay
-  functions — information weakens over distance at the same
-  mathematical rate whether carried by pheromone or word of mouth.
-
-  NOVELTY: 0.92 | DEPTH: 0.78 | DISTANCE: 0.85 | TOTAL: 0.85
-
-  Path: Swarm Intelligence → information decay → Medieval Trade Routes
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```bash
+python main.py --kill-stats
+python main.py --eval-stats
+python main.py --run-eval --eval-limit 5 --eval-version smoke
 ```
 
-## Project Structure
+## Dashboard
 
-```
-blackclaw/
-├── main.py          # Entry point — runs the exploration loop
-├── config.py        # Configuration from environment variables
-├── seed.py          # Seed domain selection
-├── explore.py       # Dive + pattern extraction
-├── jump.py          # Lateral jump — the core creative engine
-├── score.py         # Novelty and connection scoring
-├── transmit.py      # Transmission formatting (Rich)
-├── store.py         # SQLite persistence
-├── sanitize.py      # Web content sanitization + security
-├── domains.json     # 100 curated seed domains
-├── .env.example     # Environment template
-├── .gitignore       # Keeps secrets out of git
-├── requirements.txt # Python dependencies
-└── README.md
-```
+The dashboard is intended as an observability surface, not just a showcase.
 
-## Security
+Current views include:
 
-- API keys are loaded from environment variables only — never stored in code
-- All web content is sanitized before reaching the LLM (prompt injection defense)
-- LLM outputs are validated before use (credential leak prevention)
-- Database uses parameterized queries only
-- `.env` and `.db` files are gitignored
+* kill stats,
+* cost stats,
+* transmission timeline,
+* and other operational summaries depending on current build state.
 
-## Fork It
+## Limitations
 
-BlackClaw is open source. The things worth changing:
+ScarMap still has important limitations:
 
-- **`domains.json`** — Point it at domains you care about
-- **`jump.py`** — Change how it makes lateral connections
-- **`score.py`** — Change what it considers interesting
-- **`explore.py`** — Change how it extracts patterns
+* claim-level provenance is still being tightened,
+* prediction quality is not yet central enough,
+* mechanism typing is not fully implemented,
+* outcome learning is not yet mature,
+* structural transfer remains research-adjacent.
 
-## Roadmap
+## Philosophy in One Paragraph
 
-- [ ] OpenClaw skill integration (messaging delivery)
-- [ ] User feedback loop (star / dismiss / dive)
-- [ ] Personalization over time
-- [ ] Meta-curiosity (self-auditing exploration patterns)
-- [ ] Semantic Scholar integration for academic depth
-- [ ] Web dashboard for browsing transmissions
+ScarMap is built on the idea that the most valuable outputs are not polished monuments but durable traces of difficult contact with hard-to-map structure. The system should preserve evidence, contradictions, and lineage strongly enough that later loops can build on them, reject them, or elevate them.
 
-## License
+## Suggested Rename Notes
 
-MIT
+If you do rename the repo/project, the cleanest options are:
 
------
+1. **ScarMap** — strongest philosophical fit and best differentiation
+2. **HelixMap** — emphasizes repeated loops that elevate over time
+3. **ProtoClaw** — keeps some continuity with BlackClaw while sounding more experimental
 
-*Built from a conversation about finding black.*
+My recommendation is **ScarMap**.
+
+It is shorter, more distinctive, and better aligned with the actual product direction than BlackClaw.
