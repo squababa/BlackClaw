@@ -152,6 +152,25 @@ def _get_transmissions() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _get_transmission_timeline() -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT
+            e.id AS exploration_id,
+            COALESCE(t.timestamp, e.timestamp) AS timestamp,
+            e.total_score,
+            e.transmitted,
+            t.transmission_number
+        FROM explorations e
+        LEFT JOIN transmissions t ON t.exploration_id = e.id
+        WHERE e.total_score IS NOT NULL
+          AND COALESCE(t.timestamp, e.timestamp) IS NOT NULL
+        ORDER BY COALESCE(t.timestamp, e.timestamp) ASC, e.id ASC"""
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def _get_transmission_export_row(transmission_id: int) -> dict | None:
     conn = _connect()
     row = conn.execute(
@@ -630,6 +649,11 @@ def api_transmissions():
     return jsonify(_get_transmissions())
 
 
+@app.get("/api/transmission-timeline")
+def api_transmission_timeline():
+    return jsonify(_get_transmission_timeline())
+
+
 @app.post("/api/transmissions/<int:transmission_id>/grade")
 def api_grade_transmission(transmission_id: int):
     payload = request.get_json(silent=True)
@@ -900,6 +924,40 @@ def index():
       font-size: 13px;
       min-width: 56px;
     }
+    .timeline-shell {
+      border: 1px solid var(--border-color);
+      padding: 12px;
+      background: var(--panel-alt);
+    }
+    .timeline-chart {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .timeline-meta,
+    .timeline-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .timeline-swatch {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 6px;
+      border-radius: 999px;
+      vertical-align: middle;
+    }
+    .timeline-swatch-transmitted {
+      background: var(--accent);
+    }
+    .timeline-swatch-untransmitted {
+      background: var(--kill-high);
+    }
     .top-killed-row {
       cursor: pointer;
     }
@@ -945,6 +1003,11 @@ def index():
   <section>
     <h2>Cost</h2>
     <div id="costs" class="grid"></div>
+  </section>
+
+  <section>
+    <h2>Transmission Timeline</h2>
+    <div id="transmission-timeline"><p class="muted">Loading…</p></div>
   </section>
 
   <section>
@@ -1001,6 +1064,16 @@ def index():
 
     function formatAverage(value) {
       return typeof value === "number" ? value.toFixed(2) : "n/a";
+    }
+
+    function formatTimelineDate(date, includeYear = false) {
+      return date.toLocaleString(undefined, {
+        ...(includeYear ? { year: "numeric" } : {}),
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
     }
 
     function escapeHtml(value) {
@@ -1066,6 +1139,117 @@ def index():
           <div class="stat-value ${item.valueClass || ""}">${escapeHtml(item.value)}</div>
         </div>
       `).join("");
+    }
+
+    function renderTransmissionTimeline(rows) {
+      const container = document.getElementById("transmission-timeline");
+      const points = rows
+        .map((row) => {
+          const time = Date.parse(row.timestamp);
+          const score = Number(row.total_score);
+          if (!Number.isFinite(time) || !Number.isFinite(score)) {
+            return null;
+          }
+          return {
+            time,
+            date: new Date(time),
+            score,
+            transmitted: Number(row.transmitted || 0) > 0,
+            transmissionNumber: row.transmission_number,
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.time - b.time);
+
+      if (!points.length) {
+        container.innerHTML = "<p class=\\"muted\\">No scored transmission data yet. Once explorations are recorded, the timeline will appear here.</p>";
+        return;
+      }
+
+      const width = 900;
+      const height = 320;
+      const padding = { top: 16, right: 20, bottom: 52, left: 58 };
+      const minTime = points[0].time;
+      const maxTime = points[points.length - 1].time;
+      const timeRange = Math.max(1, maxTime - minTime);
+      const rawMinScore = Math.min(...points.map((point) => point.score));
+      const rawMaxScore = Math.max(...points.map((point) => point.score));
+      const minScore = Math.min(0, rawMinScore);
+      const maxScore = Math.max(1, rawMaxScore);
+      const scoreRange = Math.max(0.001, maxScore - minScore);
+
+      function xFor(time) {
+        return padding.left + ((time - minTime) / timeRange) * (width - padding.left - padding.right);
+      }
+
+      function yFor(score) {
+        return height - padding.bottom - ((score - minScore) / scoreRange) * (height - padding.top - padding.bottom);
+      }
+
+      const yTicks = [minScore, minScore + scoreRange / 2, maxScore];
+      const xTicks = timeRange <= 1
+        ? [minTime]
+        : [minTime, minTime + timeRange / 2, maxTime];
+      const linePoints = points
+        .map((point) => `${xFor(point.time).toFixed(2)},${yFor(point.score).toFixed(2)}`)
+        .join(" ");
+
+      const gridLines = yTicks.map((tick) => {
+        const y = yFor(tick).toFixed(2);
+        return `
+          <line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="var(--border-color)" stroke-width="1" />
+          <text x="${padding.left - 8}" y="${y}" fill="var(--muted)" font-size="12" text-anchor="end" dominant-baseline="middle">${escapeHtml(tick.toFixed(2))}</text>
+        `;
+      }).join("");
+
+      const xLabels = xTicks.map((tick, index) => {
+        const x = xFor(tick).toFixed(2);
+        const anchor = index === 0 ? "start" : index === xTicks.length - 1 ? "end" : "middle";
+        return `
+          <text x="${x}" y="${height - 22}" fill="var(--muted)" font-size="12" text-anchor="${anchor}">${escapeHtml(formatTimelineDate(new Date(tick)))}</text>
+        `;
+      }).join("");
+
+      const circles = points.map((point) => {
+        const color = point.transmitted ? "var(--accent)" : "var(--kill-high)";
+        const label = point.transmitted && point.transmissionNumber != null
+          ? `Tx #${point.transmissionNumber}`
+          : "Not transmitted";
+        const title = `${formatTimelineDate(point.date, true)} | total_score ${point.score.toFixed(3)} | ${label}`;
+        return `
+          <circle
+            cx="${xFor(point.time).toFixed(2)}"
+            cy="${yFor(point.score).toFixed(2)}"
+            r="${point.transmitted ? 4 : 3.5}"
+            fill="${color}"
+            opacity="${point.transmitted ? 0.95 : 0.75}"
+          >
+            <title>${escapeHtml(title)}</title>
+          </circle>
+        `;
+      }).join("");
+
+      container.innerHTML = `
+        <div class="timeline-shell">
+          <svg class="timeline-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Transmission timeline of total scores over time">
+            <line x1="${padding.left}" y1="${padding.top}" x2="${padding.left}" y2="${height - padding.bottom}" stroke="var(--text)" stroke-width="1.5" />
+            <line x1="${padding.left}" y1="${height - padding.bottom}" x2="${width - padding.right}" y2="${height - padding.bottom}" stroke="var(--text)" stroke-width="1.5" />
+            ${gridLines}
+            ${points.length > 1 ? `<polyline fill="none" stroke="var(--muted)" stroke-width="1.5" opacity="0.7" points="${linePoints}" />` : ""}
+            ${circles}
+            ${xLabels}
+            <text x="${(padding.left + width - padding.right) / 2}" y="${height - 4}" fill="var(--muted)" font-size="12" text-anchor="middle">Timestamp</text>
+            <text x="18" y="${height / 2}" fill="var(--muted)" font-size="12" text-anchor="middle" transform="rotate(-90 18 ${height / 2})">total_score</text>
+          </svg>
+          <div class="timeline-meta">
+            <div class="timeline-legend">
+              <span><span class="timeline-swatch timeline-swatch-transmitted"></span>Transmitted</span>
+              <span><span class="timeline-swatch timeline-swatch-untransmitted"></span>Not transmitted</span>
+            </div>
+            <span>${points.length} points</span>
+          </div>
+        </div>
+      `;
     }
 
     function renderTopKilled(rows) {
@@ -1332,12 +1516,14 @@ def index():
     Promise.all([
       fetchJson("/api/stats"),
       fetchJson("/api/costs"),
+      fetchJson("/api/transmission-timeline"),
       fetchJson("/api/top-killed"),
       fetchJson("/api/transmissions"),
     ])
-      .then(([stats, costs, topKilled, transmissions]) => {
+      .then(([stats, costs, timeline, topKilled, transmissions]) => {
         renderStats(stats);
         renderCosts(costs);
+        renderTransmissionTimeline(timeline);
         renderTopKilled(topKilled);
         renderTransmissions(transmissions);
       })
