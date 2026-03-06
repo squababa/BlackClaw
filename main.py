@@ -4,6 +4,7 @@ Entry point. Runs the exploration loop.
 """
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from store import (
@@ -30,6 +31,14 @@ from store import (
     update_prediction_status,
     rut_report,
 )
+
+CLAUDE_SONNET_INPUT_RATE_PER_MTOK = 3.0
+CLAUDE_SONNET_OUTPUT_RATE_PER_MTOK = 15.0
+BLENDED_RATE_PER_MTOK = 9.0
+API_USAGE_INPUT_COLUMNS = ("input_tokens", "prompt_tokens")
+API_USAGE_OUTPUT_COLUMNS = ("output_tokens", "completion_tokens")
+API_USAGE_MODEL_COLUMNS = ("model", "model_name")
+API_USAGE_TIME_COLUMNS = ("timestamp", "created_at", "recorded_at", "date")
 
 
 def _parse_report_only_args():
@@ -142,6 +151,7 @@ def _get_kill_stats(window: int) -> dict:
     row = conn.execute(
         """WITH recent AS (
             SELECT
+                timestamp,
                 patterns_found,
                 total_score,
                 validation_json,
@@ -206,6 +216,8 @@ def _get_kill_stats(window: int) -> dict:
                 SUM(CASE WHEN distance_score < 0.5 THEN 1 ELSE 0 END),
                 0
             ) AS distance_too_low,
+            MIN(timestamp) AS oldest_timestamp,
+            MAX(timestamp) AS newest_timestamp,
             AVG(total_score) AS avg_total_score_all,
             AVG(CASE WHEN transmitted = 1 THEN total_score END)
                 AS avg_total_score_transmitted
@@ -214,6 +226,129 @@ def _get_kill_stats(window: int) -> dict:
     ).fetchone()
     conn.close()
     return dict(row)
+
+
+def _pick_existing_column(
+    columns: set[str], candidates: tuple[str, ...]
+) -> str | None:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def _read_api_usage_columns(conn) -> set[str]:
+    try:
+        return {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(api_usage)").fetchall()
+        }
+    except sqlite3.Error:
+        return set()
+
+
+def _coerce_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+
+def _estimate_usage_cost(rows) -> tuple[int, int, float]:
+    total_input_tokens = 0
+    total_output_tokens = 0
+    estimated_cost = 0.0
+
+    for row in rows:
+        input_tokens = _coerce_int(row["input_tokens"])
+        output_tokens = _coerce_int(row["output_tokens"])
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+
+        model_name = str(row["model"] or "").strip()
+        if model_name:
+            estimated_cost += (
+                (input_tokens / 1_000_000) * CLAUDE_SONNET_INPUT_RATE_PER_MTOK
+            )
+            estimated_cost += (
+                (output_tokens / 1_000_000)
+                * CLAUDE_SONNET_OUTPUT_RATE_PER_MTOK
+            )
+        else:
+            estimated_cost += (
+                (input_tokens + output_tokens) / 1_000_000
+            ) * BLENDED_RATE_PER_MTOK
+
+    return total_input_tokens, total_output_tokens, estimated_cost
+
+
+def _get_kill_cost_stats(report: dict) -> dict | None:
+    """Query API usage for the same timeframe as the kill-stats window."""
+    total_explorations = _coerce_int(report.get("total_explorations"))
+    total_transmitted = _coerce_int(report.get("total_transmitted"))
+    window_start = report.get("oldest_timestamp")
+    window_end = report.get("newest_timestamp")
+    if total_explorations <= 0 or not window_start or not window_end:
+        return None
+
+    conn = _connect()
+    try:
+        columns = _read_api_usage_columns(conn)
+        input_column = _pick_existing_column(columns, API_USAGE_INPUT_COLUMNS)
+        output_column = _pick_existing_column(columns, API_USAGE_OUTPUT_COLUMNS)
+        model_column = _pick_existing_column(columns, API_USAGE_MODEL_COLUMNS)
+        time_column = _pick_existing_column(columns, API_USAGE_TIME_COLUMNS)
+        if (
+            input_column is None
+            or output_column is None
+            or "llm_calls" not in columns
+            or time_column is None
+        ):
+            return None
+
+        start_value = window_start[:10] if time_column == "date" else window_start
+        end_value = window_end[:10] if time_column == "date" else window_end
+        model_sql = (
+            f"{model_column} AS model" if model_column is not None else "NULL AS model"
+        )
+        rows = conn.execute(
+            f"""SELECT
+                {input_column} AS input_tokens,
+                {output_column} AS output_tokens,
+                llm_calls,
+                {model_sql}
+            FROM api_usage
+            WHERE {time_column} BETWEEN ? AND ?
+            ORDER BY {time_column} ASC""",
+            (start_value, end_value),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+    if not rows:
+        return None
+
+    total_input_tokens, total_output_tokens, estimated_cost = _estimate_usage_cost(
+        rows
+    )
+    total_llm_calls = sum(_coerce_int(row["llm_calls"]) for row in rows)
+    total_tokens = total_input_tokens + total_output_tokens
+
+    return {
+        "total_tokens": total_tokens,
+        "estimated_cost": estimated_cost,
+        "cost_per_transmission": (
+            estimated_cost / total_transmitted if total_transmitted > 0 else None
+        ),
+        "llm_calls_per_cycle": (
+            total_llm_calls / total_explorations if total_explorations > 0 else None
+        ),
+    }
 
 
 def _print_kill_stats(report: dict, window_requested: int):
@@ -251,6 +386,32 @@ def _print_kill_stats(report: dict, window_requested: int):
     print(
         "Average total_score (transmitted only): "
         f"{_avg(report.get('avg_total_score_transmitted'))}"
+    )
+
+    cost_stats = _get_kill_cost_stats(report)
+    if cost_stats is None:
+        print("Cost data: unavailable")
+        return
+
+    def _currency(value) -> str:
+        if value is None:
+            return "n/a"
+        return f"${float(value):.4f}"
+
+    def _ratio(value) -> str:
+        if value is None:
+            return "n/a"
+        return f"{float(value):.3f}"
+
+    print(f"Total tokens: {int(cost_stats['total_tokens']):,}")
+    print(f"Estimated cost: {_currency(cost_stats.get('estimated_cost'))}")
+    print(
+        "Cost per transmission: "
+        f"{_currency(cost_stats.get('cost_per_transmission'))}"
+    )
+    print(
+        "LLM calls per cycle: "
+        f"{_ratio(cost_stats.get('llm_calls_per_cycle'))}"
     )
 
 

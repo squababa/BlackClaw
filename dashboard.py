@@ -13,6 +13,12 @@ DEFAULT_EXPLORATION_LIMIT = 50
 DEFAULT_STATS_WINDOW = 200
 TOP_KILLED_LIMIT = 10
 VALID_GRADES = ("A", "B+", "B", "B-", "C+", "C", "D", "F")
+CLAUDE_SONNET_INPUT_RATE_PER_MTOK = 3.0
+CLAUDE_SONNET_OUTPUT_RATE_PER_MTOK = 15.0
+BLENDED_RATE_PER_MTOK = 9.0
+API_USAGE_INPUT_COLUMNS = ("input_tokens", "prompt_tokens")
+API_USAGE_OUTPUT_COLUMNS = ("output_tokens", "completion_tokens")
+API_USAGE_MODEL_COLUMNS = ("model", "model_name")
 DB_PATH = (
     os.getenv("DB_PATH")
     or os.getenv("BLACKCLAW_DB_PATH")
@@ -52,6 +58,63 @@ def _parse_positive_int(raw_value: str | None, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _pick_existing_column(
+    columns: set[str], candidates: tuple[str, ...]
+) -> str | None:
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+    return None
+
+
+def _read_api_usage_columns(conn) -> set[str]:
+    try:
+        return {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(api_usage)").fetchall()
+        }
+    except sqlite3.Error:
+        return set()
+
+
+def _coerce_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+
+def _estimate_usage_cost(rows) -> tuple[int, int, float]:
+    total_input_tokens = 0
+    total_output_tokens = 0
+    estimated_cost = 0.0
+
+    for row in rows:
+        input_tokens = _coerce_int(row["input_tokens"])
+        output_tokens = _coerce_int(row["output_tokens"])
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+
+        model_name = str(row["model"] or "").strip()
+        if model_name:
+            estimated_cost += (
+                (input_tokens / 1_000_000) * CLAUDE_SONNET_INPUT_RATE_PER_MTOK
+            )
+            estimated_cost += (
+                (output_tokens / 1_000_000)
+                * CLAUDE_SONNET_OUTPUT_RATE_PER_MTOK
+            )
+        else:
+            estimated_cost += (
+                (input_tokens + output_tokens) / 1_000_000
+            ) * BLENDED_RATE_PER_MTOK
+
+    return total_input_tokens, total_output_tokens, estimated_cost
 
 
 def _get_transmissions() -> list[dict]:
@@ -254,6 +317,71 @@ def _get_kill_stats(window: int) -> dict:
     report["window_requested"] = window
     report["transmission_rate"] = round(transmission_rate, 1)
     return report
+
+
+def _get_cost_stats() -> dict:
+    conn = _connect()
+    try:
+        columns = _read_api_usage_columns(conn)
+        input_column = _pick_existing_column(columns, API_USAGE_INPUT_COLUMNS)
+        output_column = _pick_existing_column(columns, API_USAGE_OUTPUT_COLUMNS)
+        model_column = _pick_existing_column(columns, API_USAGE_MODEL_COLUMNS)
+        if input_column is None or output_column is None:
+            return {"available": False, "message": "No cost data available"}
+
+        model_sql = (
+            f"{model_column} AS model" if model_column is not None else "NULL AS model"
+        )
+        usage_rows = conn.execute(
+            f"""SELECT
+                {input_column} AS input_tokens,
+                {output_column} AS output_tokens,
+                {model_sql}
+            FROM api_usage"""
+        ).fetchall()
+        if not usage_rows:
+            return {"available": False, "message": "No cost data available"}
+
+        total_explorations = _coerce_int(
+            conn.execute("SELECT COUNT(*) AS count FROM explorations").fetchone()[
+                "count"
+            ]
+        )
+        total_transmissions = _coerce_int(
+            conn.execute("SELECT COUNT(*) AS count FROM transmissions").fetchone()[
+                "count"
+            ]
+        )
+    except sqlite3.Error:
+        return {"available": False, "message": "No cost data available"}
+    finally:
+        conn.close()
+
+    total_input_tokens, total_output_tokens, estimated_cost = _estimate_usage_cost(
+        usage_rows
+    )
+    total_tokens = total_input_tokens + total_output_tokens
+
+    return {
+        "available": True,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_tokens": total_tokens,
+        "estimated_total_cost": estimated_cost,
+        "cost_per_transmission": (
+            estimated_cost / total_transmissions
+            if total_transmissions > 0
+            else None
+        ),
+        "cost_per_exploration": (
+            estimated_cost / total_explorations if total_explorations > 0 else None
+        ),
+        "tokens_per_exploration": (
+            total_tokens / total_explorations if total_explorations > 0 else None
+        ),
+        "transmission_count": total_transmissions,
+        "exploration_count": total_explorations,
+    }
 
 
 def _get_top_killed(limit: int = TOP_KILLED_LIMIT) -> list[dict]:
@@ -560,6 +688,11 @@ def api_stats():
     return jsonify(_get_kill_stats(window))
 
 
+@app.get("/api/costs")
+def api_costs():
+    return jsonify(_get_cost_stats())
+
+
 @app.get("/api/top-killed")
 def api_top_killed():
     return jsonify(_get_top_killed())
@@ -797,6 +930,11 @@ def index():
   </section>
 
   <section>
+    <h2>Cost</h2>
+    <div id="costs" class="grid"></div>
+  </section>
+
+  <section>
     <h2>Top Killed Connections</h2>
     <div id="top-killed"></div>
   </section>
@@ -840,6 +978,18 @@ def index():
       return typeof value === "number" ? value.toFixed(3) : "n/a";
     }
 
+    function formatInteger(value) {
+      return typeof value === "number" ? value.toLocaleString() : "n/a";
+    }
+
+    function formatCurrency(value) {
+      return typeof value === "number" ? `$${value.toFixed(4)}` : "n/a";
+    }
+
+    function formatAverage(value) {
+      return typeof value === "number" ? value.toFixed(2) : "n/a";
+    }
+
     function escapeHtml(value) {
       return String(value ?? "")
         .replaceAll("&", "&amp;")
@@ -874,6 +1024,30 @@ def index():
         { label: "Avg total_score (transmitted)", value: formatScore(stats.avg_total_score_transmitted), valueClass: "score-accent" },
       ];
       document.getElementById("stats").innerHTML = items.map((item) => `
+        <div class="stat">
+          <div class="muted">${escapeHtml(item.label)}</div>
+          <div class="stat-value ${item.valueClass || ""}">${escapeHtml(item.value)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderCosts(costs) {
+      const container = document.getElementById("costs");
+      if (!costs.available) {
+        container.innerHTML = "<p class=\\"muted\\">No cost data available</p>";
+        return;
+      }
+
+      const items = [
+        { label: "Total input tokens", value: formatInteger(costs.total_input_tokens), valueClass: "score-accent" },
+        { label: "Total output tokens", value: formatInteger(costs.total_output_tokens), valueClass: "score-accent" },
+        { label: "Estimated total cost", value: formatCurrency(costs.estimated_total_cost), valueClass: "score-accent" },
+        { label: "Cost per transmission", value: formatCurrency(costs.cost_per_transmission), valueClass: "score-accent" },
+        { label: "Cost per exploration", value: formatCurrency(costs.cost_per_exploration), valueClass: "score-accent" },
+        { label: "Tokens per exploration (avg)", value: formatAverage(costs.tokens_per_exploration), valueClass: "score-accent" },
+      ];
+
+      container.innerHTML = items.map((item) => `
         <div class="stat">
           <div class="muted">${escapeHtml(item.label)}</div>
           <div class="stat-value ${item.valueClass || ""}">${escapeHtml(item.value)}</div>
@@ -1144,11 +1318,13 @@ def index():
 
     Promise.all([
       fetchJson("/api/stats"),
+      fetchJson("/api/costs"),
       fetchJson("/api/top-killed"),
       fetchJson("/api/transmissions"),
     ])
-      .then(([stats, topKilled, transmissions]) => {
+      .then(([stats, costs, topKilled, transmissions]) => {
         renderStats(stats);
+        renderCosts(costs);
         renderTopKilled(topKilled);
         renderTransmissions(transmissions);
       })
