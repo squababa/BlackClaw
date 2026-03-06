@@ -7,7 +7,11 @@ Two-stage process:
 import json
 from tavily import TavilyClient
 from config import TAVILY_API_KEY
-from hypothesis_validation import normalize_evidence_map
+from hypothesis_validation import (
+    MECHANISM_TYPE_V1_VOCAB,
+    normalize_evidence_map,
+    normalize_mechanism_typing,
+)
 from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
@@ -15,6 +19,7 @@ from debug_log import log_gemini_output
 
 _llm_client = get_llm_client()
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
+MECHANISM_VOCAB_TEXT = ", ".join(MECHANISM_TYPE_V1_VOCAB)
 
 DETECT_PROMPT = """Stage 1: detection only.
 You are deciding whether there is enough evidence of a real structural parallel to proceed.
@@ -51,6 +56,10 @@ Requirements:
 - Keep target_domain aligned with Stage 1.
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
+- Provide `mechanism_type` using exactly one tag from this controlled v1 vocabulary:
+  {mechanism_vocab}
+- Provide `mechanism_type_confidence` as a numeric value in the 0.00-1.00 range.
+- Optional `secondary_mechanism_types` must be a JSON array and every tag must also come from the same controlled vocabulary.
 - Provide evidence_map with claim-level evidence:
   - evidence_map.variable_mappings must cover each critical mapping in variable_mapping (at least 3 entries).
   - Each variable mapping entry must include source_variable, target_variable, claim, evidence_snippet, source_reference, and may include support_level.
@@ -73,6 +82,9 @@ If valid:
   "target_domain": "target field from stage 1",
   "connection": "2-4 sentence mechanism-level explanation",
   "mechanism": "specific shared process",
+  "mechanism_type": "one controlled vocabulary tag",
+  "mechanism_type_confidence": 0.82,
+  "secondary_mechanism_types": ["optional additional controlled tag"],
   "variable_mapping": {{"a_in_source": "b_in_target", "c_in_source": "d_in_target", "e_in_source": "f_in_target"}},
   "evidence_map": {{
     "variable_mappings": [
@@ -191,6 +203,21 @@ def _generate_json_with_retry(full_prompt: str, stage: str, max_output_tokens: i
         return None
 
 
+def _apply_normalized_mechanism_typing(data: dict) -> dict:
+    """Copy normalized mechanism typing back onto the candidate payload."""
+    normalized = normalize_mechanism_typing(data)
+    out = dict(data)
+    out["mechanism_typing"] = normalized
+    out["mechanism_type"] = normalized.get("mechanism_type")
+    out["mechanism_type_confidence"] = normalized.get(
+        "mechanism_type_confidence"
+    )
+    out["secondary_mechanism_types"] = normalized.get(
+        "secondary_mechanism_types", []
+    )
+    return out
+
+
 def _missing_required_fields(data: dict) -> list[str]:
     def _is_non_empty(value: object) -> bool:
         if isinstance(value, str):
@@ -292,6 +319,11 @@ def _missing_required_fields(data: dict) -> list[str]:
             missing.append(field)
     if not _is_non_empty(data.get("mechanism")):
         missing.append("mechanism")
+    normalized_mechanism_typing = normalize_mechanism_typing(data)
+    if not _is_non_empty(normalized_mechanism_typing.get("mechanism_type")):
+        missing.append("mechanism_type")
+    if normalized_mechanism_typing.get("mechanism_type_confidence") is None:
+        missing.append("mechanism_type_confidence")
     if _mapping_count(data.get("variable_mapping")) < 3:
         missing.append("variable_mapping")
     missing.extend(_prediction_missing_fields(data.get("prediction")))
@@ -392,6 +424,7 @@ def _stage_two_hypothesize(
         abstract_structure=abstract_structure,
         stage_one_json=json.dumps(stage_one, ensure_ascii=False, sort_keys=True),
         search_results=search_results,
+        mechanism_vocab=MECHANISM_VOCAB_TEXT,
     )
     extracted_json = _generate_json_with_retry(prompt, "stage2_hypothesize", 4096)
     if extracted_json is None:
@@ -405,16 +438,19 @@ def _stage_two_hypothesize(
     if data.get("no_connection", True):
         return None
 
+    data = _apply_normalized_mechanism_typing(data)
     missing_fields = _missing_required_fields(data)
     if missing_fields:
         repaired = _repair_missing_fields(prompt, extracted_json, missing_fields)
         if repaired is None or repaired.get("no_connection", True):
             return None
+        repaired = _apply_normalized_mechanism_typing(repaired)
         if _missing_required_fields(repaired):
             return None
         data = repaired
 
     data["evidence_map"] = normalize_evidence_map(data.get("evidence_map"))
+    data = _apply_normalized_mechanism_typing(data)
 
     # Jump output must never self-grade depth.
     data.pop("depth", None)

@@ -6,6 +6,7 @@ import json
 from rich.console import Console
 from rich.panel import Panel
 from llm_client import get_llm_client
+from hypothesis_validation import normalize_mechanism_typing
 from prediction_enforcement import format_prediction_block, prediction_quality_label, normalize_prediction_payload
 from sanitize import check_llm_output
 from store import increment_llm_calls
@@ -192,6 +193,34 @@ def format_transmission(
 
         return "\n".join(lines) if lines else "—"
 
+    def _format_mechanism_typing_block(payload) -> str:
+        normalized = normalize_mechanism_typing(payload)
+        primary = _first_nonempty(normalized.get("mechanism_type"))
+        confidence = normalized.get("mechanism_type_confidence")
+        secondary = normalized.get("secondary_mechanism_types") or []
+        notes = normalized.get("normalization_notes") or []
+        unknown = normalized.get("unknown_mechanism_types") or []
+
+        lines = [f"PRIMARY: {primary}"]
+        if confidence is None:
+            lines.append("CONFIDENCE: —")
+        else:
+            lines.append(f"CONFIDENCE: {float(confidence):.2f}")
+        lines.append(
+            "SECONDARY: "
+            + (", ".join(str(item) for item in secondary) if secondary else "—")
+        )
+        if unknown:
+            lines.append(
+                "UNKNOWN_DROPPED: "
+                + ", ".join(str(item) for item in unknown if str(item))
+            )
+        if notes:
+            lines.append(
+                "NOTES: " + "; ".join(str(item) for item in notes[:3] if str(item))
+            )
+        return "\n".join(lines)
+
     source_data = connection.get("source")
     if not isinstance(source_data, dict):
         source_data = {}
@@ -261,6 +290,7 @@ def format_transmission(
     summary_text = _first_nonempty(connection.get("connection"))
     scholarly_prior_art = _clean_text(scores.get("scholarly_prior_art_summary"))
     evidence_map_text = _format_evidence_map_block(connection.get("evidence_map"))
+    mechanism_typing_text = _format_mechanism_typing_block(connection)
 
     lines = [
         f" ⚫ BLACKCLAW — TRANSMISSION #{transmission_number:04d}",
@@ -293,13 +323,16 @@ def format_transmission(
             "  4) MECHANISM",
             _indent_block(mechanism_text),
             "",
-            "  5) PREDICTION",
+            "  5) MECHANISM TYPING",
+            _indent_block(mechanism_typing_text),
+            "",
+            "  6) PREDICTION",
             _indent_block(prediction_text),
             "",
-            "  6) TEST",
+            "  7) TEST",
             _indent_block(test_text),
             "",
-            "  7) SCORES",
+            "  8) SCORES",
             (
                 "    "
                 f"NOVELTY: {_format_score(scores.get('novelty'))} | "
@@ -341,7 +374,7 @@ def format_transmission(
     lines.extend(
         [
             "",
-            "  8) OPTIONAL SUMMARY",
+            "  9) OPTIONAL SUMMARY",
             _indent_block(summary_text),
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ]

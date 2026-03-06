@@ -16,7 +16,9 @@ from prediction_enforcement import (
     prediction_summary_text,
 )
 from hypothesis_validation import (
+    mechanism_typing_summary_text,
     normalize_evidence_map,
+    normalize_mechanism_typing,
     summarize_evidence_map_provenance,
     validate_hypothesis,
 )
@@ -45,6 +47,7 @@ from store import (
     rut_report,
     save_evaluation,
     list_evaluation_run_summaries,
+    list_recent_transmission_mechanisms,
     list_recent_transmission_provenance,
 )
 
@@ -71,6 +74,10 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--check-provenance",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--check-mechanisms",
         action="store_true",
     )
     parser.add_argument(
@@ -331,6 +338,67 @@ def _print_provenance_check_report(limit: int):
             f"{row.get('transmission_number')}\t{status}\t{variables_text}\t"
             f"{mechanism_text}\t{_truncate(domains_text, 42)}\t"
             f"{_truncate(issues_text, 110)}"
+        )
+
+
+def _print_mechanism_check_report(limit: int):
+    """Inspect recent transmissions for stored mechanism typing coverage."""
+    rows = list_recent_transmission_mechanisms(limit=max(1, int(limit)))
+    if not rows:
+        print("[MechanismCheck] No transmissions found.")
+        return
+
+    def _truncate(text: str, limit: int) -> str:
+        cleaned = " ".join(str(text or "").split()).strip()
+        if len(cleaned) <= limit:
+            return cleaned or "—"
+        return cleaned[: limit - 3].rstrip() + "..."
+
+    print(f"[MechanismCheck] Reviewed {len(rows)} recent transmissions")
+    print("tx\tstatus\tmechanism_types\tconfidence\tdomains\tnotes")
+    for row in rows:
+        typing_payload = normalize_mechanism_typing(row.get("mechanism_typing") or {})
+        has_mechanism_typing = bool(row.get("has_mechanism_typing"))
+        primary = typing_payload.get("mechanism_type")
+        confidence = typing_payload.get("mechanism_type_confidence")
+        notes = list(typing_payload.get("normalization_notes") or [])
+        if typing_payload.get("unknown_mechanism_types"):
+            notes.append(
+                "unknown="
+                + ",".join(
+                    str(item)
+                    for item in typing_payload.get("unknown_mechanism_types") or []
+                )
+            )
+
+        if not has_mechanism_typing:
+            status = "legacy"
+            mechanism_text = "—"
+            confidence_text = "—"
+            notes_text = "mechanism_typing not stored for this transmission"
+        elif primary and confidence is not None and float(confidence) > 0.0:
+            status = "pass"
+            mechanism_text = mechanism_typing_summary_text(typing_payload)
+            confidence_text = f"{float(confidence):.2f}"
+            notes_text = "; ".join(str(item) for item in notes[:3]) or "—"
+        else:
+            status = "fail"
+            mechanism_text = mechanism_typing_summary_text(typing_payload)
+            confidence_text = (
+                f"{float(confidence):.2f}" if confidence is not None else "—"
+            )
+            notes_text = "; ".join(str(item) for item in notes[:3]) or (
+                "missing mechanism_type or mechanism_type_confidence"
+            )
+
+        domains_text = (
+            f"{row.get('source_domain') or 'Unknown'} → "
+            f"{row.get('target_domain') or 'Unknown'}"
+        )
+        print(
+            f"{row.get('transmission_number')}\t{status}\t"
+            f"{_truncate(mechanism_text, 42)}\t{confidence_text}\t"
+            f"{_truncate(domains_text, 42)}\t{_truncate(notes_text, 80)}"
         )
 
 
@@ -612,6 +680,7 @@ if __name__ == "__main__":
             _early_report_args.kill_stats
             or _early_report_args.check_predictions
             or _early_report_args.check_provenance
+            or _early_report_args.check_mechanisms
         )
         and _early_report_args.window <= 0
     ):
@@ -627,6 +696,7 @@ if __name__ == "__main__":
         _early_report_args.kill_stats
         or _early_report_args.check_predictions
         or _early_report_args.check_provenance
+        or _early_report_args.check_mechanisms
         or _early_report_args.rut_report
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
@@ -641,6 +711,8 @@ if __name__ == "__main__":
             _print_prediction_check_report(limit=_early_report_args.window)
         if _early_report_args.check_provenance:
             _print_provenance_check_report(limit=_early_report_args.window)
+        if _early_report_args.check_mechanisms:
+            _print_mechanism_check_report(limit=_early_report_args.window)
         if _early_report_args.rut_report:
             _print_rut_report(rut_report(window=_early_report_args.rut_window))
         if _early_report_args.audit_reasoning:
@@ -817,6 +889,11 @@ def parse_args():
         "--check-provenance",
         action="store_true",
         help="Inspect recent transmissions for claim-level evidence coverage and exit",
+    )
+    parser.add_argument(
+        "--check-mechanisms",
+        action="store_true",
+        help="Inspect recent transmissions for stored mechanism tags and confidence and exit",
     )
     parser.add_argument(
         "--near-misses",
@@ -1260,6 +1337,15 @@ def _evaluate_connection_candidate(
 ) -> dict:
     """Run scoring and all gating logic for one candidate connection."""
     connection = dict(connection) if isinstance(connection, dict) else {}
+    mechanism_typing = normalize_mechanism_typing(connection)
+    connection["mechanism_typing"] = mechanism_typing
+    connection["mechanism_type"] = mechanism_typing.get("mechanism_type")
+    connection["mechanism_type_confidence"] = mechanism_typing.get(
+        "mechanism_type_confidence"
+    )
+    connection["secondary_mechanism_types"] = mechanism_typing.get(
+        "secondary_mechanism_types", []
+    )
     connection["evidence_map"] = normalize_evidence_map(connection.get("evidence_map"))
     claim_provenance = summarize_evidence_map_provenance(connection)
 
@@ -1307,6 +1393,7 @@ def _evaluate_connection_candidate(
             "rejection_reasons": validation_reasons if not validation_ok else [],
             "prediction_quality": prediction_quality,
             "claim_provenance": claim_provenance,
+            "mechanism_typing": mechanism_typing,
         }
         if not validation_ok:
             print("  [Validation] Rejected hypothesis - skipping transmission")
@@ -1857,6 +1944,7 @@ def _score_store_and_transmit(
         adversarial_rubric=candidate["adversarial_rubric"],
         invariance_json=candidate["invariance_result"],
         evidence_map=candidate["prepared_connection"].get("evidence_map"),
+        mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
         transmitted=candidate["should_transmit"],
     )
 
@@ -1891,6 +1979,7 @@ def _score_store_and_transmit(
             connection_payload=tx_connection,
             prediction_quality=candidate["prediction_quality"],
             evidence_map=tx_connection.get("evidence_map"),
+            mechanism_typing=tx_connection.get("mechanism_typing"),
         )
         print_transmission(formatted)
         transmitted = True
@@ -2106,6 +2195,7 @@ def main():
             args.predictions,
             args.check_predictions,
             args.check_provenance,
+            args.check_mechanisms,
             args.near_misses,
             args.audit_reasoning,
             args.prediction is not None,
@@ -2137,7 +2227,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --check-predictions, --check-provenance, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and prediction_action_count > 0:
@@ -2231,6 +2321,10 @@ def main():
 
     if args.check_provenance:
         _print_provenance_check_report(limit=args.window)
+        return
+
+    if args.check_mechanisms:
+        _print_mechanism_check_report(limit=args.window)
         return
 
     if args.near_misses:

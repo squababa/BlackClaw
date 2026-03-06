@@ -119,6 +119,54 @@ DATA_EXPERIMENT_WORDS = {
     "meta-analysis",
 }
 
+MECHANISM_TYPE_V1_VOCAB = (
+    "feedback_loop",
+    "threshold_switching",
+    "oscillation",
+    "diffusion",
+    "saturation",
+    "competitive_exclusion",
+    "bottleneck",
+    "phase_transition",
+    "cascade_failure",
+    "collapse_recovery",
+    "exploration_exploitation",
+    "modular_arithmetic",
+)
+
+MECHANISM_TYPE_V1_SET = set(MECHANISM_TYPE_V1_VOCAB)
+
+MECHANISM_TYPE_V1_ALIASES = {
+    "feedback_loops": "feedback_loop",
+    "threshold_switch": "threshold_switching",
+    "threshold_switches": "threshold_switching",
+    "oscillatory": "oscillation",
+    "oscillatory_dynamics": "oscillation",
+    "diffusive": "diffusion",
+    "diffusive_spread": "diffusion",
+    "saturating": "saturation",
+    "competitive_exclusions": "competitive_exclusion",
+    "phase_change": "phase_transition",
+    "phase_changes": "phase_transition",
+    "phase_shift": "phase_transition",
+    "failure_cascade": "cascade_failure",
+    "failure_cascades": "cascade_failure",
+    "recovery_collapse": "collapse_recovery",
+    "exploration_exploitation_tradeoff": "exploration_exploitation",
+    "exploration_vs_exploitation": "exploration_exploitation",
+    "exploration_and_exploitation": "exploration_exploitation",
+    "modulo_arithmetic": "modular_arithmetic",
+}
+
+MECHANISM_TYPE_CONFIDENCE_LABELS = {
+    "very_low": 0.2,
+    "low": 0.4,
+    "medium": 0.6,
+    "moderate": 0.6,
+    "high": 0.8,
+    "very_high": 0.9,
+}
+
 
 def _word_tokens(text: str) -> list[str]:
     return re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_/\-]*", text.lower())
@@ -145,6 +193,222 @@ def _normalized_text_key(value: object) -> str:
     """Stable lowercase key for matching mappings across payload sections."""
     text = _clean_optional_text(value)
     return text.lower() if text is not None else ""
+
+
+def _extract_mechanism_typing_payload(payload: object) -> dict:
+    """Merge supported mechanism typing shapes into one dict."""
+    if not isinstance(payload, dict):
+        return {}
+
+    out: dict = {}
+    nested = payload.get("mechanism_typing")
+    if isinstance(nested, dict):
+        out.update(nested)
+        if "mechanism_type" not in out and nested.get("primary") is not None:
+            out["mechanism_type"] = nested.get("primary")
+        if (
+            "mechanism_type_confidence" not in out
+            and nested.get("confidence") is not None
+        ):
+            out["mechanism_type_confidence"] = nested.get("confidence")
+        if (
+            "secondary_mechanism_types" not in out
+            and nested.get("mechanism_types") is not None
+        ):
+            out["secondary_mechanism_types"] = nested.get("mechanism_types")
+
+    for key in (
+        "mechanism_type",
+        "mechanism_type_confidence",
+        "secondary_mechanism_types",
+        "mechanism_types",
+    ):
+        if key in payload:
+            out[key] = payload.get(key)
+    return out
+
+
+def _mechanism_type_values(value: object) -> list[object]:
+    """Normalize a raw mechanism tag field into a flat list of values."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            if parsed is not None and parsed is not value:
+                return _mechanism_type_values(parsed)
+        if any(separator in text for separator in (",", ";", "\n")):
+            return [part.strip() for part in re.split(r"[,;\n]+", text) if part.strip()]
+        return [text]
+    return [value]
+
+
+def _normalize_mechanism_tag(value: object) -> tuple[str | None, str | None, str | None]:
+    """Normalize one mechanism tag into the controlled vocabulary."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return None, None, None
+
+    normalized_key = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    if not normalized_key:
+        return None, None, None
+
+    canonical = None
+    if normalized_key in MECHANISM_TYPE_V1_SET:
+        canonical = normalized_key
+    elif normalized_key in MECHANISM_TYPE_V1_ALIASES:
+        canonical = MECHANISM_TYPE_V1_ALIASES[normalized_key]
+
+    if canonical is None:
+        return None, text, None
+
+    note = None
+    if text != canonical:
+        note = f"normalized mechanism tag '{text}' -> '{canonical}'"
+    return canonical, None, note
+
+
+def _normalize_mechanism_confidence(value: object) -> tuple[float | None, str | None]:
+    """Normalize mechanism_type_confidence into a 0..1 float when possible."""
+    if value is None or isinstance(value, bool):
+        return None, None
+
+    note = None
+    numeric: float | None = None
+
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+    elif isinstance(value, str):
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return None, None
+        label_key = re.sub(r"[^a-z0-9]+", "_", cleaned).strip("_")
+        if label_key in MECHANISM_TYPE_CONFIDENCE_LABELS:
+            normalized = MECHANISM_TYPE_CONFIDENCE_LABELS[label_key]
+            return (
+                round(float(normalized), 3),
+                f"normalized mechanism_type_confidence '{value}' -> {normalized:.2f}",
+            )
+        if cleaned.endswith("%"):
+            try:
+                numeric = float(cleaned[:-1].strip()) / 100.0
+            except ValueError:
+                return None, f"unrecognized mechanism_type_confidence '{value}'"
+            note = (
+                f"normalized mechanism_type_confidence '{value}' -> {numeric:.2f}"
+            )
+        else:
+            try:
+                numeric = float(cleaned)
+            except ValueError:
+                return None, f"unrecognized mechanism_type_confidence '{value}'"
+    else:
+        return None, f"unrecognized mechanism_type_confidence '{value}'"
+
+    if numeric is None:
+        return None, note
+
+    if numeric > 1.0 and numeric <= 100.0:
+        normalized = numeric / 100.0
+        return (
+            round(normalized, 3),
+            note
+            or f"normalized mechanism_type_confidence '{value}' -> {normalized:.2f}",
+        )
+    if 0.0 <= numeric <= 1.0:
+        return round(numeric, 3), note
+    return None, f"mechanism_type_confidence '{value}' is outside 0..1"
+
+
+def normalize_mechanism_typing(payload: object) -> dict:
+    """Normalize mechanism typing into a stable inspectable v1 schema."""
+    source = _extract_mechanism_typing_payload(payload)
+    notes: list[str] = []
+    unknown_tags: list[str] = []
+
+    primary_tag, unknown_primary, primary_note = _normalize_mechanism_tag(
+        source.get("mechanism_type")
+    )
+    if primary_note is not None:
+        notes.append(primary_note)
+    if unknown_primary is not None:
+        unknown_tags.append(unknown_primary)
+
+    secondary_candidates = source.get("secondary_mechanism_types")
+    if secondary_candidates is None:
+        secondary_candidates = source.get("mechanism_types")
+
+    secondary_tags: list[str] = []
+    for raw_value in _mechanism_type_values(secondary_candidates):
+        canonical, unknown, note = _normalize_mechanism_tag(raw_value)
+        if note is not None:
+            notes.append(note)
+        if unknown is not None:
+            unknown_tags.append(unknown)
+            continue
+        if canonical is None:
+            continue
+        if canonical == primary_tag or canonical in secondary_tags:
+            continue
+        secondary_tags.append(canonical)
+
+    if primary_tag is None and secondary_tags:
+        primary_tag = secondary_tags.pop(0)
+        notes.append(
+            f"promoted secondary mechanism tag '{primary_tag}' to primary mechanism_type"
+        )
+
+    confidence, confidence_note = _normalize_mechanism_confidence(
+        source.get("mechanism_type_confidence")
+    )
+    if confidence_note is not None:
+        notes.append(confidence_note)
+
+    mechanism_types = [primary_tag] if primary_tag else []
+    mechanism_types.extend(tag for tag in secondary_tags if tag not in mechanism_types)
+    deduped_unknown_tags = []
+    for tag in unknown_tags:
+        if tag not in deduped_unknown_tags:
+            deduped_unknown_tags.append(tag)
+    deduped_notes = []
+    for note in notes:
+        if note not in deduped_notes:
+            deduped_notes.append(note)
+
+    return {
+        "schema_version": "mechanism_typing_v1",
+        "vocabulary_version": "v1",
+        "mechanism_type": primary_tag,
+        "mechanism_type_confidence": confidence,
+        "secondary_mechanism_types": secondary_tags,
+        "mechanism_types": mechanism_types,
+        "unknown_mechanism_types": deduped_unknown_tags,
+        "normalization_notes": deduped_notes,
+    }
+
+
+def mechanism_typing_summary_text(payload: object) -> str:
+    """Compact single-line summary for logs, CLI, and exports."""
+    normalized = normalize_mechanism_typing(payload)
+    primary = normalized.get("mechanism_type")
+    if not primary:
+        return "—"
+    confidence = normalized.get("mechanism_type_confidence")
+    secondary = normalized.get("secondary_mechanism_types") or []
+    summary = primary
+    if confidence is not None:
+        summary += f" ({float(confidence):.2f})"
+    if secondary:
+        summary += f"; secondary: {', '.join(str(item) for item in secondary)}"
+    return summary
 
 
 def _has_metric_text(text: str) -> bool:
@@ -505,6 +769,35 @@ def _validate_test(test: object) -> list[str]:
     return reasons
 
 
+def _validate_mechanism_typing(payload: object) -> list[str]:
+    """Require at least one controlled v1 mechanism tag plus confidence."""
+    normalized = normalize_mechanism_typing(payload)
+    reasons: list[str] = []
+
+    if not normalized.get("mechanism_types"):
+        reasons.append(
+            "mechanism typing must include at least 1 controlled v1 mechanism tag"
+        )
+    if not normalized.get("mechanism_type"):
+        reasons.append("mechanism_type must use a controlled v1 tag")
+
+    confidence = normalized.get("mechanism_type_confidence")
+    if confidence is None:
+        reasons.append(
+            "mechanism_type_confidence must be present and numeric in the 0..1 range"
+        )
+    else:
+        try:
+            if float(confidence) <= 0.0:
+                reasons.append("mechanism_type_confidence must be greater than 0")
+        except Exception:
+            reasons.append(
+                "mechanism_type_confidence must be present and numeric in the 0..1 range"
+            )
+
+    return reasons
+
+
 def validate_hypothesis(hypothesis_dict: dict) -> tuple[bool, list[str]]:
     """
     Validate a hypothesis payload.
@@ -519,6 +812,7 @@ def validate_hypothesis(hypothesis_dict: dict) -> tuple[bool, list[str]]:
         reasons.append("variable_mapping must contain at least 3 mappings")
 
     reasons.extend(_validate_mechanism(hypothesis_dict.get("mechanism")))
+    reasons.extend(_validate_mechanism_typing(hypothesis_dict))
     reasons.extend(_validate_prediction(hypothesis_dict.get("prediction")))
     reasons.extend(_validate_test(hypothesis_dict.get("test")))
 
