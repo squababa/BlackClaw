@@ -257,6 +257,10 @@ def _coerce_int(value) -> int:
             return 0
 
 
+def _uses_sonnet_pricing(model_name) -> bool:
+    return "sonnet" in str(model_name or "").strip().lower()
+
+
 def _estimate_usage_cost(rows) -> tuple[int, int, float]:
     total_input_tokens = 0
     total_output_tokens = 0
@@ -268,8 +272,7 @@ def _estimate_usage_cost(rows) -> tuple[int, int, float]:
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
 
-        model_name = str(row["model"] or "").strip()
-        if model_name:
+        if _uses_sonnet_pricing(row["model"]):
             estimated_cost += (
                 (input_tokens / 1_000_000) * CLAUDE_SONNET_INPUT_RATE_PER_MTOK
             )
@@ -301,12 +304,7 @@ def _get_kill_cost_stats(report: dict) -> dict | None:
         output_column = _pick_existing_column(columns, API_USAGE_OUTPUT_COLUMNS)
         model_column = _pick_existing_column(columns, API_USAGE_MODEL_COLUMNS)
         time_column = _pick_existing_column(columns, API_USAGE_TIME_COLUMNS)
-        if (
-            input_column is None
-            or output_column is None
-            or "llm_calls" not in columns
-            or time_column is None
-        ):
+        if input_column is None or output_column is None or time_column is None:
             return None
 
         start_value = window_start[:10] if time_column == "date" else window_start
@@ -314,11 +312,14 @@ def _get_kill_cost_stats(report: dict) -> dict | None:
         model_sql = (
             f"{model_column} AS model" if model_column is not None else "NULL AS model"
         )
+        llm_calls_sql = (
+            "llm_calls AS llm_calls" if "llm_calls" in columns else "1 AS llm_calls"
+        )
         rows = conn.execute(
             f"""SELECT
                 {input_column} AS input_tokens,
                 {output_column} AS output_tokens,
-                llm_calls,
+                {llm_calls_sql},
                 {model_sql}
             FROM api_usage
             WHERE {time_column} BETWEEN ? AND ?
@@ -345,7 +346,7 @@ def _get_kill_cost_stats(report: dict) -> dict | None:
         "cost_per_transmission": (
             estimated_cost / total_transmitted if total_transmitted > 0 else None
         ),
-        "llm_calls_per_cycle": (
+        "llm_calls_per_exploration": (
             total_llm_calls / total_explorations if total_explorations > 0 else None
         ),
     }
@@ -410,8 +411,8 @@ def _print_kill_stats(report: dict, window_requested: int):
         f"{_currency(cost_stats.get('cost_per_transmission'))}"
     )
     print(
-        "LLM calls per cycle: "
-        f"{_ratio(cost_stats.get('llm_calls_per_cycle'))}"
+        "LLM calls per exploration: "
+        f"{_ratio(cost_stats.get('llm_calls_per_exploration'))}"
     )
 
 

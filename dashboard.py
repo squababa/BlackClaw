@@ -19,6 +19,7 @@ BLENDED_RATE_PER_MTOK = 9.0
 API_USAGE_INPUT_COLUMNS = ("input_tokens", "prompt_tokens")
 API_USAGE_OUTPUT_COLUMNS = ("output_tokens", "completion_tokens")
 API_USAGE_MODEL_COLUMNS = ("model", "model_name")
+API_USAGE_TIME_COLUMNS = ("timestamp", "created_at", "recorded_at", "date")
 DB_PATH = (
     os.getenv("DB_PATH")
     or os.getenv("BLACKCLAW_DB_PATH")
@@ -89,6 +90,10 @@ def _coerce_int(value) -> int:
             return 0
 
 
+def _uses_sonnet_pricing(model_name) -> bool:
+    return "sonnet" in str(model_name or "").strip().lower()
+
+
 def _estimate_usage_cost(rows) -> tuple[int, int, float]:
     total_input_tokens = 0
     total_output_tokens = 0
@@ -100,8 +105,7 @@ def _estimate_usage_cost(rows) -> tuple[int, int, float]:
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
 
-        model_name = str(row["model"] or "").strip()
-        if model_name:
+        if _uses_sonnet_pricing(row["model"]):
             estimated_cost += (
                 (input_tokens / 1_000_000) * CLAUDE_SONNET_INPUT_RATE_PER_MTOK
             )
@@ -238,6 +242,7 @@ def _get_kill_stats(window: int) -> dict:
     row = conn.execute(
         """WITH recent AS (
             SELECT
+                timestamp,
                 patterns_found,
                 total_score,
                 validation_json,
@@ -302,6 +307,8 @@ def _get_kill_stats(window: int) -> dict:
                 SUM(CASE WHEN distance_score < 0.5 THEN 1 ELSE 0 END),
                 0
             ) AS distance_too_low,
+            MIN(timestamp) AS oldest_timestamp,
+            MAX(timestamp) AS newest_timestamp,
             AVG(total_score) AS avg_total_score_all,
             AVG(CASE WHEN transmitted = 1 THEN total_score END)
                 AS avg_total_score_transmitted
@@ -319,16 +326,27 @@ def _get_kill_stats(window: int) -> dict:
     return report
 
 
-def _get_cost_stats() -> dict:
+def _get_cost_stats(window: int = DEFAULT_STATS_WINDOW) -> dict:
+    report = _get_kill_stats(window)
+    total_explorations = _coerce_int(report.get("total_explorations"))
+    total_transmissions = _coerce_int(report.get("total_transmitted"))
+    window_start = report.get("oldest_timestamp")
+    window_end = report.get("newest_timestamp")
+    if total_explorations <= 0 or not window_start or not window_end:
+        return {"available": False, "message": "No cost data available"}
+
     conn = _connect()
     try:
         columns = _read_api_usage_columns(conn)
         input_column = _pick_existing_column(columns, API_USAGE_INPUT_COLUMNS)
         output_column = _pick_existing_column(columns, API_USAGE_OUTPUT_COLUMNS)
         model_column = _pick_existing_column(columns, API_USAGE_MODEL_COLUMNS)
-        if input_column is None or output_column is None:
+        time_column = _pick_existing_column(columns, API_USAGE_TIME_COLUMNS)
+        if input_column is None or output_column is None or time_column is None:
             return {"available": False, "message": "No cost data available"}
 
+        start_value = window_start[:10] if time_column == "date" else window_start
+        end_value = window_end[:10] if time_column == "date" else window_end
         model_sql = (
             f"{model_column} AS model" if model_column is not None else "NULL AS model"
         )
@@ -337,25 +355,18 @@ def _get_cost_stats() -> dict:
                 {input_column} AS input_tokens,
                 {output_column} AS output_tokens,
                 {model_sql}
-            FROM api_usage"""
+            FROM api_usage
+            WHERE {time_column} BETWEEN ? AND ?
+            ORDER BY {time_column} ASC""",
+            (start_value, end_value),
         ).fetchall()
-        if not usage_rows:
-            return {"available": False, "message": "No cost data available"}
-
-        total_explorations = _coerce_int(
-            conn.execute("SELECT COUNT(*) AS count FROM explorations").fetchone()[
-                "count"
-            ]
-        )
-        total_transmissions = _coerce_int(
-            conn.execute("SELECT COUNT(*) AS count FROM transmissions").fetchone()[
-                "count"
-            ]
-        )
     except sqlite3.Error:
         return {"available": False, "message": "No cost data available"}
     finally:
         conn.close()
+
+    if not usage_rows:
+        return {"available": False, "message": "No cost data available"}
 
     total_input_tokens, total_output_tokens, estimated_cost = _estimate_usage_cost(
         usage_rows
@@ -379,6 +390,7 @@ def _get_cost_stats() -> dict:
         "tokens_per_exploration": (
             total_tokens / total_explorations if total_explorations > 0 else None
         ),
+        "window_requested": window,
         "transmission_count": total_transmissions,
         "exploration_count": total_explorations,
     }
@@ -690,7 +702,8 @@ def api_stats():
 
 @app.get("/api/costs")
 def api_costs():
-    return jsonify(_get_cost_stats())
+    window = _parse_positive_int(request.args.get("window"), DEFAULT_STATS_WINDOW)
+    return jsonify(_get_cost_stats(window))
 
 
 @app.get("/api/top-killed")
