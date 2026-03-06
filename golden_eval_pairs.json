@@ -1,0 +1,318 @@
+[
+  {
+    "id": "pair_01",
+    "category": "known_cross_domain",
+    "pair_label": "Predator-Prey Dynamics <-> Lotka-Volterra in Economics",
+    "seed_domain": "Ecology",
+    "seed_description": "predator-prey cycles",
+    "expected_target": "Market competition / boom-bust cycles",
+    "target_aliases": [
+      "Lotka-Volterra in Economics",
+      "market competition",
+      "boom-bust cycles",
+      "lotka-volterra"
+    ],
+    "expectation_type": "should_find",
+    "notes": "Known connection: same differential equations govern both.",
+    "expected_grade": "A"
+  },
+  {
+    "id": "pair_02",
+    "category": "known_cross_domain",
+    "pair_label": "Ant Colony Optimization <-> Network Routing (OSPF/BGP)",
+    "seed_domain": "Swarm Intelligence",
+    "seed_description": "ant foraging",
+    "expected_target": "Computer network routing protocols",
+    "target_aliases": [
+      "Network Routing",
+      "OSPF",
+      "BGP",
+      "computer network routing protocols"
+    ],
+    "expectation_type": "should_find",
+    "notes": "Known connection: pheromone-based path selection maps to routing metric accumulation.",
+    "expected_grade": "A"
+  },
+  {
+    "id": "pair_03",
+    "category": "known_cross_domain",
+    "pair_label": "Natural Selection <-> Genetic Algorithms",
+    "seed_domain": "Evolutionary Biology",
+    "seed_description": "selection pressure",
+    "expected_target": "Optimization / machine learning",
+    "target_aliases": [
+      "Genetic Algorithms",
+      "genetic algorithm",
+      "evolutionary optimization"
+    ],
+    "expectation_type": "should_find",
+    "notes": "Known connection: direct inspiration with the same operators (selection, crossover, mutation). Should still read as known/white rather than novel.",
+    "expected_grade": "A"
+  },
+  {
+    "id": "pair_04",
+    "category": "known_cross_domain",
+    "pair_label": "Hydraulic Flow <-> Electrical Circuits",
+    "seed_domain": "Fluid Dynamics",
+    "seed_description": "pipe networks",
+    "expected_target": "Circuit analysis (Kirchhoff's laws)",
+    "target_aliases": [
+      "Electrical Circuits",
+      "circuit analysis",
+      "Kirchhoff's laws"
+    ],
+    "expectation_type": "should_find",
+    "notes": "Known connection: pressure=voltage, flow=current, resistance=resistance. This is a textbook analogy and should likely be treated as known/white.",
+    "expected_grade": "A"
+  },
+  {
+    "id": "pair_05",
+    "category": "known_cross_domain",
+    "pair_label": "Simulated Annealing <-> Metallurgical Annealing",
+    "seed_domain": "Metallurgy",
+    "seed_description": "crystal annealing",
+    "expected_target": "Optimization algorithms",
+    "target_aliases": [
+      "Simulated Annealing",
+      "optimization algorithms"
+    ],
+    "expectation_type": "should_find",
+    "notes": "Known connection: temperature schedule maps to the exploration parameter over the same energy landscape.",
+    "expected_grade": "A"
+  },
+  {
+    "id": "pair_06",
+    "category": "plausible_false_connection",
+    "pair_label": "Photosynthesis <-> Solar Panel Manufacturing",
+    "seed_domain": "Plant Biology",
+    "seed_description": "photosynthesis",
+    "expected_target": "Solar Panel Manufacturing",
+    "target_aliases": [
+      "Solar Panel Manufacturing",
+      "solar panels",
+      "photovoltaic manufacturing"
+    ],
+    "expectation_type": "should_reject",
+    "notes": "Trap: both convert light to energy, but the mechanisms are completely different (quantum biology vs semiconductor physics). Should score low on depth and break at the mechanism level.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_07",
+    "category": "plausible_false_connection",
+    "pair_label": "Democracy <-> Neural Networks",
+    "seed_domain": "Political Science",
+    "seed_description": "voting systems",
+    "expected_target": "Neural Networks",
+    "target_aliases": [
+      "Neural Networks",
+      "neural network"
+    ],
+    "expectation_type": "should_reject",
+    "notes": "Trap: distributed decision-making sounds parallel, but voting is discrete and intentional while neural networks are continuous and trained. Should fail adversarial on ontological category mismatch.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_08",
+    "category": "plausible_false_connection",
+    "pair_label": "Rivers <-> Blood Vessels",
+    "seed_domain": "Geomorphology",
+    "seed_description": "river networks",
+    "expected_target": "Blood Vessels",
+    "target_aliases": [
+      "Blood Vessels",
+      "vasculature",
+      "vascular system"
+    ],
+    "expectation_type": "should_reject",
+    "notes": "Trap: branching geometry looks similar, but rivers are erosion-driven top-down systems while vasculature is growth-driven bottom-up. The runner should catch the formation-mechanism mismatch.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_09",
+    "category": "plausible_false_connection",
+    "pair_label": "Stock Market <-> Weather Systems",
+    "seed_domain": "Financial Markets",
+    "seed_description": "price dynamics",
+    "expected_target": "Weather Systems",
+    "target_aliases": [
+      "Weather Systems",
+      "weather",
+      "climate"
+    ],
+    "expectation_type": "should_reject",
+    "notes": "Trap: both are chaotic systems, but that mechanism is too universal and trivially connects everything to everything. Should be flagged as a universal low-depth analogy.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_10",
+    "category": "plausible_false_connection",
+    "pair_label": "Music Harmony <-> Color Theory",
+    "seed_domain": "Music Theory",
+    "seed_description": "consonance/dissonance",
+    "expected_target": "Color Theory",
+    "target_aliases": [
+      "Color Theory",
+      "colour theory"
+    ],
+    "expectation_type": "should_reject",
+    "notes": "Trap: frequency ratios in sound and wavelength in light look superficially similar, but the perceptual mechanisms differ completely (cochlear mechanics vs retinal cones). Should fail variable mapping.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_11",
+    "category": "genuinely_distant",
+    "pair_label": "Origami Crease Patterns <-> Protein Folding",
+    "seed_domain": "Origami Mathematics",
+    "seed_description": "",
+    "expected_target": "Protein Folding",
+    "target_aliases": [
+      "Protein Folding",
+      "protein folding dynamics"
+    ],
+    "expectation_type": "manual_judge",
+    "notes": "Unknown: both involve folding flat structures into 3D. Manual judgment is required to decide whether there is shared mathematics or a hallucinated analogy.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_12",
+    "category": "genuinely_distant",
+    "pair_label": "Fermentation <-> Semiconductor Doping",
+    "seed_domain": "Microbiology",
+    "seed_description": "fermentation",
+    "expected_target": "Semiconductor Doping",
+    "target_aliases": [
+      "Semiconductor Doping",
+      "doping",
+      "semiconductor"
+    ],
+    "expectation_type": "manual_judge",
+    "notes": "Unknown: both involve introducing controlled impurities to change bulk material properties. Manual judgment is required.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_13",
+    "category": "genuinely_distant",
+    "pair_label": "Tidal Patterns <-> Urban Traffic Flow",
+    "seed_domain": "Oceanography",
+    "seed_description": "tidal dynamics",
+    "expected_target": "Urban Traffic Flow",
+    "target_aliases": [
+      "Urban Traffic Flow",
+      "traffic",
+      "traffic flow"
+    ],
+    "expectation_type": "manual_judge",
+    "notes": "Unknown: both have periodic bidirectional flow with capacity constraints. Manual judgment is required.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_14",
+    "category": "genuinely_distant",
+    "pair_label": "Beehive Architecture <-> Data Center Cooling",
+    "seed_domain": "Entomology",
+    "seed_description": "hive thermal regulation",
+    "expected_target": "Data Center Cooling",
+    "target_aliases": [
+      "Data Center Cooling",
+      "thermal management in data centers"
+    ],
+    "expectation_type": "manual_judge",
+    "notes": "Unknown: both manage heat dissipation in dense, active structures. Manual judgment is required.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_15",
+    "category": "genuinely_distant",
+    "pair_label": "Coral Reef Succession <-> Open Source Community Growth",
+    "seed_domain": "Marine Ecology",
+    "seed_description": "reef building",
+    "expected_target": "Open Source Community Growth",
+    "target_aliases": [
+      "Open Source Community Growth",
+      "open source community",
+      "open source community growth"
+    ],
+    "expectation_type": "manual_judge",
+    "notes": "Unknown: pioneer organisms create infrastructure that later builders use. Manual judgment is required.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_16",
+    "category": "surface_analogy",
+    "pair_label": "Chess Strategy <-> Military Strategy",
+    "seed_domain": "Game Theory",
+    "seed_description": "chess",
+    "expected_target": "Military Strategy",
+    "target_aliases": [
+      "Military Strategy",
+      "military strategy"
+    ],
+    "expectation_type": "should_fail_surface",
+    "notes": "Trap: the vocabulary overlaps, but chess is perfect information while war is imperfect. Depth scoring may run high on the surface, but adversarial should catch the information-structure mismatch.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_17",
+    "category": "surface_analogy",
+    "pair_label": "Immune System <-> Computer Security (Firewalls)",
+    "seed_domain": "Immunology",
+    "seed_description": "adaptive immunity",
+    "expected_target": "Computer Security (Firewalls)",
+    "target_aliases": [
+      "Computer Security",
+      "firewalls",
+      "firewall"
+    ],
+    "expectation_type": "should_fail_surface",
+    "notes": "Trap: both detect and destroy threats, but immune systems learn via clonal selection while firewalls use rule-based filtering. The runner should distinguish functional similarity from structural isomorphism.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_18",
+    "category": "surface_analogy",
+    "pair_label": "Plate Tectonics <-> Organizational Change Management",
+    "seed_domain": "Geology",
+    "seed_description": "tectonic plates",
+    "expected_target": "Organizational Change Management",
+    "target_aliases": [
+      "Organizational Change Management",
+      "change management",
+      "organizational change"
+    ],
+    "expectation_type": "should_fail_surface",
+    "notes": "Trap: slow pressure buildup and sudden release is a universal pattern. It should be flagged as too universal rather than treated as a deep mechanism.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_19",
+    "category": "surface_analogy",
+    "pair_label": "Circadian Rhythms <-> Economic Business Cycles",
+    "seed_domain": "Chronobiology",
+    "seed_description": "circadian clocks",
+    "expected_target": "Economic Business Cycles",
+    "target_aliases": [
+      "Economic Business Cycles",
+      "business cycles",
+      "economic cycles"
+    ],
+    "expectation_type": "should_fail_surface",
+    "notes": "Trap: both are oscillatory, but they are driven by completely different mechanisms (molecular feedback loops vs aggregate demand/supply dynamics). This may pass scoring but should fail adversarial on mechanism mismatch.",
+    "expected_grade": null
+  },
+  {
+    "id": "pair_20",
+    "category": "surface_analogy",
+    "pair_label": "Glacier Formation <-> Debt Accumulation",
+    "seed_domain": "Glaciology",
+    "seed_description": "ice sheet dynamics",
+    "expected_target": "Debt Accumulation",
+    "target_aliases": [
+      "Debt Accumulation",
+      "debt accumulation dynamics",
+      "debt cycles"
+    ],
+    "expectation_type": "should_fail_surface",
+    "notes": "Trap: slow accumulation with sudden catastrophic release is the same universal threshold pattern as pair 18. It should be flagged as too universal with low depth.",
+    "expected_grade": null
+  }
+]

@@ -133,6 +133,25 @@ def init_db():
             first_found TEXT NOT NULL,
             last_found TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            eval_version_tag TEXT NOT NULL,
+            run_timestamp TEXT NOT NULL,
+            pair_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            seed TEXT NOT NULL,
+            expected_target TEXT,
+            expectation_type TEXT NOT NULL,
+            actual_target TEXT,
+            transmitted INTEGER,
+            total_score REAL,
+            depth_score REAL,
+            distance_score REAL,
+            novelty_score REAL,
+            provenance_complete INTEGER,
+            result_label TEXT NOT NULL,
+            notes TEXT
+        );
         CREATE INDEX IF NOT EXISTS idx_explorations_timestamp
             ON explorations(timestamp);
         CREATE INDEX IF NOT EXISTS idx_explorations_seed
@@ -167,6 +186,12 @@ def init_db():
             ON signature_convergences(signature);
         CREATE INDEX IF NOT EXISTS idx_signature_convergences_cluster
             ON signature_convergences(cluster_id);
+        CREATE INDEX IF NOT EXISTS idx_evaluations_run_timestamp
+            ON evaluations(run_timestamp);
+        CREATE INDEX IF NOT EXISTS idx_evaluations_version_tag
+            ON evaluations(eval_version_tag);
+        CREATE INDEX IF NOT EXISTS idx_evaluations_pair_id
+            ON evaluations(pair_id);
     """)
     # Migration for older DB files created before chain_path existed.
     existing_columns = {
@@ -241,6 +266,50 @@ def init_db():
         )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_convergences_times ON convergences(times_found)"
+    )
+    evaluation_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(evaluations)").fetchall()
+    }
+    if "eval_version_tag" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN eval_version_tag TEXT")
+    if "run_timestamp" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN run_timestamp TEXT")
+    if "pair_id" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN pair_id TEXT")
+    if "category" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN category TEXT")
+    if "seed" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN seed TEXT")
+    if "expected_target" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN expected_target TEXT")
+    if "expectation_type" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN expectation_type TEXT")
+    if "actual_target" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN actual_target TEXT")
+    if "transmitted" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN transmitted INTEGER")
+    if "total_score" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN total_score REAL")
+    if "depth_score" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN depth_score REAL")
+    if "distance_score" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN distance_score REAL")
+    if "novelty_score" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN novelty_score REAL")
+    if "provenance_complete" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN provenance_complete INTEGER")
+    if "result_label" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN result_label TEXT")
+    if "notes" not in evaluation_columns:
+        conn.execute("ALTER TABLE evaluations ADD COLUMN notes TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_evaluations_run_timestamp ON evaluations(run_timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_evaluations_version_tag ON evaluations(eval_version_tag)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_evaluations_pair_id ON evaluations(pair_id)"
     )
     conn.commit()
     conn.close()
@@ -1654,3 +1723,149 @@ def get_summary_stats() -> dict:
         "today_tavily_calls": today["tavily"],
         "today_llm_calls": today["llm"],
     }
+
+
+def save_evaluation(
+    eval_version_tag: str,
+    run_timestamp: str,
+    pair_id: str,
+    category: str,
+    seed: str,
+    expected_target: str | None,
+    expectation_type: str,
+    actual_target: str | None = None,
+    transmitted: bool | None = None,
+    total_score: float | None = None,
+    depth_score: float | None = None,
+    distance_score: float | None = None,
+    novelty_score: float | None = None,
+    provenance_complete: bool | None = None,
+    result_label: str = "fail",
+    notes: str | None = None,
+) -> int:
+    """Persist one evaluation outcome row."""
+    conn = _connect()
+    cursor = conn.execute(
+        """INSERT INTO evaluations
+        (eval_version_tag, run_timestamp, pair_id, category, seed, expected_target,
+         expectation_type, actual_target, transmitted, total_score, depth_score,
+         distance_score, novelty_score, provenance_complete, result_label, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            eval_version_tag.strip(),
+            run_timestamp.strip(),
+            pair_id.strip(),
+            category.strip(),
+            seed.strip(),
+            expected_target.strip() if isinstance(expected_target, str) else None,
+            expectation_type.strip(),
+            actual_target.strip() if isinstance(actual_target, str) else None,
+            None if transmitted is None else (1 if transmitted else 0),
+            total_score,
+            depth_score,
+            distance_score,
+            novelty_score,
+            None if provenance_complete is None else (1 if provenance_complete else 0),
+            result_label.strip(),
+            notes.strip() if isinstance(notes, str) and notes.strip() else None,
+        ),
+    )
+    evaluation_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return evaluation_id
+
+
+def list_evaluation_run_summaries(limit: int = 5) -> list[dict]:
+    """Return recent eval run summaries grouped by version tag and run timestamp."""
+    safe_limit = max(1, int(limit))
+    conn = _connect()
+    run_rows = conn.execute(
+        """SELECT
+            eval_version_tag,
+            run_timestamp,
+            COUNT(*) AS total_pairs,
+            COALESCE(SUM(CASE WHEN result_label = 'pass' THEN 1 ELSE 0 END), 0) AS passes,
+            COALESCE(SUM(CASE WHEN result_label = 'fail' THEN 1 ELSE 0 END), 0) AS fails,
+            COALESCE(
+                SUM(CASE WHEN result_label = 'manual_review' THEN 1 ELSE 0 END),
+                0
+            ) AS manual_review,
+            COALESCE(SUM(CASE WHEN category = 'known_cross_domain' THEN 1 ELSE 0 END), 0)
+                AS category_1_total,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN category = 'known_cross_domain' AND result_label = 'pass'
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS category_1_passes,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN category IN ('plausible_false_connection', 'surface_analogy')
+                             AND result_label = 'pass'
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS true_negative_count,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN category IN ('plausible_false_connection', 'surface_analogy')
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS true_negative_total,
+            AVG(depth_score) AS average_depth_score,
+            AVG(
+                CASE
+                    WHEN provenance_complete IS NOT NULL
+                    THEN provenance_complete
+                    ELSE NULL
+                END
+            ) AS provenance_completeness_rate
+        FROM evaluations
+        GROUP BY eval_version_tag, run_timestamp
+        ORDER BY run_timestamp DESC, eval_version_tag DESC
+        LIMIT ?""",
+        (safe_limit,),
+    ).fetchall()
+    summaries = [dict(row) for row in run_rows]
+    if not summaries:
+        conn.close()
+        return []
+
+    counts_by_run: dict[tuple[str, str], dict[str, int]] = {}
+    for summary in summaries:
+        counts_by_run[(summary["eval_version_tag"], summary["run_timestamp"])] = {}
+
+    category_rows = conn.execute(
+        """SELECT
+            eval_version_tag,
+            run_timestamp,
+            category,
+            COUNT(*) AS count
+        FROM evaluations
+        GROUP BY eval_version_tag, run_timestamp, category"""
+    ).fetchall()
+    conn.close()
+
+    for row in category_rows:
+        key = (row["eval_version_tag"], row["run_timestamp"])
+        if key not in counts_by_run:
+            continue
+        counts_by_run[key][row["category"]] = int(row["count"])
+
+    for summary in summaries:
+        key = (summary["eval_version_tag"], summary["run_timestamp"])
+        summary["counts_by_category"] = counts_by_run.get(key, {})
+
+    return summaries
