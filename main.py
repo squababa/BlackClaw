@@ -40,10 +40,12 @@ from store import (
     save_transmission_dive,
     increment_llm_calls,
     list_predictions,
+    list_prediction_outcomes,
+    get_prediction_outcome_stats,
     list_near_misses,
     get_reasoning_failure_audit,
     get_prediction,
-    update_prediction_status,
+    update_prediction_outcome,
     rut_report,
     save_evaluation,
     list_evaluation_run_summaries,
@@ -63,7 +65,7 @@ GOLDEN_EVALS_PATH = Path(__file__).with_name("golden_eval_pairs.json")
 
 def _parse_report_only_args():
     """Parse report-only flags before any API-key-dependent imports."""
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument(
         "--kill-stats",
         action="store_true",
@@ -79,6 +81,81 @@ def _parse_report_only_args():
     parser.add_argument(
         "--check-mechanisms",
         action="store_true",
+    )
+    parser.add_argument(
+        "--prediction-outcomes",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--prediction-outcome-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--predictions",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--prediction",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--mark-supported",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--mark-contradicted",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--mark-mixed",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--mark-expired",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--mark-failed",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--mark-unknown",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--note",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--validated-at",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--utility-class",
+        type=str,
+        choices=("high", "medium", "low", "unknown"),
+        default=None,
     )
     parser.add_argument(
         "--window",
@@ -256,6 +333,216 @@ def _prediction_summary_from_row(row: dict) -> str:
     return text or "—"
 
 
+def _truncate_text(value: object, limit: int) -> str:
+    """Collapse whitespace and cap long text for tabular reports."""
+    cleaned = " ".join(str(value or "").split()).strip()
+    if len(cleaned) <= limit:
+        return cleaned or "—"
+    return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _short_timestamp(value: object) -> str:
+    """Format stored timestamps compactly for CLI tables."""
+    text = str(value or "").strip()
+    if not text:
+        return "—"
+    return text.replace("T", " ")[:19]
+
+
+def _format_percent(value: float | None) -> str:
+    """Render optional ratios as percentages."""
+    if value is None:
+        return "—"
+    return f"{value * 100:.1f}%"
+
+
+def _print_prediction_outcomes(limit: int = 20):
+    """Render recent predictions with explicit outcome metadata."""
+    rows = list_prediction_outcomes(limit=max(1, int(limit)))
+    if not rows:
+        print("[PredictionOutcomes] No predictions found.")
+        return
+
+    print(f"[PredictionOutcomes] Recent {len(rows)} predictions")
+    print("id\ttx\tstatus/outcome\tmechanism\tquality\tcreated\tvalidated\tprediction")
+    for row in rows:
+        mechanism_type = row.get("mechanism_type") or "unknown"
+        quality_score = row.get("prediction_quality_score")
+        quality_text = f"{float(quality_score):.2f}" if quality_score is not None else "—"
+        print(
+            f"{row.get('id')}\t{row.get('transmission_number')}\t"
+            f"{row.get('status')}/{row.get('outcome_status')}\t"
+            f"{_truncate_text(mechanism_type, 24)}\t{quality_text}\t"
+            f"{_short_timestamp(row.get('created_at'))}\t"
+            f"{_short_timestamp(row.get('validated_at'))}\t"
+            f"{_truncate_text(_prediction_summary_from_row(row), 96)}"
+        )
+
+
+def _print_prediction_outcome_stats(report: dict):
+    """Render outcome stats by mechanism, score bands, and domains."""
+    overview = report.get("overview") or {}
+    coverage = report.get("coverage") or {}
+
+    print(
+        f"[PredictionOutcomeStats] {overview.get('total', 0)} predictions | "
+        f"open={overview.get('open', 0)} | "
+        f"validated={overview.get('validated', 0)} | "
+        f"supported={overview.get('supported', 0)} | "
+        f"contradicted={overview.get('contradicted', 0)} | "
+        f"mixed={overview.get('mixed', 0)} | "
+        f"expired={overview.get('expired', 0)}"
+    )
+    print(
+        "[PredictionOutcomeStats] "
+        f"validation_rate={_format_percent(overview.get('validation_rate'))} | "
+        f"support_rate={_format_percent(overview.get('support_rate'))}"
+    )
+
+    def _print_section(title: str, rows: list[dict]):
+        print(title)
+        if not rows:
+            print("label\ttotal\topen\tsupported\tcontradicted\tmixed\texpired\tvalidated\tval_rate\tsupport_rate")
+            print("none")
+            return
+        print("label\ttotal\topen\tsupported\tcontradicted\tmixed\texpired\tvalidated\tval_rate\tsupport_rate")
+        for row in rows:
+            print(
+                f"{_truncate_text(row.get('label'), 28)}\t{row.get('total', 0)}\t"
+                f"{row.get('open', 0)}\t{row.get('supported', 0)}\t"
+                f"{row.get('contradicted', 0)}\t{row.get('mixed', 0)}\t"
+                f"{row.get('expired', 0)}\t{row.get('validated', 0)}\t"
+                f"{_format_percent(row.get('validation_rate'))}\t"
+                f"{_format_percent(row.get('support_rate'))}"
+            )
+
+    _print_section(
+        "[PredictionOutcomeStats] By mechanism type",
+        report.get("by_mechanism_type") or [],
+    )
+    _print_section(
+        "[PredictionOutcomeStats] By prediction quality band",
+        report.get("by_prediction_quality_band") or [],
+    )
+    _print_section(
+        "[PredictionOutcomeStats] By depth score band",
+        report.get("by_depth_score_band") or [],
+    )
+    _print_section(
+        "[PredictionOutcomeStats] By adversarial survival band",
+        report.get("by_adversarial_survival_band") or [],
+    )
+    _print_section(
+        "[PredictionOutcomeStats] By source domain",
+        report.get("by_source_domain") or [],
+    )
+    _print_section(
+        "[PredictionOutcomeStats] By target domain",
+        report.get("by_target_domain") or [],
+    )
+
+    print("[PredictionOutcomeStats] Coverage")
+    print(
+        "  mechanism_type: "
+        f"{coverage.get('mechanism_type', {}).get('available', 0)} present / "
+        f"{coverage.get('mechanism_type', {}).get('missing', 0)} missing"
+    )
+    print(
+        "  prediction_quality_score: "
+        f"{coverage.get('prediction_quality_score', {}).get('available', 0)} present / "
+        f"{coverage.get('prediction_quality_score', {}).get('missing', 0)} missing"
+    )
+    print(
+        "  depth_score: "
+        f"{coverage.get('depth_score', {}).get('available', 0)} present / "
+        f"{coverage.get('depth_score', {}).get('missing', 0)} missing"
+    )
+    print(
+        "  adversarial_survival: "
+        f"{coverage.get('adversarial_survival', {}).get('available', 0)} present / "
+        f"{coverage.get('adversarial_survival', {}).get('missing', 0)} missing"
+    )
+    print(
+        "  source_domain: "
+        f"{coverage.get('source_domain', {}).get('available', 0)} present / "
+        f"{coverage.get('source_domain', {}).get('missing', 0)} missing"
+    )
+    print(
+        "  target_domain: "
+        f"{coverage.get('target_domain', {}).get('available', 0)} present / "
+        f"{coverage.get('target_domain', {}).get('missing', 0)} missing"
+    )
+
+
+def _print_predictions_list(limit: int = 20):
+    """Render the legacy prediction list with explicit outcomes."""
+    rows = list_predictions(limit=max(1, int(limit)))
+    if not rows:
+        print("[Predictions] No predictions found.")
+        return
+    print("id\tstatus\toutcome\ttransmission\tquality\tassessment\tprediction")
+    for row in rows:
+        quality = _prediction_quality_from_row(row)
+        summary = _prediction_summary_from_row(row)
+        if len(summary) > 120:
+            summary = summary[:117].rstrip() + "..."
+        print(
+            f"{row.get('id')}\t{row.get('status')}\t{row.get('outcome_status')}\t"
+            f"{row.get('transmission_number')}\t{float(quality.get('score', 0.0)):.2f}\t"
+            f"{prediction_quality_label(quality)}\t{summary}"
+        )
+
+
+def _print_prediction_detail(prediction_id: int) -> bool:
+    """Render one stored prediction as JSON."""
+    row = get_prediction(prediction_id)
+    if row is None:
+        print(f"  [!] Prediction #{prediction_id} not found.")
+        return False
+    if not row.get("prediction_quality"):
+        row["prediction_quality"] = _prediction_quality_from_row(row)
+    print(json.dumps(row, ensure_ascii=False, indent=2))
+    return True
+
+
+def _apply_prediction_outcome_update(
+    prediction_id: int,
+    outcome_status: str,
+    note: str | None = None,
+    source: str | None = None,
+    validated_at: str | None = None,
+    utility_class: str | None = None,
+) -> bool:
+    """Apply one prediction outcome update and print a concise status line."""
+    try:
+        updated = update_prediction_outcome(
+            prediction_id,
+            outcome_status,
+            validation_note=note,
+            validation_source=source,
+            validated_at=validated_at,
+            utility_class=utility_class,
+        )
+    except ValueError as exc:
+        print(f"  [!] {exc}")
+        return False
+    if not updated:
+        print(f"  [!] Prediction #{prediction_id} not found.")
+        return False
+
+    print(
+        f"[Predictions] Marked prediction #{prediction_id} as "
+        f"{_truncate_text(outcome_status, 32)}."
+    )
+    if note is not None:
+        print("  [Predictions] Note saved.")
+    if source is not None:
+        print("  [Predictions] Validation source saved.")
+    if utility_class is not None:
+        print("  [Predictions] Utility class saved.")
+    return True
+
+
 def _print_prediction_check_report(limit: int):
     """Inspect recent predictions and report weak or incomplete ones."""
     rows = list_predictions(limit=max(1, int(limit)))
@@ -276,7 +563,7 @@ def _print_prediction_check_report(limit: int):
         print("No weak predictions found in the inspected window.")
         return
 
-    print("id\ttx\tstatus\tquality\tassessment\tissues\tprediction")
+    print("id\ttx\tstatus/outcome\tquality\tassessment\tissues\tprediction")
     for row, quality in weak_rows[:20]:
         issues = quality.get("blocking_reasons") or quality.get("issues") or []
         issues_text = "; ".join(str(item) for item in issues[:3]) or "n/a"
@@ -285,7 +572,8 @@ def _print_prediction_check_report(limit: int):
             summary = summary[:87].rstrip() + "..."
         print(
             f"{row.get('id')}\t{row.get('transmission_number')}\t"
-            f"{row.get('status')}\t{float(quality.get('score', 0.0)):.2f}\t"
+            f"{row.get('status')}/{row.get('outcome_status')}\t"
+            f"{float(quality.get('score', 0.0)):.2f}\t"
             f"{prediction_quality_label(quality)}\t{issues_text}\t{summary}"
         )
 
@@ -675,12 +963,38 @@ def _print_kill_stats(report: dict, window_requested: int):
 
 if __name__ == "__main__":
     _early_report_args = _parse_report_only_args()
+    _early_prediction_action_count = sum(
+        [
+            _early_report_args.predictions,
+            _early_report_args.prediction_outcomes,
+            _early_report_args.prediction_outcome_stats,
+            _early_report_args.prediction is not None,
+            _early_report_args.mark_supported is not None,
+            _early_report_args.mark_contradicted is not None,
+            _early_report_args.mark_mixed is not None,
+            _early_report_args.mark_expired is not None,
+            _early_report_args.mark_failed is not None,
+            _early_report_args.mark_unknown is not None,
+        ]
+    )
+    _early_other_report_count = sum(
+        [
+            _early_report_args.kill_stats,
+            _early_report_args.check_predictions,
+            _early_report_args.check_provenance,
+            _early_report_args.check_mechanisms,
+            _early_report_args.rut_report,
+            _early_report_args.audit_reasoning,
+            _early_report_args.eval_stats,
+        ]
+    )
     if (
         (
             _early_report_args.kill_stats
             or _early_report_args.check_predictions
             or _early_report_args.check_provenance
             or _early_report_args.check_mechanisms
+            or _early_report_args.prediction_outcomes
         )
         and _early_report_args.window <= 0
     ):
@@ -692,11 +1006,71 @@ if __name__ == "__main__":
     if _early_report_args.audit_reasoning and _early_report_args.audit_limit <= 0:
         print("  [!] --audit-limit requires a positive integer.")
         sys.exit(1)
+    if _early_prediction_action_count > 1:
+        print(
+            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
+        )
+        sys.exit(1)
+    if _early_prediction_action_count > 0 and _early_other_report_count > 0:
+        print(
+            "  [!] Prediction actions cannot be combined with other report-only actions."
+        )
+        sys.exit(1)
+    if (
+        _early_report_args.note is not None
+        and _early_report_args.mark_supported is None
+        and _early_report_args.mark_contradicted is None
+        and _early_report_args.mark_mixed is None
+        and _early_report_args.mark_expired is None
+        and _early_report_args.mark_failed is None
+        and _early_report_args.mark_unknown is None
+    ):
+        print("  [!] --note can only be used with prediction outcome update flags.")
+        sys.exit(1)
+    if (
+        (
+            _early_report_args.source is not None
+            or _early_report_args.validated_at is not None
+            or _early_report_args.utility_class is not None
+        )
+        and _early_report_args.mark_supported is None
+        and _early_report_args.mark_contradicted is None
+        and _early_report_args.mark_mixed is None
+        and _early_report_args.mark_expired is None
+        and _early_report_args.mark_failed is None
+        and _early_report_args.mark_unknown is None
+    ):
+        print(
+            "  [!] --source, --validated-at, and --utility-class can only be used with prediction outcome update flags."
+        )
+        sys.exit(1)
+    for flag_name, prediction_id in (
+        ("--prediction", _early_report_args.prediction),
+        ("--mark-supported", _early_report_args.mark_supported),
+        ("--mark-contradicted", _early_report_args.mark_contradicted),
+        ("--mark-mixed", _early_report_args.mark_mixed),
+        ("--mark-expired", _early_report_args.mark_expired),
+        ("--mark-failed", _early_report_args.mark_failed),
+        ("--mark-unknown", _early_report_args.mark_unknown),
+    ):
+        if prediction_id is not None and prediction_id <= 0:
+            print(f"  [!] {flag_name} requires a positive integer.")
+            sys.exit(1)
     if (
         _early_report_args.kill_stats
+        or _early_report_args.predictions
         or _early_report_args.check_predictions
         or _early_report_args.check_provenance
         or _early_report_args.check_mechanisms
+        or _early_report_args.prediction_outcomes
+        or _early_report_args.prediction_outcome_stats
+        or _early_report_args.prediction is not None
+        or _early_report_args.mark_supported is not None
+        or _early_report_args.mark_contradicted is not None
+        or _early_report_args.mark_mixed is not None
+        or _early_report_args.mark_expired is not None
+        or _early_report_args.mark_failed is not None
+        or _early_report_args.mark_unknown is not None
         or _early_report_args.rut_report
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
@@ -713,6 +1087,88 @@ if __name__ == "__main__":
             _print_provenance_check_report(limit=_early_report_args.window)
         if _early_report_args.check_mechanisms:
             _print_mechanism_check_report(limit=_early_report_args.window)
+        if _early_report_args.predictions:
+            _print_predictions_list(limit=20)
+        if _early_report_args.prediction_outcomes:
+            _print_prediction_outcomes(limit=20)
+        if _early_report_args.prediction_outcome_stats:
+            _print_prediction_outcome_stats(get_prediction_outcome_stats())
+        if _early_report_args.prediction is not None and not _print_prediction_detail(
+            _early_report_args.prediction
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.mark_supported is not None
+            and not _apply_prediction_outcome_update(
+                _early_report_args.mark_supported,
+                "supported",
+                note=_early_report_args.note,
+                source=_early_report_args.source,
+                validated_at=_early_report_args.validated_at,
+                utility_class=_early_report_args.utility_class,
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.mark_contradicted is not None
+            and not _apply_prediction_outcome_update(
+                _early_report_args.mark_contradicted,
+                "contradicted",
+                note=_early_report_args.note,
+                source=_early_report_args.source,
+                validated_at=_early_report_args.validated_at,
+                utility_class=_early_report_args.utility_class,
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.mark_mixed is not None
+            and not _apply_prediction_outcome_update(
+                _early_report_args.mark_mixed,
+                "mixed",
+                note=_early_report_args.note,
+                source=_early_report_args.source,
+                validated_at=_early_report_args.validated_at,
+                utility_class=_early_report_args.utility_class,
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.mark_expired is not None
+            and not _apply_prediction_outcome_update(
+                _early_report_args.mark_expired,
+                "expired",
+                note=_early_report_args.note,
+                source=_early_report_args.source,
+                validated_at=_early_report_args.validated_at,
+                utility_class=_early_report_args.utility_class,
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.mark_failed is not None
+            and not _apply_prediction_outcome_update(
+                _early_report_args.mark_failed,
+                "contradicted",
+                note=_early_report_args.note,
+                source=_early_report_args.source,
+                validated_at=_early_report_args.validated_at,
+                utility_class=_early_report_args.utility_class,
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.mark_unknown is not None
+            and not _apply_prediction_outcome_update(
+                _early_report_args.mark_unknown,
+                "open",
+                note=_early_report_args.note,
+                source=_early_report_args.source,
+                validated_at=_early_report_args.validated_at,
+                utility_class=_early_report_args.utility_class,
+            )
+        ):
+            sys.exit(1)
         if _early_report_args.rut_report:
             _print_rut_report(rut_report(window=_early_report_args.rut_window))
         if _early_report_args.audit_reasoning:
@@ -783,7 +1239,8 @@ Write a concise response with exactly these 4 sections:
 def parse_args():
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="BlackClaw — Autonomous Curiosity Engine"
+        description="BlackClaw — Autonomous Curiosity Engine",
+        allow_abbrev=False,
     )
     parser.add_argument(
         "--once",
@@ -873,7 +1330,26 @@ def parse_args():
         "--note",
         type=str,
         default=None,
-        help="Optional note to store with feedback or prediction status updates",
+        help="Optional note to store with feedback or prediction outcome updates",
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        help="Optional validation source for prediction outcome updates",
+    )
+    parser.add_argument(
+        "--validated-at",
+        type=str,
+        default=None,
+        help="Optional ISO-8601 timestamp for prediction outcome updates",
+    )
+    parser.add_argument(
+        "--utility-class",
+        type=str,
+        choices=("high", "medium", "low", "unknown"),
+        default=None,
+        help="Optional utility classification to store with prediction outcomes",
     )
     parser.add_argument(
         "--predictions",
@@ -949,11 +1425,42 @@ def parse_args():
         help="Show full details for a prediction id and exit",
     )
     parser.add_argument(
+        "--prediction-outcomes",
+        action="store_true",
+        help="List recent predictions with outcome fields and exit",
+    )
+    parser.add_argument(
+        "--prediction-outcome-stats",
+        action="store_true",
+        help="Summarize prediction outcomes by mechanism, score bands, and domains",
+    )
+    parser.add_argument(
         "--mark-supported",
         type=int,
         default=None,
         metavar="ID",
         help="Mark a prediction as supported and exit",
+    )
+    parser.add_argument(
+        "--mark-contradicted",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a prediction as contradicted and exit",
+    )
+    parser.add_argument(
+        "--mark-mixed",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a prediction as mixed and exit",
+    )
+    parser.add_argument(
+        "--mark-expired",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a prediction as expired and exit",
     )
     parser.add_argument(
         "--mark-failed",
@@ -2193,6 +2700,8 @@ def main():
     prediction_action_count = sum(
         [
             args.predictions,
+            args.prediction_outcomes,
+            args.prediction_outcome_stats,
             args.check_predictions,
             args.check_provenance,
             args.check_mechanisms,
@@ -2200,6 +2709,9 @@ def main():
             args.audit_reasoning,
             args.prediction is not None,
             args.mark_supported is not None,
+            args.mark_contradicted is not None,
+            args.mark_mixed is not None,
+            args.mark_expired is not None,
             args.mark_failed is not None,
             args.mark_unknown is not None,
         ]
@@ -2227,7 +2739,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and prediction_action_count > 0:
@@ -2254,11 +2766,27 @@ def main():
         and args.star is None
         and args.dismiss is None
         and args.mark_supported is None
+        and args.mark_contradicted is None
+        and args.mark_mixed is None
+        and args.mark_expired is None
         and args.mark_failed is None
         and args.mark_unknown is None
     ):
         print(
-            "  [!] --note can only be used with --star, --dismiss, --mark-supported, --mark-failed, or --mark-unknown."
+            "  [!] --note can only be used with --star, --dismiss, or prediction outcome update flags."
+        )
+        sys.exit(1)
+    if (
+        (args.source is not None or args.validated_at is not None or args.utility_class is not None)
+        and args.mark_supported is None
+        and args.mark_contradicted is None
+        and args.mark_mixed is None
+        and args.mark_expired is None
+        and args.mark_failed is None
+        and args.mark_unknown is None
+    ):
+        print(
+            "  [!] --source, --validated-at, and --utility-class can only be used with prediction outcome update flags."
         )
         sys.exit(1)
     for flag_name, tx_num in (
@@ -2267,6 +2795,9 @@ def main():
         ("--dive", args.dive),
         ("--prediction", args.prediction),
         ("--mark-supported", args.mark_supported),
+        ("--mark-contradicted", args.mark_contradicted),
+        ("--mark-mixed", args.mark_mixed),
+        ("--mark-expired", args.mark_expired),
         ("--mark-failed", args.mark_failed),
         ("--mark-unknown", args.mark_unknown),
     ):
@@ -2303,16 +2834,25 @@ def main():
         if not rows:
             print("[Predictions] No predictions found.")
             return
-        print("id\tstatus\ttransmission\tquality\tassessment\tprediction")
+        print("id\tstatus\toutcome\ttransmission\tquality\tassessment\tprediction")
         for row in rows:
             quality = _prediction_quality_from_row(row)
             summary = _prediction_summary_from_row(row)
             if len(summary) > 120:
                 summary = summary[:117].rstrip() + "..."
             print(
-                f"{row.get('id')}\t{row.get('status')}\t{row.get('transmission_number')}\t"
-                f"{float(quality.get('score', 0.0)):.2f}\t{prediction_quality_label(quality)}\t{summary}"
+                f"{row.get('id')}\t{row.get('status')}\t{row.get('outcome_status')}\t"
+                f"{row.get('transmission_number')}\t{float(quality.get('score', 0.0)):.2f}\t"
+                f"{prediction_quality_label(quality)}\t{summary}"
             )
+        return
+
+    if args.prediction_outcomes:
+        _print_prediction_outcomes(limit=20)
+        return
+
+    if args.prediction_outcome_stats:
+        _print_prediction_outcome_stats(get_prediction_outcome_stats())
         return
 
     if args.check_predictions:
@@ -2360,30 +2900,157 @@ def main():
         return
 
     if args.mark_supported is not None:
-        if not update_prediction_status(args.mark_supported, "supported", args.note):
+        try:
+            updated = update_prediction_outcome(
+                args.mark_supported,
+                "supported",
+                validation_note=args.note,
+                validation_source=args.source,
+                validated_at=args.validated_at,
+                utility_class=args.utility_class,
+            )
+        except ValueError as exc:
+            print(f"  [!] {exc}")
+            sys.exit(1)
+        if not updated:
             print(f"  [!] Prediction #{args.mark_supported} not found.")
             sys.exit(1)
         print(f"[Predictions] Marked prediction #{args.mark_supported} as supported.")
         if args.note is not None:
             print("  [Predictions] Note saved.")
+        if args.source is not None:
+            print("  [Predictions] Validation source saved.")
+        if args.utility_class is not None:
+            print("  [Predictions] Utility class saved.")
+        return
+
+    if args.mark_contradicted is not None:
+        try:
+            updated = update_prediction_outcome(
+                args.mark_contradicted,
+                "contradicted",
+                validation_note=args.note,
+                validation_source=args.source,
+                validated_at=args.validated_at,
+                utility_class=args.utility_class,
+            )
+        except ValueError as exc:
+            print(f"  [!] {exc}")
+            sys.exit(1)
+        if not updated:
+            print(f"  [!] Prediction #{args.mark_contradicted} not found.")
+            sys.exit(1)
+        print(
+            f"[Predictions] Marked prediction #{args.mark_contradicted} as contradicted."
+        )
+        if args.note is not None:
+            print("  [Predictions] Note saved.")
+        if args.source is not None:
+            print("  [Predictions] Validation source saved.")
+        if args.utility_class is not None:
+            print("  [Predictions] Utility class saved.")
+        return
+
+    if args.mark_mixed is not None:
+        try:
+            updated = update_prediction_outcome(
+                args.mark_mixed,
+                "mixed",
+                validation_note=args.note,
+                validation_source=args.source,
+                validated_at=args.validated_at,
+                utility_class=args.utility_class,
+            )
+        except ValueError as exc:
+            print(f"  [!] {exc}")
+            sys.exit(1)
+        if not updated:
+            print(f"  [!] Prediction #{args.mark_mixed} not found.")
+            sys.exit(1)
+        print(f"[Predictions] Marked prediction #{args.mark_mixed} as mixed.")
+        if args.note is not None:
+            print("  [Predictions] Note saved.")
+        if args.source is not None:
+            print("  [Predictions] Validation source saved.")
+        if args.utility_class is not None:
+            print("  [Predictions] Utility class saved.")
+        return
+
+    if args.mark_expired is not None:
+        try:
+            updated = update_prediction_outcome(
+                args.mark_expired,
+                "expired",
+                validation_note=args.note,
+                validation_source=args.source,
+                validated_at=args.validated_at,
+                utility_class=args.utility_class,
+            )
+        except ValueError as exc:
+            print(f"  [!] {exc}")
+            sys.exit(1)
+        if not updated:
+            print(f"  [!] Prediction #{args.mark_expired} not found.")
+            sys.exit(1)
+        print(f"[Predictions] Marked prediction #{args.mark_expired} as expired.")
+        if args.note is not None:
+            print("  [Predictions] Note saved.")
+        if args.source is not None:
+            print("  [Predictions] Validation source saved.")
+        if args.utility_class is not None:
+            print("  [Predictions] Utility class saved.")
         return
 
     if args.mark_failed is not None:
-        if not update_prediction_status(args.mark_failed, "failed", args.note):
+        try:
+            updated = update_prediction_outcome(
+                args.mark_failed,
+                "contradicted",
+                validation_note=args.note,
+                validation_source=args.source,
+                validated_at=args.validated_at,
+                utility_class=args.utility_class,
+            )
+        except ValueError as exc:
+            print(f"  [!] {exc}")
+            sys.exit(1)
+        if not updated:
             print(f"  [!] Prediction #{args.mark_failed} not found.")
             sys.exit(1)
-        print(f"[Predictions] Marked prediction #{args.mark_failed} as failed.")
+        print(
+            f"[Predictions] Marked prediction #{args.mark_failed} as contradicted."
+        )
         if args.note is not None:
             print("  [Predictions] Note saved.")
+        if args.source is not None:
+            print("  [Predictions] Validation source saved.")
+        if args.utility_class is not None:
+            print("  [Predictions] Utility class saved.")
         return
 
     if args.mark_unknown is not None:
-        if not update_prediction_status(args.mark_unknown, "unknown", args.note):
+        try:
+            updated = update_prediction_outcome(
+                args.mark_unknown,
+                "open",
+                validation_note=args.note,
+                validation_source=args.source,
+                validated_at=args.validated_at,
+                utility_class=args.utility_class,
+            )
+        except ValueError as exc:
+            print(f"  [!] {exc}")
+            sys.exit(1)
+        if not updated:
             print(f"  [!] Prediction #{args.mark_unknown} not found.")
             sys.exit(1)
-        print(f"[Predictions] Marked prediction #{args.mark_unknown} as unknown.")
+        print(f"[Predictions] Marked prediction #{args.mark_unknown} as open.")
         if args.note is not None:
             print("  [Predictions] Note saved.")
+        if args.source is not None:
+            print("  [Predictions] Validation source saved.")
+        if args.utility_class is not None:
+            print("  [Predictions] Utility class saved.")
         return
 
     if args.export:

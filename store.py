@@ -58,6 +58,33 @@ INVARIANCE_KILL_THRESHOLD: float = _optional_env(
     "BLACKCLAW_INVARIANCE_KILL_THRESHOLD",
     0.4,
 )
+
+PREDICTION_OUTCOME_STATUSES = (
+    "open",
+    "supported",
+    "contradicted",
+    "mixed",
+    "expired",
+)
+PREDICTION_UTILITY_CLASSES = ("high", "medium", "low", "unknown")
+PREDICTION_OUTCOME_BY_STATUS = {
+    "open": "open",
+    "unknown": "open",
+    "supported": "supported",
+    "contradicted": "contradicted",
+    "failed": "contradicted",
+    "mixed": "mixed",
+    "expired": "expired",
+}
+LEGACY_PREDICTION_STATUS_BY_OUTCOME = {
+    "open": "unknown",
+    "supported": "supported",
+    "contradicted": "failed",
+    "mixed": "mixed",
+    "expired": "expired",
+}
+
+
 def _connect() -> sqlite3.Connection:
     """Get a database connection with row factory."""
     conn = sqlite3.connect(DB_PATH)
@@ -65,6 +92,8 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
 def _ensure_api_usage_schema(conn: sqlite3.Connection):
     """Create/migrate api_usage columns used for aggregate cost tracking."""
     conn.execute(
@@ -103,6 +132,89 @@ def _coerce_usage_count(value) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _clean_optional_text(value: object) -> str | None:
+    """Normalize optional text values into stripped strings or None."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_prediction_outcome_status(
+    value: object,
+    fallback_status: object | None = None,
+) -> str:
+    """Map legacy prediction statuses and blank values into canonical outcomes."""
+    for candidate in (value, fallback_status):
+        text = _clean_optional_text(candidate)
+        if text is None:
+            continue
+        clean = text.lower()
+        if clean in PREDICTION_OUTCOME_STATUSES:
+            return clean
+        mapped = PREDICTION_OUTCOME_BY_STATUS.get(clean)
+        if mapped is not None:
+            return mapped
+    return "open"
+
+
+def _legacy_prediction_status(
+    outcome_status: object,
+    fallback_status: object | None = None,
+) -> str:
+    """Derive the legacy coarse status field from a canonical outcome."""
+    outcome = _normalize_prediction_outcome_status(outcome_status, fallback_status)
+    return LEGACY_PREDICTION_STATUS_BY_OUTCOME.get(outcome, "unknown")
+
+
+def _normalize_prediction_utility_class(value: object) -> str:
+    """Normalize utility classes while keeping missing values inspectable."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return "unknown"
+    clean = text.lower()
+    return clean if clean in PREDICTION_UTILITY_CLASSES else "unknown"
+
+
+def _normalize_timestamp_text(value: object) -> str | None:
+    """Normalize CLI-provided timestamps into ISO-8601 strings with offsets."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return None
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(
+            "validated_at must be ISO-8601, e.g. 2026-03-06T12:00:00+00:00"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
+
+
+def _coerce_optional_float(value: object) -> float | None:
+    """Parse optional numeric values into floats when possible."""
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _unit_score_band(value: object) -> str:
+    """Bucket 0-1 scores into fixed-width quartile-like bands."""
+    score = _coerce_optional_float(value)
+    if score is None:
+        return "unknown"
+    if score < 0.25:
+        return "0.00-0.24"
+    if score < 0.50:
+        return "0.25-0.49"
+    if score < 0.75:
+        return "0.50-0.74"
+    return "0.75-1.00"
 def init_db():
     """Create tables if they don't exist. Idempotent."""
     conn = _connect()
@@ -223,6 +335,11 @@ def init_db():
             prediction_quality_json TEXT,
             prediction_quality_score REAL,
             status TEXT NOT NULL DEFAULT "unknown",
+            outcome_status TEXT NOT NULL DEFAULT "open",
+            validation_source TEXT,
+            validation_note TEXT,
+            validated_at TEXT,
+            utility_class TEXT NOT NULL DEFAULT "unknown",
             notes TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -309,6 +426,76 @@ def init_db():
         conn.execute("ALTER TABLE predictions ADD COLUMN prediction_quality_json TEXT")
     if "prediction_quality_score" not in prediction_columns:
         conn.execute("ALTER TABLE predictions ADD COLUMN prediction_quality_score REAL")
+    if "outcome_status" not in prediction_columns:
+        conn.execute(
+            'ALTER TABLE predictions ADD COLUMN outcome_status TEXT NOT NULL DEFAULT "open"'
+        )
+    if "validation_source" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN validation_source TEXT")
+    if "validation_note" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN validation_note TEXT")
+    if "validated_at" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN validated_at TEXT")
+    if "utility_class" not in prediction_columns:
+        conn.execute(
+            'ALTER TABLE predictions ADD COLUMN utility_class TEXT NOT NULL DEFAULT "unknown"'
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_predictions_outcome_status ON predictions(outcome_status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_predictions_validated_at ON predictions(validated_at)"
+    )
+    conn.execute(
+        """UPDATE predictions
+        SET outcome_status = CASE LOWER(COALESCE(TRIM(status), ''))
+            WHEN 'supported' THEN 'supported'
+            WHEN 'failed' THEN 'contradicted'
+            WHEN 'contradicted' THEN 'contradicted'
+            WHEN 'mixed' THEN 'mixed'
+            WHEN 'expired' THEN 'expired'
+            ELSE 'open'
+        END
+        WHERE outcome_status IS NULL
+            OR TRIM(outcome_status) = ''
+            OR (
+                LOWER(TRIM(outcome_status)) = 'open'
+                AND LOWER(COALESCE(TRIM(status), '')) IN (
+                    'supported',
+                    'failed',
+                    'contradicted',
+                    'mixed',
+                    'expired'
+                )
+            )"""
+    )
+    conn.execute(
+        """UPDATE predictions
+        SET status = CASE LOWER(COALESCE(TRIM(outcome_status), ''))
+            WHEN 'supported' THEN 'supported'
+            WHEN 'contradicted' THEN 'failed'
+            WHEN 'mixed' THEN 'mixed'
+            WHEN 'expired' THEN 'expired'
+            ELSE 'unknown'
+        END
+        WHERE status IS NULL OR TRIM(status) = ''"""
+    )
+    conn.execute(
+        """UPDATE predictions
+        SET validated_at = updated_at
+        WHERE COALESCE(TRIM(validated_at), '') = ''
+            AND LOWER(COALESCE(TRIM(outcome_status), '')) IN (
+                'supported',
+                'contradicted',
+                'mixed',
+                'expired'
+            )
+            AND COALESCE(TRIM(updated_at), '') <> ''"""
+    )
+    conn.execute(
+        """UPDATE predictions
+        SET utility_class = COALESCE(NULLIF(LOWER(TRIM(utility_class)), ''), 'unknown')"""
+    )
     _ensure_api_usage_schema(conn)
     convergence_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(convergences)").fetchall()
@@ -600,9 +787,9 @@ def _create_prediction_with_conn(
     cursor = conn.execute(
         """INSERT INTO predictions
         (transmission_number, prediction, test, metric, prediction_json,
-         prediction_quality_json, prediction_quality_score, status, notes,
-         created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?)""",
+         prediction_quality_json, prediction_quality_score, status, outcome_status,
+         notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'unknown', 'open', ?, ?, ?)""",
         (
             transmission_number,
             prediction.strip(),
@@ -648,6 +835,11 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 prediction_quality_json,
                 prediction_quality_score,
                 status,
+                outcome_status,
+                validation_source,
+                validation_note,
+                validated_at,
+                utility_class,
                 notes,
                 created_at,
                 updated_at
@@ -658,11 +850,16 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
         ).fetchall()
     else:
         clean_status = (status or "").strip().lower()
-        if clean_status not in {"unknown", "supported", "failed"}:
+        if clean_status not in PREDICTION_OUTCOME_BY_STATUS:
             conn.close()
-            raise ValueError("status must be one of: unknown, supported, failed")
+            raise ValueError(
+                "status must be one of: open, unknown, supported, contradicted, failed, mixed, expired"
+            )
+        outcome_status = _normalize_prediction_outcome_status(clean_status)
+        filter_values = sorted({clean_status, outcome_status, _legacy_prediction_status(outcome_status)})
+        placeholders = ",".join("?" for _ in filter_values)
         rows = conn.execute(
-            """SELECT
+            f"""SELECT
                 id,
                 transmission_number,
                 prediction,
@@ -672,14 +869,20 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 prediction_quality_json,
                 prediction_quality_score,
                 status,
+                outcome_status,
+                validation_source,
+                validation_note,
+                validated_at,
+                utility_class,
                 notes,
                 created_at,
                 updated_at
             FROM predictions
-            WHERE status = ?
+            WHERE LOWER(COALESCE(status, '')) IN ({placeholders})
+                OR LOWER(COALESCE(outcome_status, '')) IN ({placeholders})
             ORDER BY id DESC
             LIMIT ?""",
-            (clean_status, safe_limit),
+            (*filter_values, *filter_values, safe_limit),
         ).fetchall()
     conn.close()
     return [_prediction_row_to_dict(row) for row in rows]
@@ -731,6 +934,20 @@ def _prediction_row_to_dict(row: sqlite3.Row | dict) -> dict:
             payload["prediction_quality_score"] = round(float(parsed_quality["score"]), 3)
         except Exception:
             payload["prediction_quality_score"] = None
+    payload["outcome_status"] = _normalize_prediction_outcome_status(
+        payload.get("outcome_status"),
+        payload.get("status"),
+    )
+    payload["status"] = _legacy_prediction_status(
+        payload.get("outcome_status"),
+        payload.get("status"),
+    )
+    payload["validation_source"] = _clean_optional_text(payload.get("validation_source"))
+    payload["validation_note"] = _clean_optional_text(payload.get("validation_note"))
+    payload["validated_at"] = _clean_optional_text(payload.get("validated_at"))
+    payload["utility_class"] = _normalize_prediction_utility_class(
+        payload.get("utility_class")
+    )
     payload["prediction_json"] = parsed_prediction
     payload["prediction_quality"] = parsed_quality if parsed_quality else None
     payload.pop("prediction_quality_json", None)
@@ -1073,6 +1290,229 @@ def list_recent_transmission_mechanisms(limit: int = 20) -> list[dict]:
     return payload
 
 
+def _prediction_context_row_to_dict(row: sqlite3.Row | dict) -> dict:
+    """Attach transmission/exploration context to a normalized prediction row."""
+    payload = _prediction_row_to_dict(row)
+    mechanism_typing = _mechanism_typing_or_none(payload.get("mechanism_typing_json"))
+    adversarial = _json_object_or_empty(payload.get("adversarial_rubric_json"))
+    adversarial_survival = _coerce_optional_float(adversarial.get("survival_score"))
+    depth_score = _coerce_optional_float(payload.get("depth_score"))
+    payload["mechanism_typing"] = mechanism_typing
+    payload["mechanism_type"] = (
+        mechanism_typing.get("mechanism_type")
+        if isinstance(mechanism_typing, dict)
+        else None
+    )
+    payload["source_domain"] = _clean_optional_text(payload.get("source_domain"))
+    payload["target_domain"] = _clean_optional_text(payload.get("target_domain"))
+    payload["depth_score"] = round(depth_score, 3) if depth_score is not None else None
+    payload["depth_score_band"] = _unit_score_band(depth_score)
+    payload["adversarial_survival_score"] = (
+        round(adversarial_survival, 3) if adversarial_survival is not None else None
+    )
+    payload["adversarial_survival_band"] = _unit_score_band(adversarial_survival)
+    payload["prediction_quality_band"] = _unit_score_band(
+        payload.get("prediction_quality_score")
+    )
+    payload.pop("mechanism_typing_json", None)
+    payload.pop("adversarial_rubric_json", None)
+    return payload
+
+
+def list_prediction_outcomes(limit: int | None = 20) -> list[dict]:
+    """List recent predictions with outcome metadata and context."""
+    conn = _connect()
+    query = """SELECT
+            p.id,
+            p.transmission_number,
+            p.prediction,
+            p.test,
+            p.metric,
+            p.prediction_json,
+            p.prediction_quality_json,
+            p.prediction_quality_score,
+            p.status,
+            p.outcome_status,
+            p.validation_source,
+            p.validation_note,
+            p.validated_at,
+            p.utility_class,
+            p.notes,
+            p.created_at,
+            p.updated_at,
+            t.mechanism_typing_json,
+            e.seed_domain AS source_domain,
+            e.jump_target_domain AS target_domain,
+            e.depth_score,
+            e.adversarial_rubric_json
+        FROM predictions p
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        LEFT JOIN explorations e
+            ON e.id = t.exploration_id
+        ORDER BY p.id DESC"""
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        safe_limit = max(1, int(limit))
+        query += "\n        LIMIT ?"
+        params = (safe_limit,)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [_prediction_context_row_to_dict(row) for row in rows]
+
+
+def _empty_outcome_bucket() -> dict:
+    """Create a fresh aggregation bucket for outcome counts."""
+    return {
+        "total": 0,
+        "open": 0,
+        "supported": 0,
+        "contradicted": 0,
+        "mixed": 0,
+        "expired": 0,
+    }
+
+
+def _accumulate_outcome(bucket: dict, outcome_status: str):
+    """Increment one aggregation bucket in place."""
+    outcome = _normalize_prediction_outcome_status(outcome_status)
+    bucket["total"] += 1
+    bucket[outcome] += 1
+
+
+def _finalize_outcome_bucket(label: str, bucket: dict) -> dict:
+    """Compute resolved and validation rates for one aggregation bucket."""
+    validated = (
+        int(bucket["supported"]) + int(bucket["contradicted"]) + int(bucket["mixed"])
+    )
+    resolved = validated + int(bucket["expired"])
+    total = int(bucket["total"])
+    return {
+        "label": label,
+        "total": total,
+        "open": int(bucket["open"]),
+        "supported": int(bucket["supported"]),
+        "contradicted": int(bucket["contradicted"]),
+        "mixed": int(bucket["mixed"]),
+        "expired": int(bucket["expired"]),
+        "validated": validated,
+        "resolved": resolved,
+        "validation_rate": (validated / total) if total else None,
+        "support_rate": (int(bucket["supported"]) / validated) if validated else None,
+    }
+
+
+def _sorted_outcome_rows(
+    grouped: dict[str, dict],
+    max_rows: int | None = None,
+) -> list[dict]:
+    """Sort aggregated outcome rows by descending sample size, then label."""
+    rows = [
+        _finalize_outcome_bucket(label, bucket)
+        for label, bucket in grouped.items()
+    ]
+    rows.sort(key=lambda item: (-item["total"], item["label"]))
+    if max_rows is not None:
+        return rows[: max(1, int(max_rows))]
+    return rows
+
+
+def get_prediction_outcome_stats() -> dict:
+    """Summarize outcome coverage and support rates across stored predictions."""
+    rows = list_prediction_outcomes(limit=None)
+    overview = _empty_outcome_bucket()
+    by_mechanism_type: dict[str, dict] = {}
+    by_prediction_quality_band: dict[str, dict] = {}
+    by_depth_score_band: dict[str, dict] = {}
+    by_adversarial_survival_band: dict[str, dict] = {}
+    by_source_domain: dict[str, dict] = {}
+    by_target_domain: dict[str, dict] = {}
+    coverage = {
+        "mechanism_type": {"available": 0, "missing": 0},
+        "prediction_quality_score": {"available": 0, "missing": 0},
+        "depth_score": {"available": 0, "missing": 0},
+        "adversarial_survival": {"available": 0, "missing": 0},
+        "source_domain": {"available": 0, "missing": 0},
+        "target_domain": {"available": 0, "missing": 0},
+    }
+
+    for row in rows:
+        outcome = row.get("outcome_status")
+        _accumulate_outcome(overview, outcome)
+
+        mechanism_type = _clean_optional_text(row.get("mechanism_type"))
+        mechanism_key = mechanism_type or "unknown"
+        _accumulate_outcome(
+            by_mechanism_type.setdefault(mechanism_key, _empty_outcome_bucket()),
+            outcome,
+        )
+        coverage["mechanism_type"]["available" if mechanism_type else "missing"] += 1
+
+        quality_score = row.get("prediction_quality_score")
+        quality_band = _unit_score_band(quality_score)
+        _accumulate_outcome(
+            by_prediction_quality_band.setdefault(
+                quality_band, _empty_outcome_bucket()
+            ),
+            outcome,
+        )
+        coverage["prediction_quality_score"][
+            "available" if quality_score is not None else "missing"
+        ] += 1
+
+        depth_score = row.get("depth_score")
+        depth_band = _unit_score_band(depth_score)
+        _accumulate_outcome(
+            by_depth_score_band.setdefault(depth_band, _empty_outcome_bucket()),
+            outcome,
+        )
+        coverage["depth_score"]["available" if depth_score is not None else "missing"] += 1
+
+        adversarial_survival = row.get("adversarial_survival_score")
+        survival_band = _unit_score_band(adversarial_survival)
+        _accumulate_outcome(
+            by_adversarial_survival_band.setdefault(
+                survival_band, _empty_outcome_bucket()
+            ),
+            outcome,
+        )
+        coverage["adversarial_survival"][
+            "available" if adversarial_survival is not None else "missing"
+        ] += 1
+
+        source_domain = _clean_optional_text(row.get("source_domain"))
+        source_key = source_domain or "unknown"
+        _accumulate_outcome(
+            by_source_domain.setdefault(source_key, _empty_outcome_bucket()),
+            outcome,
+        )
+        coverage["source_domain"]["available" if source_domain else "missing"] += 1
+
+        target_domain = _clean_optional_text(row.get("target_domain"))
+        target_key = target_domain or "unknown"
+        _accumulate_outcome(
+            by_target_domain.setdefault(target_key, _empty_outcome_bucket()),
+            outcome,
+        )
+        coverage["target_domain"]["available" if target_domain else "missing"] += 1
+
+    return {
+        "sample_size": len(rows),
+        "overview": _finalize_outcome_bucket("all_predictions", overview),
+        "coverage": coverage,
+        "by_mechanism_type": _sorted_outcome_rows(by_mechanism_type),
+        "by_prediction_quality_band": _sorted_outcome_rows(
+            by_prediction_quality_band
+        ),
+        "by_depth_score_band": _sorted_outcome_rows(by_depth_score_band),
+        "by_adversarial_survival_band": _sorted_outcome_rows(
+            by_adversarial_survival_band
+        ),
+        "by_source_domain": _sorted_outcome_rows(by_source_domain, max_rows=10),
+        "by_target_domain": _sorted_outcome_rows(by_target_domain, max_rows=10),
+    }
+
+
 def get_prediction(id: int) -> dict | None:
     """Get one prediction by id."""
     conn = _connect()
@@ -1087,6 +1527,11 @@ def get_prediction(id: int) -> dict | None:
             prediction_quality_json,
             prediction_quality_score,
             status,
+            outcome_status,
+            validation_source,
+            validation_note,
+            validated_at,
+            utility_class,
             notes,
             created_at,
             updated_at
@@ -1099,39 +1544,96 @@ def get_prediction(id: int) -> dict | None:
     return _prediction_row_to_dict(row) if row else None
 
 
+def update_prediction_outcome(
+    id: int,
+    outcome_status: str,
+    validation_note: str | None = None,
+    validation_source: str | None = None,
+    validated_at: str | None = None,
+    utility_class: str | None = None,
+) -> bool:
+    """Update explicit prediction outcome metadata."""
+    clean_outcome = _normalize_prediction_outcome_status(outcome_status)
+    clean_note = _clean_optional_text(validation_note)
+    clean_source = _clean_optional_text(validation_source)
+    clean_utility = (
+        _normalize_prediction_utility_class(utility_class)
+        if utility_class is not None
+        else None
+    )
+    clean_validated_at = (
+        _normalize_timestamp_text(validated_at)
+        if validated_at is not None
+        else (_now() if clean_outcome != "open" else None)
+    )
+    conn = _connect()
+    existing = conn.execute(
+        """SELECT validation_source, validation_note, utility_class
+        FROM predictions
+        WHERE id = ?
+        LIMIT 1""",
+        (id,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+
+    if clean_outcome == "open":
+        next_source = clean_source if validation_source is not None else None
+        next_note = clean_note if validation_note is not None else None
+        next_validated_at = None
+    else:
+        next_source = (
+            clean_source
+            if validation_source is not None
+            else _clean_optional_text(existing["validation_source"])
+        )
+        next_note = (
+            clean_note
+            if validation_note is not None
+            else _clean_optional_text(existing["validation_note"])
+        )
+        next_validated_at = clean_validated_at
+
+    next_utility = (
+        clean_utility
+        if utility_class is not None
+        else _normalize_prediction_utility_class(existing["utility_class"])
+    )
+
+    conn.execute(
+        """UPDATE predictions
+        SET status = ?, outcome_status = ?, validation_source = ?,
+            validation_note = ?, validated_at = ?, utility_class = ?,
+            updated_at = ?
+        WHERE id = ?""",
+        (
+            _legacy_prediction_status(clean_outcome),
+            clean_outcome,
+            next_source,
+            next_note,
+            next_validated_at,
+            next_utility,
+            _now(),
+            id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def update_prediction_status(
     id: int,
     status: str,
     notes: str | None = None,
 ) -> bool:
     """Update a prediction status and optional notes."""
-    clean_status = (status or "").strip().lower()
-    if clean_status not in {"unknown", "supported", "failed"}:
-        raise ValueError("status must be one of: unknown, supported, failed")
-    conn = _connect()
-    existing = conn.execute(
-        "SELECT 1 FROM predictions WHERE id = ? LIMIT 1",
-        (id,),
-    ).fetchone()
-    if not existing:
-        conn.close()
-        return False
-    if notes is None:
-        conn.execute(
-            "UPDATE predictions SET status = ?, updated_at = ? WHERE id = ?",
-            (clean_status, _now(), id),
-        )
-    else:
-        clean_notes = notes.strip()
-        conn.execute(
-            """UPDATE predictions
-            SET status = ?, notes = ?, updated_at = ?
-            WHERE id = ?""",
-            (clean_status, clean_notes if clean_notes else None, _now(), id),
-        )
-    conn.commit()
-    conn.close()
-    return True
+    return update_prediction_outcome(
+        id=id,
+        outcome_status=status,
+        validation_note=notes,
+    )
 
 
 # --- Transmissions ---
@@ -1533,6 +2035,11 @@ def export_transmissions(path: str = "transmissions_export.json") -> int:
                 prediction_quality_json,
                 prediction_quality_score,
                 status,
+                outcome_status,
+                validation_source,
+                validation_note,
+                validated_at,
+                utility_class,
                 notes,
                 created_at,
                 updated_at
