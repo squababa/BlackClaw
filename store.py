@@ -1782,6 +1782,141 @@ def list_prediction_outcomes(limit: int | None = 20) -> list[dict]:
     return [_prediction_context_row_to_dict(row) for row in rows]
 
 
+def _prediction_outcome_review_recommendation(
+    accepted_support_hits: object,
+    accepted_contradiction_hits: object,
+    unreviewed_reviewable_hits: object,
+) -> str | None:
+    """Label one prediction for the manual outcome-review queue."""
+    support = max(0, int(accepted_support_hits or 0))
+    contradiction = max(0, int(accepted_contradiction_hits or 0))
+    unreviewed = max(0, int(unreviewed_reviewable_hits or 0))
+    if support > 0 and contradiction == 0:
+        return "review_for_support"
+    if contradiction > 0 and support == 0:
+        return "review_for_contradiction"
+    if support > 0 and contradiction > 0:
+        return "conflicting_evidence"
+    if unreviewed > 0:
+        return "waiting_on_review"
+    return None
+
+
+def _prediction_outcome_review_row_to_dict(row: sqlite3.Row | dict) -> dict:
+    """Normalize one outcome-review queue row for CLI output."""
+    payload = _prediction_context_row_to_dict(row)
+    payload["accepted_support_hits"] = max(
+        0, int(payload.get("accepted_support_hits") or 0)
+    )
+    payload["accepted_contradiction_hits"] = max(
+        0, int(payload.get("accepted_contradiction_hits") or 0)
+    )
+    payload["unreviewed_reviewable_hits"] = max(
+        0, int(payload.get("unreviewed_reviewable_hits") or 0)
+    )
+    payload["recommendation"] = _prediction_outcome_review_recommendation(
+        payload["accepted_support_hits"],
+        payload["accepted_contradiction_hits"],
+        payload["unreviewed_reviewable_hits"],
+    )
+    return payload
+
+
+def list_prediction_outcome_review_queue(limit: int | None = 20) -> list[dict]:
+    """List predictions that are ready for manual outcome review from local evidence."""
+    conn = _connect()
+    query = """WITH evidence_counts AS (
+            SELECT
+                prediction_id,
+                SUM(
+                    CASE
+                        WHEN classification = 'possible_support'
+                             AND review_status = 'accepted'
+                        THEN 1 ELSE 0
+                    END
+                ) AS accepted_support_hits,
+                SUM(
+                    CASE
+                        WHEN classification = 'possible_contradiction'
+                             AND review_status = 'accepted'
+                        THEN 1 ELSE 0
+                    END
+                ) AS accepted_contradiction_hits,
+                SUM(
+                    CASE
+                        WHEN classification IN ('possible_support', 'possible_contradiction')
+                             AND review_status = 'unreviewed'
+                        THEN 1 ELSE 0
+                    END
+                ) AS unreviewed_reviewable_hits
+            FROM prediction_evidence_hits
+            GROUP BY prediction_id
+        )
+        SELECT
+            p.id,
+            p.transmission_number,
+            p.prediction,
+            p.test,
+            p.metric,
+            p.prediction_json,
+            p.prediction_quality_json,
+            p.prediction_quality_score,
+            p.status,
+            p.outcome_status,
+            p.validation_source,
+            p.validation_note,
+            p.validated_at,
+            p.utility_class,
+            p.last_scanned_at,
+            p.needs_review,
+            p.notes,
+            p.created_at,
+            p.updated_at,
+            t.mechanism_typing_json,
+            e.seed_domain AS source_domain,
+            e.jump_target_domain AS target_domain,
+            e.depth_score,
+            e.adversarial_rubric_json,
+            COALESCE(ec.accepted_support_hits, 0) AS accepted_support_hits,
+            COALESCE(ec.accepted_contradiction_hits, 0) AS accepted_contradiction_hits,
+            COALESCE(ec.unreviewed_reviewable_hits, 0) AS unreviewed_reviewable_hits
+        FROM predictions p
+        LEFT JOIN evidence_counts ec
+            ON ec.prediction_id = p.id
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        LEFT JOIN explorations e
+            ON e.id = t.exploration_id
+        WHERE COALESCE(ec.accepted_support_hits, 0) > 0
+           OR COALESCE(ec.accepted_contradiction_hits, 0) > 0
+           OR COALESCE(ec.unreviewed_reviewable_hits, 0) > 0
+        ORDER BY
+            CASE
+                WHEN COALESCE(ec.accepted_support_hits, 0) > 0
+                     AND COALESCE(ec.accepted_contradiction_hits, 0) > 0
+                THEN 0
+                WHEN COALESCE(ec.accepted_support_hits, 0) > 0
+                THEN 1
+                WHEN COALESCE(ec.accepted_contradiction_hits, 0) > 0
+                THEN 2
+                ELSE 3
+            END ASC,
+            COALESCE(
+                NULLIF(p.validated_at, ''),
+                NULLIF(p.updated_at, ''),
+                p.created_at
+            ) DESC,
+            p.id DESC"""
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        safe_limit = max(1, int(limit))
+        query += "\n        LIMIT ?"
+        params = (safe_limit,)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [_prediction_outcome_review_row_to_dict(row) for row in rows]
+
+
 def _empty_outcome_bucket() -> dict:
     """Create a fresh aggregation bucket for outcome counts."""
     return {

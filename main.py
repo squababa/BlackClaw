@@ -41,6 +41,7 @@ from store import (
     increment_llm_calls,
     list_predictions,
     list_prediction_outcomes,
+    list_prediction_outcome_review_queue,
     get_prediction_outcome_stats,
     list_near_misses,
     get_reasoning_failure_audit,
@@ -124,6 +125,10 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--prediction-evidence-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--outcome-review-queue",
         action="store_true",
     )
     parser.add_argument(
@@ -760,6 +765,38 @@ def _print_prediction_evidence_review_stats(report: dict):
             f"{int(row.get('accepted', 0) or 0)}\t"
             f"{int(row.get('dismissed', 0) or 0)}\t"
             f"{int(row.get('total', 0) or 0)}"
+        )
+
+
+def _print_prediction_outcome_review_queue(limit: int = 20):
+    """Render predictions that are ready for manual outcome review."""
+    rows = list_prediction_outcome_review_queue(limit=max(1, int(limit)))
+    if not rows:
+        print("[PredictionOutcomeReviewQueue] No review-ready predictions found.")
+        return
+
+    print(f"[PredictionOutcomeReviewQueue] Recent {len(rows)} review-ready predictions")
+    print(
+        "pred\ttx\tstatus\toutcome\tsupport\tcontradict\tunreviewed\tutility\t"
+        "recommendation\tmechanism\tprediction"
+    )
+    for row in rows:
+        utility_text = row.get("utility_class") or "unknown"
+        if utility_text == "unknown":
+            utility_text = "—"
+        mechanism_type = row.get("mechanism_type") or "—"
+        summary = _truncate_text(_prediction_summary_from_row(row), 96)
+        print(
+            f"{row.get('id')}\t{row.get('transmission_number')}\t"
+            f"{row.get('status') or 'unknown'}\t"
+            f"{row.get('outcome_status') or 'open'}\t"
+            f"{int(row.get('accepted_support_hits', 0) or 0)}\t"
+            f"{int(row.get('accepted_contradiction_hits', 0) or 0)}\t"
+            f"{int(row.get('unreviewed_reviewable_hits', 0) or 0)}\t"
+            f"{_truncate_text(utility_text, 12)}\t"
+            f"{_truncate_text(row.get('recommendation'), 26)}\t"
+            f"{_truncate_text(mechanism_type, 24)}\t"
+            f"{summary}"
         )
 
 
@@ -1440,6 +1477,7 @@ if __name__ == "__main__":
             _early_report_args.prediction is not None,
             _early_report_args.prediction_evidence,
             _early_report_args.prediction_evidence_stats,
+            _early_report_args.outcome_review_queue,
             _early_report_args.evidence_review_queue,
             _early_report_args.evidence_review_stats,
             _early_report_args.review_evidence is not None,
@@ -1490,6 +1528,7 @@ if __name__ == "__main__":
     if (
         (
             _early_report_args.prediction_evidence
+            or _early_report_args.outcome_review_queue
             or _early_report_args.evidence_review_queue
             or _early_report_args.scan_open_predictions
             or _early_report_args.strong_rejections
@@ -1507,7 +1546,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_prediction_action_count > 1:
         print(
-            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
+            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
         )
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
@@ -1538,12 +1577,13 @@ if __name__ == "__main__":
     if (
         _early_report_args.limit is not None
         and not _early_report_args.prediction_evidence
+        and not _early_report_args.outcome_review_queue
         and not _early_report_args.evidence_review_queue
         and not _early_report_args.scan_open_predictions
         and not _early_report_args.strong_rejections
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
         )
         sys.exit(1)
     if (
@@ -1613,6 +1653,7 @@ if __name__ == "__main__":
         or _early_report_args.prediction_outcome_stats
         or _early_report_args.prediction_evidence
         or _early_report_args.prediction_evidence_stats
+        or _early_report_args.outcome_review_queue
         or _early_report_args.evidence_review_queue
         or _early_report_args.evidence_review_stats
         or _early_report_args.review_evidence is not None
@@ -1678,6 +1719,10 @@ if __name__ == "__main__":
             )
         if _early_report_args.prediction_evidence_stats:
             _print_prediction_evidence_stats(get_prediction_evidence_stats())
+        if _early_report_args.outcome_review_queue:
+            _print_prediction_outcome_review_queue(
+                limit=_early_report_args.limit or 20
+            )
         if _early_report_args.evidence_review_queue:
             _print_prediction_evidence_review_queue(
                 limit=_early_report_args.limit or 20
@@ -1959,7 +2004,7 @@ def parse_args():
         type=int,
         default=None,
         metavar="N",
-        help="Optional limit for scan, evidence-list, evidence-review-queue, or strong-rejection list commands",
+        help="Optional limit for scan, evidence-list, outcome-review-queue, evidence-review-queue, or strong-rejection list commands",
     )
     parser.add_argument(
         "--star",
@@ -2089,6 +2134,11 @@ def parse_args():
         "--prediction-evidence-stats",
         action="store_true",
         help="Summarize stored prediction evidence hits and review flags",
+    )
+    parser.add_argument(
+        "--outcome-review-queue",
+        action="store_true",
+        help="List predictions ready for manual outcome review and exit",
     )
     parser.add_argument(
         "--evidence-review-queue",
@@ -3712,6 +3762,7 @@ def main():
             args.predictions,
             args.prediction_evidence,
             args.prediction_evidence_stats,
+            args.outcome_review_queue,
             args.evidence_review_queue,
             args.evidence_review_stats,
             args.review_evidence is not None,
@@ -3768,7 +3819,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if strong_rejection_action_count > 1:
@@ -3811,12 +3862,13 @@ def main():
     if (
         args.limit is not None
         and not args.prediction_evidence
+        and not args.outcome_review_queue
         and not args.evidence_review_queue
         and not args.scan_open_predictions
         and not args.strong_rejections
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
         )
         sys.exit(1)
     if (
@@ -3925,6 +3977,10 @@ def main():
 
     if args.prediction_evidence_stats:
         _print_prediction_evidence_stats(get_prediction_evidence_stats())
+        return
+
+    if args.outcome_review_queue:
+        _print_prediction_outcome_review_queue(limit=args.limit or 20)
         return
 
     if args.evidence_review_queue:
