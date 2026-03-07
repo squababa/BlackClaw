@@ -2,11 +2,10 @@
 BlackClaw Seed Selection
 Picks starting domains for exploration with exclusion and weighting.
 """
+from difflib import get_close_matches
 import json
 import random
 from pathlib import Path
-from store import get_recent_domains, get_feedback_seed_metrics
-from config import SEED_EXCLUSION_WINDOW, PERSONALIZATION
 
 
 PERSONALIZATION_RANDOM_FLOOR = 0.2
@@ -18,6 +17,81 @@ def _load_domains() -> list[dict]:
     with open(path, "r") as f:
         data = json.load(f)
     return data["domains"]
+
+
+def _domain_to_seed(domain: dict) -> dict:
+    """Normalize a raw domain row to the runtime seed shape."""
+    return {
+        "name": domain["name"],
+        "category": domain["category"],
+        "seed_queries": list(domain["seed_queries"]),
+    }
+
+
+def _normalize_seed_name(value: str) -> str:
+    """Normalize CLI seed text for case-insensitive matching."""
+    return " ".join((value or "").split()).casefold()
+
+
+def find_seed(seed_name: str) -> dict | None:
+    """Return a built-in seed by name using case-insensitive matching."""
+    normalized_name = _normalize_seed_name(seed_name)
+    if not normalized_name:
+        return None
+
+    for domain in _load_domains():
+        if _normalize_seed_name(domain.get("name", "")) == normalized_name:
+            return _domain_to_seed(domain)
+    return None
+
+
+def suggest_seed_matches(seed_name: str, limit: int = 3) -> list[str]:
+    """Return a few likely built-in seed names for an invalid input."""
+    normalized_name = _normalize_seed_name(seed_name)
+    if not normalized_name:
+        return []
+
+    names_by_normalized: dict[str, str] = {}
+    for domain in _load_domains():
+        normalized_domain_name = _normalize_seed_name(domain.get("name", ""))
+        if normalized_domain_name and normalized_domain_name not in names_by_normalized:
+            names_by_normalized[normalized_domain_name] = domain["name"]
+
+    suggestions: list[str] = []
+    substring_matches = [
+        canonical_name
+        for normalized_domain_name, canonical_name in names_by_normalized.items()
+        if normalized_name in normalized_domain_name
+        or normalized_domain_name in normalized_name
+    ]
+    for suggestion in substring_matches:
+        if suggestion not in suggestions:
+            suggestions.append(suggestion)
+        if len(suggestions) >= limit:
+            return suggestions[:limit]
+
+    close_matches = get_close_matches(
+        normalized_name,
+        list(names_by_normalized.keys()),
+        n=limit,
+        cutoff=0.5,
+    )
+    for normalized_match in close_matches:
+        suggestion = names_by_normalized[normalized_match]
+        if suggestion not in suggestions:
+            suggestions.append(suggestion)
+        if len(suggestions) >= limit:
+            break
+
+    return suggestions[:limit]
+
+
+def resolve_seed_choice(seed_name: str) -> tuple[dict | None, list[str]]:
+    """Resolve a manual CLI seed to a built-in entry plus fallback suggestions."""
+    matched_seed = find_seed(seed_name)
+    if matched_seed is not None:
+        return matched_seed, []
+    return None, suggest_seed_matches(seed_name)
 
 
 def _rate_stats(counts: dict | None) -> tuple[float, float, int]:
@@ -93,6 +167,9 @@ def pick_seed() -> dict:
     5. Weight boost for never-visited domains
     6. Return: {"name": str, "category": str, "seed_queries": list[str]}
     """
+    from config import PERSONALIZATION, SEED_EXCLUSION_WINDOW
+    from store import get_feedback_seed_metrics, get_recent_domains
+
     domains = _load_domains()
     recent = set(get_recent_domains(SEED_EXCLUSION_WINDOW))
     # Filter out recently explored
@@ -133,10 +210,5 @@ def pick_seed() -> dict:
             reason = reasons_by_domain.get(selected["name"], "weighted feedback signal")
             print(f"  [Seed] Personalization reason: {reason}")
 
-    return {
-        "name": selected["name"],
-        "category": selected["category"],
-        "seed_queries": selected["seed_queries"],
-    }
-
+    return _domain_to_seed(selected)
 

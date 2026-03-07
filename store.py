@@ -67,6 +67,16 @@ PREDICTION_OUTCOME_STATUSES = (
     "expired",
 )
 PREDICTION_UTILITY_CLASSES = ("high", "medium", "low", "unknown")
+PREDICTION_EVIDENCE_CLASSIFICATIONS = (
+    "possible_support",
+    "possible_contradiction",
+    "unclear",
+)
+PREDICTION_EVIDENCE_REVIEW_STATUSES = (
+    "unreviewed",
+    "accepted",
+    "dismissed",
+)
 PREDICTION_OUTCOME_BY_STATUS = {
     "open": "open",
     "unknown": "open",
@@ -178,6 +188,40 @@ def _normalize_prediction_utility_class(value: object) -> str:
     return clean if clean in PREDICTION_UTILITY_CLASSES else "unknown"
 
 
+def _normalize_prediction_evidence_classification(value: object) -> str:
+    """Normalize evidence classifications to the conservative v1 label set."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return "unclear"
+    clean = text.lower()
+    if clean in PREDICTION_EVIDENCE_CLASSIFICATIONS:
+        return clean
+    return "unclear"
+
+
+def _normalize_prediction_evidence_review_status(value: object) -> str:
+    """Normalize evidence review status to the stored v1 label set."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return "unreviewed"
+    clean = text.lower()
+    if clean in PREDICTION_EVIDENCE_REVIEW_STATUSES:
+        return clean
+    return "unreviewed"
+
+
+def _normalize_bool_flag(value: object) -> int:
+    """Normalize optional truthy values into SQLite-friendly 0/1 integers."""
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if value else 0
+    text = _clean_optional_text(value)
+    if text is None:
+        return 0
+    return 1 if text.lower() in {"1", "true", "yes", "y", "on"} else 0
+
+
 def _normalize_timestamp_text(value: object) -> str | None:
     """Normalize CLI-provided timestamps into ISO-8601 strings with offsets."""
     text = _clean_optional_text(value)
@@ -215,6 +259,8 @@ def _unit_score_band(value: object) -> str:
     if score < 0.75:
         return "0.50-0.74"
     return "0.75-1.00"
+
+
 def init_db():
     """Create tables if they don't exist. Idempotent."""
     conn = _connect()
@@ -340,10 +386,28 @@ def init_db():
             validation_note TEXT,
             validated_at TEXT,
             utility_class TEXT NOT NULL DEFAULT "unknown",
+            last_scanned_at TEXT,
+            needs_review INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (transmission_number) REFERENCES transmissions(transmission_number)
+        );
+        CREATE TABLE IF NOT EXISTS prediction_evidence_hits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prediction_id INTEGER NOT NULL,
+            scan_timestamp TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL,
+            snippet TEXT,
+            classification TEXT NOT NULL DEFAULT "unclear",
+            score REAL,
+            query_used TEXT NOT NULL,
+            review_status TEXT NOT NULL DEFAULT "unreviewed",
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (prediction_id) REFERENCES predictions(id)
         );
         CREATE INDEX IF NOT EXISTS idx_predictions_status
             ON predictions(status);
@@ -440,11 +504,20 @@ def init_db():
         conn.execute(
             'ALTER TABLE predictions ADD COLUMN utility_class TEXT NOT NULL DEFAULT "unknown"'
         )
+    if "last_scanned_at" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN last_scanned_at TEXT")
+    if "needs_review" not in prediction_columns:
+        conn.execute(
+            'ALTER TABLE predictions ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0'
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_predictions_outcome_status ON predictions(outcome_status)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_predictions_validated_at ON predictions(validated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_predictions_review_flag ON predictions(outcome_status, needs_review)"
     )
     conn.execute(
         """UPDATE predictions
@@ -495,6 +568,137 @@ def init_db():
     conn.execute(
         """UPDATE predictions
         SET utility_class = COALESCE(NULLIF(LOWER(TRIM(utility_class)), ''), 'unknown')"""
+    )
+    conn.execute(
+        """UPDATE predictions
+        SET needs_review = CASE
+            WHEN needs_review IS NULL THEN 0
+            WHEN CAST(needs_review AS INTEGER) <> 0 THEN 1
+            ELSE 0
+        END"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS prediction_evidence_hits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prediction_id INTEGER NOT NULL,
+            scan_timestamp TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL,
+            snippet TEXT,
+            classification TEXT NOT NULL DEFAULT "unclear",
+            score REAL,
+            query_used TEXT NOT NULL,
+            review_status TEXT NOT NULL DEFAULT "unreviewed",
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (prediction_id) REFERENCES predictions(id)
+        )"""
+    )
+    evidence_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(prediction_evidence_hits)").fetchall()
+    }
+    if "scan_timestamp" not in evidence_columns:
+        conn.execute(
+            "ALTER TABLE prediction_evidence_hits ADD COLUMN scan_timestamp TEXT"
+        )
+    if "source_type" not in evidence_columns:
+        conn.execute(
+            "ALTER TABLE prediction_evidence_hits ADD COLUMN source_type TEXT"
+        )
+    if "title" not in evidence_columns:
+        conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN title TEXT")
+    if "url" not in evidence_columns:
+        conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN url TEXT")
+    if "snippet" not in evidence_columns:
+        conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN snippet TEXT")
+    if "classification" not in evidence_columns:
+        conn.execute(
+            'ALTER TABLE prediction_evidence_hits ADD COLUMN classification TEXT NOT NULL DEFAULT "unclear"'
+        )
+    if "score" not in evidence_columns:
+        conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN score REAL")
+    if "query_used" not in evidence_columns:
+        conn.execute(
+            'ALTER TABLE prediction_evidence_hits ADD COLUMN query_used TEXT NOT NULL DEFAULT ""'
+        )
+    if "review_status" not in evidence_columns:
+        conn.execute(
+            'ALTER TABLE prediction_evidence_hits ADD COLUMN review_status TEXT NOT NULL DEFAULT "unreviewed"'
+        )
+    if "created_at" not in evidence_columns:
+        conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN created_at TEXT")
+    if "updated_at" not in evidence_columns:
+        conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN updated_at TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prediction_evidence_hits_prediction ON prediction_evidence_hits(prediction_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prediction_evidence_hits_scan ON prediction_evidence_hits(scan_timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prediction_evidence_hits_classification ON prediction_evidence_hits(classification)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prediction_evidence_hits_review_status ON prediction_evidence_hits(review_status)"
+    )
+    conn.execute(
+        """UPDATE prediction_evidence_hits
+        SET classification = CASE LOWER(COALESCE(TRIM(classification), ''))
+            WHEN 'possible_support' THEN 'possible_support'
+            WHEN 'possible_contradiction' THEN 'possible_contradiction'
+            ELSE 'unclear'
+        END"""
+    )
+    conn.execute(
+        """UPDATE prediction_evidence_hits
+        SET review_status = CASE LOWER(COALESCE(TRIM(review_status), ''))
+            WHEN 'accepted' THEN 'accepted'
+            WHEN 'dismissed' THEN 'dismissed'
+            ELSE 'unreviewed'
+        END"""
+    )
+    conn.execute(
+        """UPDATE prediction_evidence_hits
+        SET source_type = COALESCE(NULLIF(TRIM(source_type), ''), 'web_search'),
+            query_used = COALESCE(NULLIF(TRIM(query_used), ''), '(unknown query)'),
+            created_at = COALESCE(NULLIF(TRIM(created_at), ''), scan_timestamp, ?),
+            updated_at = COALESCE(NULLIF(TRIM(updated_at), ''), scan_timestamp, ?)
+        WHERE source_type IS NULL
+            OR TRIM(source_type) = ''
+            OR query_used IS NULL
+            OR TRIM(query_used) = ''
+            OR created_at IS NULL
+            OR TRIM(created_at) = ''
+            OR updated_at IS NULL
+            OR TRIM(updated_at) = ''""",
+        (_now(), _now()),
+    )
+    conn.execute(
+        """UPDATE predictions
+        SET last_scanned_at = (
+            SELECT MAX(h.scan_timestamp)
+            FROM prediction_evidence_hits h
+            WHERE h.prediction_id = predictions.id
+        )
+        WHERE COALESCE(TRIM(last_scanned_at), '') = ''
+            AND EXISTS (
+                SELECT 1
+                FROM prediction_evidence_hits h
+                WHERE h.prediction_id = predictions.id
+            )"""
+    )
+    conn.execute(
+        """UPDATE predictions
+        SET needs_review = 1
+        WHERE COALESCE(needs_review, 0) = 0
+            AND EXISTS (
+                SELECT 1
+                FROM prediction_evidence_hits h
+                WHERE h.prediction_id = predictions.id
+                  AND h.classification IN ('possible_support', 'possible_contradiction')
+            )"""
     )
     _ensure_api_usage_schema(conn)
     convergence_columns = {
@@ -840,6 +1044,8 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 validation_note,
                 validated_at,
                 utility_class,
+                last_scanned_at,
+                needs_review,
                 notes,
                 created_at,
                 updated_at
@@ -874,6 +1080,8 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 validation_note,
                 validated_at,
                 utility_class,
+                last_scanned_at,
+                needs_review,
                 notes,
                 created_at,
                 updated_at
@@ -948,6 +1156,8 @@ def _prediction_row_to_dict(row: sqlite3.Row | dict) -> dict:
     payload["utility_class"] = _normalize_prediction_utility_class(
         payload.get("utility_class")
     )
+    payload["last_scanned_at"] = _clean_optional_text(payload.get("last_scanned_at"))
+    payload["needs_review"] = bool(_normalize_bool_flag(payload.get("needs_review")))
     payload["prediction_json"] = parsed_prediction
     payload["prediction_quality"] = parsed_quality if parsed_quality else None
     payload.pop("prediction_quality_json", None)
@@ -1337,6 +1547,8 @@ def list_prediction_outcomes(limit: int | None = 20) -> list[dict]:
             p.validation_note,
             p.validated_at,
             p.utility_class,
+            p.last_scanned_at,
+            p.needs_review,
             p.notes,
             p.created_at,
             p.updated_at,
@@ -1532,6 +1744,8 @@ def get_prediction(id: int) -> dict | None:
             validation_note,
             validated_at,
             utility_class,
+            last_scanned_at,
+            needs_review,
             notes,
             created_at,
             updated_at
@@ -1542,6 +1756,286 @@ def get_prediction(id: int) -> dict | None:
     ).fetchone()
     conn.close()
     return _prediction_row_to_dict(row) if row else None
+
+
+def list_open_predictions_for_evidence_scan(limit: int | None = 10) -> list[dict]:
+    """List open predictions with enough context to build conservative scan queries."""
+    conn = _connect()
+    query = """SELECT
+            p.id,
+            p.transmission_number,
+            p.prediction,
+            p.test,
+            p.metric,
+            p.prediction_json,
+            p.prediction_quality_json,
+            p.prediction_quality_score,
+            p.status,
+            p.outcome_status,
+            p.validation_source,
+            p.validation_note,
+            p.validated_at,
+            p.utility_class,
+            p.last_scanned_at,
+            p.needs_review,
+            p.notes,
+            p.created_at,
+            p.updated_at,
+            t.mechanism_typing_json,
+            e.seed_domain AS source_domain,
+            e.jump_target_domain AS target_domain,
+            e.depth_score,
+            e.adversarial_rubric_json
+        FROM predictions p
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        LEFT JOIN explorations e
+            ON e.id = t.exploration_id
+        WHERE LOWER(COALESCE(p.outcome_status, '')) = 'open'
+        ORDER BY
+            CASE
+                WHEN COALESCE(TRIM(p.last_scanned_at), '') = '' THEN 0
+                ELSE 1
+            END ASC,
+            COALESCE(NULLIF(p.last_scanned_at, ''), p.created_at) ASC,
+            p.id DESC"""
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        safe_limit = max(1, int(limit))
+        query += "\n        LIMIT ?"
+        params = (safe_limit,)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [_prediction_context_row_to_dict(row) for row in rows]
+
+
+def save_prediction_evidence_scan(
+    prediction_id: int,
+    hits: list[dict] | None = None,
+    scan_timestamp: str | None = None,
+) -> dict:
+    """Persist one evidence scan and update scan metadata on the prediction row."""
+    clean_scan_timestamp = (
+        _normalize_timestamp_text(scan_timestamp)
+        if scan_timestamp is not None
+        else _now()
+    )
+    normalized_hits: list[dict] = []
+    for hit in hits or []:
+        title = _clean_optional_text(hit.get("title"))
+        url = _clean_optional_text(hit.get("url"))
+        query_used = _clean_optional_text(hit.get("query_used"))
+        if not title or not url or not query_used:
+            continue
+        normalized_hits.append(
+            {
+                "source_type": _clean_optional_text(hit.get("source_type"))
+                or "web_search",
+                "title": title,
+                "url": url,
+                "snippet": _clean_optional_text(hit.get("snippet")),
+                "classification": _normalize_prediction_evidence_classification(
+                    hit.get("classification")
+                ),
+                "score": _coerce_optional_float(hit.get("score")),
+                "query_used": query_used,
+                "review_status": _normalize_prediction_evidence_review_status(
+                    hit.get("review_status")
+                ),
+            }
+        )
+
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT needs_review FROM predictions WHERE id = ? LIMIT 1",
+        (prediction_id,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return {
+            "saved": False,
+            "prediction_id": prediction_id,
+            "scan_timestamp": clean_scan_timestamp,
+            "inserted_hits": 0,
+            "needs_review": False,
+        }
+
+    now = _now()
+    inserted_hits = 0
+    needs_review = bool(_normalize_bool_flag(existing["needs_review"]))
+    for hit in normalized_hits:
+        conn.execute(
+            """INSERT INTO prediction_evidence_hits
+            (prediction_id, scan_timestamp, source_type, title, url, snippet,
+             classification, score, query_used, review_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                prediction_id,
+                clean_scan_timestamp,
+                hit["source_type"],
+                hit["title"],
+                hit["url"],
+                hit["snippet"],
+                hit["classification"],
+                hit["score"],
+                hit["query_used"],
+                hit["review_status"],
+                now,
+                now,
+            ),
+        )
+        inserted_hits += 1
+        if hit["classification"] in {"possible_support", "possible_contradiction"}:
+            needs_review = True
+
+    conn.execute(
+        """UPDATE predictions
+        SET last_scanned_at = ?, needs_review = ?, updated_at = ?
+        WHERE id = ?""",
+        (
+            clean_scan_timestamp,
+            1 if needs_review else 0,
+            now,
+            prediction_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        "saved": True,
+        "prediction_id": prediction_id,
+        "scan_timestamp": clean_scan_timestamp,
+        "inserted_hits": inserted_hits,
+        "needs_review": needs_review,
+    }
+
+
+def _prediction_evidence_row_to_dict(row: sqlite3.Row | dict) -> dict:
+    """Normalize stored prediction evidence rows for CLI output."""
+    payload = dict(row)
+    payload["scan_timestamp"] = _clean_optional_text(payload.get("scan_timestamp"))
+    payload["source_type"] = _clean_optional_text(payload.get("source_type")) or "web_search"
+    payload["title"] = _clean_optional_text(payload.get("title")) or "Untitled result"
+    payload["url"] = _clean_optional_text(payload.get("url")) or ""
+    payload["snippet"] = _clean_optional_text(payload.get("snippet"))
+    payload["classification"] = _normalize_prediction_evidence_classification(
+        payload.get("classification")
+    )
+    payload["review_status"] = _normalize_prediction_evidence_review_status(
+        payload.get("review_status")
+    )
+    payload["query_used"] = _clean_optional_text(payload.get("query_used")) or "(unknown query)"
+    payload["created_at"] = _clean_optional_text(payload.get("created_at"))
+    payload["updated_at"] = _clean_optional_text(payload.get("updated_at"))
+    score = _coerce_optional_float(payload.get("score"))
+    payload["score"] = round(score, 3) if score is not None else None
+    return payload
+
+
+def list_prediction_evidence_hits(
+    limit: int | None = 20,
+    prediction_id: int | None = None,
+) -> list[dict]:
+    """List stored evidence hits newest-first, optionally filtered to one prediction."""
+    conn = _connect()
+    query = """SELECT
+            id,
+            prediction_id,
+            scan_timestamp,
+            source_type,
+            title,
+            url,
+            snippet,
+            classification,
+            score,
+            query_used,
+            review_status,
+            created_at,
+            updated_at
+        FROM prediction_evidence_hits"""
+    params: list[object] = []
+    if prediction_id is not None:
+        query += "\n        WHERE prediction_id = ?"
+        params.append(int(prediction_id))
+    query += "\n        ORDER BY scan_timestamp DESC, id DESC"
+    if limit is not None:
+        query += "\n        LIMIT ?"
+        params.append(max(1, int(limit)))
+    rows = conn.execute(query, tuple(params)).fetchall()
+    conn.close()
+    return [_prediction_evidence_row_to_dict(row) for row in rows]
+
+
+def get_prediction_evidence_stats() -> dict:
+    """Summarize stored evidence hits and open prediction review flags."""
+    conn = _connect()
+    total_hits = int(
+        conn.execute(
+            "SELECT COUNT(*) AS count FROM prediction_evidence_hits"
+        ).fetchone()["count"]
+        or 0
+    )
+    by_classification = {
+        label: 0 for label in PREDICTION_EVIDENCE_CLASSIFICATIONS
+    }
+    for row in conn.execute(
+        """SELECT classification, COUNT(*) AS count
+        FROM prediction_evidence_hits
+        GROUP BY classification"""
+    ).fetchall():
+        classification = _normalize_prediction_evidence_classification(
+            row["classification"]
+        )
+        by_classification[classification] = int(row["count"] or 0)
+
+    by_review_status = {
+        label: 0 for label in PREDICTION_EVIDENCE_REVIEW_STATUSES
+    }
+    for row in conn.execute(
+        """SELECT review_status, COUNT(*) AS count
+        FROM prediction_evidence_hits
+        GROUP BY review_status"""
+    ).fetchall():
+        review_status = _normalize_prediction_evidence_review_status(
+            row["review_status"]
+        )
+        by_review_status[review_status] = int(row["count"] or 0)
+
+    open_predictions_needing_review = int(
+        conn.execute(
+            """SELECT COUNT(*) AS count
+            FROM predictions
+            WHERE LOWER(COALESCE(outcome_status, '')) = 'open'
+              AND COALESCE(needs_review, 0) <> 0"""
+        ).fetchone()["count"]
+        or 0
+    )
+    open_predictions_scanned = int(
+        conn.execute(
+            """SELECT COUNT(*) AS count
+            FROM predictions
+            WHERE LOWER(COALESCE(outcome_status, '')) = 'open'
+              AND COALESCE(TRIM(last_scanned_at), '') <> ''"""
+        ).fetchone()["count"]
+        or 0
+    )
+    total_predictions_scanned = int(
+        conn.execute(
+            """SELECT COUNT(*) AS count
+            FROM predictions
+            WHERE COALESCE(TRIM(last_scanned_at), '') <> ''"""
+        ).fetchone()["count"]
+        or 0
+    )
+    conn.close()
+    return {
+        "total_hits": total_hits,
+        "by_classification": by_classification,
+        "by_review_status": by_review_status,
+        "open_predictions_needing_review": open_predictions_needing_review,
+        "open_predictions_scanned": open_predictions_scanned,
+        "total_predictions_scanned": total_predictions_scanned,
+    }
 
 
 def update_prediction_outcome(

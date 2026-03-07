@@ -51,7 +51,12 @@ from store import (
     list_evaluation_run_summaries,
     list_recent_transmission_mechanisms,
     list_recent_transmission_provenance,
+    list_open_predictions_for_evidence_scan,
+    save_prediction_evidence_scan,
+    list_prediction_evidence_hits,
+    get_prediction_evidence_stats,
 )
+from seed import pick_seed, resolve_seed_choice
 
 CLAUDE_SONNET_INPUT_RATE_PER_MTOK = 3.0
 CLAUDE_SONNET_OUTPUT_RATE_PER_MTOK = 15.0
@@ -64,7 +69,7 @@ GOLDEN_EVALS_PATH = Path(__file__).with_name("golden_eval_pairs.json")
 
 
 def _parse_report_only_args():
-    """Parse report-only flags before any API-key-dependent imports."""
+    """Parse report-only and seed preflight flags before config-dependent imports."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument(
         "--kill-stats",
@@ -96,6 +101,24 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--prediction",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--prediction-evidence",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--prediction-evidence-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--scan-open-predictions",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--evidence-prediction",
         type=int,
         default=None,
         metavar="ID",
@@ -164,6 +187,12 @@ def _parse_report_only_args():
         metavar="N",
     )
     parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+    )
+    parser.add_argument(
         "--rut-report",
         action="store_true",
     )
@@ -186,6 +215,19 @@ def _parse_report_only_args():
     parser.add_argument(
         "--eval-stats",
         action="store_true",
+    )
+    parser.add_argument(
+        "--export",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--run-eval",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--seed",
+        type=str,
+        default=None,
     )
     args, _ = parser.parse_known_args()
     return args
@@ -503,6 +545,69 @@ def _print_prediction_detail(prediction_id: int) -> bool:
         row["prediction_quality"] = _prediction_quality_from_row(row)
     print(json.dumps(row, ensure_ascii=False, indent=2))
     return True
+
+
+def _print_prediction_evidence_hits(
+    limit: int = 20,
+    prediction_id: int | None = None,
+):
+    """Render recent stored prediction evidence hits."""
+    rows = list_prediction_evidence_hits(
+        limit=max(1, int(limit)),
+        prediction_id=prediction_id,
+    )
+    if not rows:
+        if prediction_id is None:
+            print("[PredictionEvidence] No evidence hits found.")
+        else:
+            print(f"[PredictionEvidence] No evidence hits found for prediction #{prediction_id}.")
+        return
+
+    label = (
+        f"[PredictionEvidence] Recent {len(rows)} hits for prediction #{prediction_id}"
+        if prediction_id is not None
+        else f"[PredictionEvidence] Recent {len(rows)} hits"
+    )
+    print(label)
+    for row in rows:
+        score_text = (
+            f"{float(row.get('score')):.3f}" if row.get("score") is not None else "—"
+        )
+        print(
+            f"{row.get('id')}\tpred={row.get('prediction_id')}\t"
+            f"{row.get('classification')}\t{row.get('review_status')}\t"
+            f"score={score_text}\t{_short_timestamp(row.get('scan_timestamp'))}"
+        )
+        print(f"title\t{_truncate_text(row.get('title'), 120)}")
+        print(f"url\t{row.get('url') or '—'}")
+        print(f"query\t{_truncate_text(row.get('query_used'), 140)}")
+        print(f"snippet\t{_truncate_text(row.get('snippet'), 180)}")
+
+
+def _print_prediction_evidence_stats(report: dict):
+    """Render evidence hit totals and open-review flags."""
+    print(
+        f"[PredictionEvidenceStats] total_hits={int(report.get('total_hits', 0) or 0)} | "
+        f"open_predictions_scanned={int(report.get('open_predictions_scanned', 0) or 0)} | "
+        f"open_predictions_needing_review={int(report.get('open_predictions_needing_review', 0) or 0)} | "
+        f"total_predictions_scanned={int(report.get('total_predictions_scanned', 0) or 0)}"
+    )
+
+    by_classification = report.get("by_classification") or {}
+    print("[PredictionEvidenceStats] By classification")
+    print("classification\tcount")
+    for label in (
+        "possible_support",
+        "possible_contradiction",
+        "unclear",
+    ):
+        print(f"{label}\t{int(by_classification.get(label, 0) or 0)}")
+
+    by_review_status = report.get("by_review_status") or {}
+    print("[PredictionEvidenceStats] By review status")
+    print("review_status\tcount")
+    for label in ("unreviewed", "accepted", "dismissed"):
+        print(f"{label}\t{int(by_review_status.get(label, 0) or 0)}")
 
 
 def _apply_prediction_outcome_update(
@@ -961,6 +1066,16 @@ def _print_kill_stats(report: dict, window_requested: int):
     )
 
 
+def _print_invalid_seed_error(seed_name: str, suggestions: list[str]):
+    """Render a CLI-friendly invalid built-in seed error."""
+    print(
+        f'  [!] Unknown seed "{seed_name}". '
+        "--seed must match a built-in seed/domain name."
+    )
+    if suggestions:
+        print("  [i] Close matches: " + ", ".join(suggestions))
+
+
 if __name__ == "__main__":
     _early_report_args = _parse_report_only_args()
     _early_prediction_action_count = sum(
@@ -969,6 +1084,9 @@ if __name__ == "__main__":
             _early_report_args.prediction_outcomes,
             _early_report_args.prediction_outcome_stats,
             _early_report_args.prediction is not None,
+            _early_report_args.prediction_evidence,
+            _early_report_args.prediction_evidence_stats,
+            _early_report_args.scan_open_predictions,
             _early_report_args.mark_supported is not None,
             _early_report_args.mark_contradicted is not None,
             _early_report_args.mark_mixed is not None,
@@ -1000,6 +1118,13 @@ if __name__ == "__main__":
     ):
         print("  [!] --window requires a positive integer.")
         sys.exit(1)
+    if (
+        (_early_report_args.prediction_evidence or _early_report_args.scan_open_predictions)
+        and _early_report_args.limit is not None
+        and _early_report_args.limit <= 0
+    ):
+        print("  [!] --limit requires a positive integer.")
+        sys.exit(1)
     if _early_report_args.rut_report and _early_report_args.rut_window <= 0:
         print("  [!] --rut-window requires a positive integer.")
         sys.exit(1)
@@ -1008,12 +1133,29 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_prediction_action_count > 1:
         print(
-            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
+            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
         )
         sys.exit(1)
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
         print(
             "  [!] Prediction actions cannot be combined with other report-only actions."
+        )
+        sys.exit(1)
+    if (
+        _early_report_args.evidence_prediction is not None
+        and not _early_report_args.prediction_evidence
+    ):
+        print(
+            "  [!] --evidence-prediction can only be used with --prediction-evidence."
+        )
+        sys.exit(1)
+    if (
+        _early_report_args.limit is not None
+        and not _early_report_args.prediction_evidence
+        and not _early_report_args.scan_open_predictions
+    ):
+        print(
+            "  [!] --limit can only be used with --prediction-evidence or --scan-open-predictions."
         )
         sys.exit(1)
     if (
@@ -1046,6 +1188,7 @@ if __name__ == "__main__":
         sys.exit(1)
     for flag_name, prediction_id in (
         ("--prediction", _early_report_args.prediction),
+        ("--evidence-prediction", _early_report_args.evidence_prediction),
         ("--mark-supported", _early_report_args.mark_supported),
         ("--mark-contradicted", _early_report_args.mark_contradicted),
         ("--mark-mixed", _early_report_args.mark_mixed),
@@ -1056,7 +1199,7 @@ if __name__ == "__main__":
         if prediction_id is not None and prediction_id <= 0:
             print(f"  [!] {flag_name} requires a positive integer.")
             sys.exit(1)
-    if (
+    _early_report_action_requested = (
         _early_report_args.kill_stats
         or _early_report_args.predictions
         or _early_report_args.check_predictions
@@ -1064,6 +1207,8 @@ if __name__ == "__main__":
         or _early_report_args.check_mechanisms
         or _early_report_args.prediction_outcomes
         or _early_report_args.prediction_outcome_stats
+        or _early_report_args.prediction_evidence
+        or _early_report_args.prediction_evidence_stats
         or _early_report_args.prediction is not None
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
@@ -1074,7 +1219,22 @@ if __name__ == "__main__":
         or _early_report_args.rut_report
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
+    )
+    if (
+        not _early_report_action_requested
+        and not _early_report_args.export
+        and not _early_report_args.run_eval
+        and _early_report_args.seed is not None
     ):
+        _early_seed_name = _early_report_args.seed.strip()
+        if not _early_seed_name:
+            print("  [!] --seed was provided but empty. Please provide a built-in seed name.")
+            sys.exit(1)
+        _matched_seed, _seed_suggestions = resolve_seed_choice(_early_seed_name)
+        if _matched_seed is None:
+            _print_invalid_seed_error(_early_report_args.seed, _seed_suggestions)
+            sys.exit(1)
+    if _early_report_action_requested:
         init_db()
         if _early_report_args.kill_stats:
             _print_kill_stats(
@@ -1093,6 +1253,13 @@ if __name__ == "__main__":
             _print_prediction_outcomes(limit=20)
         if _early_report_args.prediction_outcome_stats:
             _print_prediction_outcome_stats(get_prediction_outcome_stats())
+        if _early_report_args.prediction_evidence:
+            _print_prediction_evidence_hits(
+                limit=_early_report_args.limit or 20,
+                prediction_id=_early_report_args.evidence_prediction,
+            )
+        if _early_report_args.prediction_evidence_stats:
+            _print_prediction_evidence_stats(get_prediction_evidence_stats())
         if _early_report_args.prediction is not None and not _print_prediction_detail(
             _early_report_args.prediction
         ):
@@ -1186,7 +1353,6 @@ from config import (
     CYCLE_COOLDOWN,
     MAX_PATTERNS_PER_CYCLE,
 )
-from seed import pick_seed
 from explore import dive
 from jump import lateral_jump
 from score import (
@@ -1196,6 +1362,7 @@ from score import (
     run_invariance_check,
 )
 from llm_client import get_llm_client
+from prediction_evidence import scan_prediction_for_evidence
 from sanitize import check_llm_output
 from transmit import (
     format_transmission,
@@ -1274,7 +1441,8 @@ def parse_args():
         "--seed",
         type=str,
         default=None,
-        help="Use a custom seed topic instead of random picker (auto-generates search queries)",
+        metavar="SEED_NAME",
+        help="Use a built-in seed/domain name instead of the default picker (case-insensitive)",
     )
     parser.add_argument(
         "--export",
@@ -1304,6 +1472,13 @@ def parse_args():
         default=200,
         metavar="N",
         help="How many recent rows to inspect for kill stats or prediction checks (default: 200)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional limit for scan or evidence-list commands",
     )
     parser.add_argument(
         "--star",
@@ -1425,6 +1600,28 @@ def parse_args():
         help="Show full details for a prediction id and exit",
     )
     parser.add_argument(
+        "--prediction-evidence",
+        action="store_true",
+        help="List recent stored prediction evidence hits and exit",
+    )
+    parser.add_argument(
+        "--prediction-evidence-stats",
+        action="store_true",
+        help="Summarize stored prediction evidence hits and review flags",
+    )
+    parser.add_argument(
+        "--scan-open-predictions",
+        action="store_true",
+        help="Search open predictions for candidate support/contradiction evidence",
+    )
+    parser.add_argument(
+        "--evidence-prediction",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Filter --prediction-evidence to one prediction id",
+    )
+    parser.add_argument(
         "--prediction-outcomes",
         action="store_true",
         help="List recent predictions with outcome fields and exit",
@@ -1508,6 +1705,57 @@ def build_derived_seed(topic: str) -> dict:
 def _utc_now_iso() -> str:
     """Current UTC timestamp as ISO string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _run_open_prediction_evidence_scan(limit: int | None = None):
+    """Scan open predictions for candidate support/contradiction evidence."""
+    rows = list_open_predictions_for_evidence_scan(limit=limit or 10)
+    if not rows:
+        print("[PredictionEvidenceScan] No open predictions found.")
+        return
+
+    total_hits = 0
+    total_reviewable_hits = 0
+    flagged_predictions = 0
+    print(f"[PredictionEvidenceScan] Scanning {len(rows)} open predictions")
+    for row in rows:
+        scan_result = scan_prediction_for_evidence(row)
+        scan_timestamp = _utc_now_iso()
+        stored = save_prediction_evidence_scan(
+            row.get("id"),
+            scan_result.get("hits") or [],
+            scan_timestamp=scan_timestamp,
+        )
+        reviewable_hits = sum(
+            1
+            for hit in scan_result.get("hits") or []
+            if hit.get("classification") in {"possible_support", "possible_contradiction"}
+        )
+        total_hits += int(stored.get("inserted_hits", 0) or 0)
+        total_reviewable_hits += reviewable_hits
+        if reviewable_hits > 0:
+            flagged_predictions += 1
+
+        print(
+            f"{row.get('id')}\ttx={row.get('transmission_number')}\t"
+            f"hits={int(stored.get('inserted_hits', 0) or 0)}\t"
+            f"reviewable={reviewable_hits}\t"
+            f"needs_review={'yes' if stored.get('needs_review') else 'no'}"
+        )
+        print(f"prediction\t{_truncate_text(_prediction_summary_from_row(row), 140)}")
+        queries = scan_result.get("queries") or []
+        print(
+            "queries\t"
+            + (_truncate_text(" || ".join(queries), 180) if queries else "none")
+        )
+        errors = scan_result.get("errors") or []
+        if errors:
+            print("errors\t" + _truncate_text("; ".join(errors), 180))
+
+    print(
+        f"[PredictionEvidenceScan] Stored {total_hits} hits across {len(rows)} predictions; "
+        f"{total_reviewable_hits} non-unclear hits flagged across {flagged_predictions} predictions."
+    )
 
 
 def _load_golden_eval_pairs() -> list[dict]:
@@ -2498,7 +2746,7 @@ def run_cycle(
     cycle_num: int,
     threshold: float,
     max_patterns: int,
-    custom_seed_topic: str | None = None,
+    manual_seed: dict | None = None,
 ) -> bool:
     """
     Run a single exploration cycle.
@@ -2509,9 +2757,15 @@ def run_cycle(
     max_hops_per_cycle = 2
     hops_completed = 0
 
-    if custom_seed_topic:
-        seed = build_custom_seed(custom_seed_topic)
+    if manual_seed is not None:
+        seed = {
+            "name": manual_seed["name"],
+            "category": manual_seed["category"],
+            "seed_queries": list(manual_seed["seed_queries"]),
+        }
+        print("  [Seed Mode] Manual built-in seed via --seed")
     else:
+        print("  [Seed Mode] Existing default/random seed flow")
         seed = pick_seed()
 
     print(f"\n  [Seed] {seed['name']} ({seed['category']})")
@@ -2700,6 +2954,9 @@ def main():
     prediction_action_count = sum(
         [
             args.predictions,
+            args.prediction_evidence,
+            args.prediction_evidence_stats,
+            args.scan_open_predictions,
             args.prediction_outcomes,
             args.prediction_outcome_stats,
             args.check_predictions,
@@ -2722,6 +2979,9 @@ def main():
     if args.eval_pair is not None and not args.eval_pair.strip():
         print("  [!] --eval-pair was provided but empty.")
         sys.exit(1)
+    if args.limit is not None and args.limit <= 0:
+        print("  [!] --limit requires a positive integer.")
+        sys.exit(1)
     if (
         not args.run_eval
         and (
@@ -2739,7 +2999,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and prediction_action_count > 0:
@@ -2760,6 +3020,20 @@ def main():
         sys.exit(1)
     if args.audit_reasoning and args.audit_limit <= 0:
         print("  [!] --audit-limit requires a positive integer.")
+        sys.exit(1)
+    if args.evidence_prediction is not None and not args.prediction_evidence:
+        print(
+            "  [!] --evidence-prediction can only be used with --prediction-evidence."
+        )
+        sys.exit(1)
+    if (
+        args.limit is not None
+        and not args.prediction_evidence
+        and not args.scan_open_predictions
+    ):
+        print(
+            "  [!] --limit can only be used with --prediction-evidence or --scan-open-predictions."
+        )
         sys.exit(1)
     if (
         args.note is not None
@@ -2794,6 +3068,7 @@ def main():
         ("--dismiss", args.dismiss),
         ("--dive", args.dive),
         ("--prediction", args.prediction),
+        ("--evidence-prediction", args.evidence_prediction),
         ("--mark-supported", args.mark_supported),
         ("--mark-contradicted", args.mark_contradicted),
         ("--mark-mixed", args.mark_mixed),
@@ -2845,6 +3120,21 @@ def main():
                 f"{row.get('transmission_number')}\t{float(quality.get('score', 0.0)):.2f}\t"
                 f"{prediction_quality_label(quality)}\t{summary}"
             )
+        return
+
+    if args.prediction_evidence:
+        _print_prediction_evidence_hits(
+            limit=args.limit or 20,
+            prediction_id=args.evidence_prediction,
+        )
+        return
+
+    if args.prediction_evidence_stats:
+        _print_prediction_evidence_stats(get_prediction_evidence_stats())
+        return
+
+    if args.scan_open_predictions:
+        _run_open_prediction_evidence_scan(limit=args.limit or 10)
         return
 
     if args.prediction_outcomes:
@@ -3068,21 +3358,27 @@ def main():
         _print_eval_run_summary(_summarize_eval_results(rows))
         return
 
+    manual_seed_name = args.seed.strip() if args.seed else None
+    if args.seed is not None and not manual_seed_name:
+        print("  [!] --seed was provided but empty. Please provide a built-in seed name.")
+        sys.exit(1)
+    manual_seed = None
+    if manual_seed_name:
+        manual_seed, seed_suggestions = resolve_seed_choice(manual_seed_name)
+        if manual_seed is None:
+            _print_invalid_seed_error(args.seed, seed_suggestions)
+            sys.exit(1)
+
     print_startup()
 
     if args.dry_run:
         print("  [!] Dry run mode not yet implemented. Exiting.")
         sys.exit(0)
 
-    custom_seed = args.seed.strip() if args.seed else None
-    if args.seed is not None and not custom_seed:
-        print("  [!] --seed was provided but empty. Please provide a topic.")
-        sys.exit(1)
-
     cycle = 1
     try:
         while True:
-            run_cycle(cycle, args.threshold, args.max_patterns, custom_seed)
+            run_cycle(cycle, args.threshold, args.max_patterns, manual_seed)
             if args.once:
                 break
             print(f"\n  [Wait] Next cycle in {args.cooldown}s... (Ctrl+C to stop)\n")
