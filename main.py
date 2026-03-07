@@ -45,6 +45,7 @@ from store import (
     get_prediction_outcome_review,
     list_prediction_outcome_review_queue,
     get_prediction_outcome_stats,
+    get_prediction_outcome_suggestion_stats,
     list_near_misses,
     get_reasoning_failure_audit,
     get_prediction,
@@ -109,6 +110,10 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--prediction-outcome-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--outcome-suggestion-stats",
         action="store_true",
     )
     parser.add_argument(
@@ -591,6 +596,146 @@ def _print_prediction_outcome_stats(report: dict):
         f"{coverage.get('target_domain', {}).get('available', 0)} present / "
         f"{coverage.get('target_domain', {}).get('missing', 0)} missing"
     )
+
+
+def _print_prediction_outcome_suggestion_stats(report: dict):
+    """Render local outcome suggestion coverage without changing any outcomes."""
+    overall = report.get("overall") or {}
+    suggestion_buckets = report.get("suggestion_buckets") or {}
+    resolution_overlap = report.get("resolution_overlap") or {}
+    review_backlog = report.get("review_backlog") or {}
+    top_actionable = report.get("top_actionable_predictions") or []
+
+    print("[OutcomeSuggestionStats] Overall prediction state")
+    print("metric\tcount")
+    for label, value in (
+        ("total_predictions", overall.get("total_predictions", 0)),
+        ("open", overall.get("open", 0)),
+        ("supported", overall.get("supported", 0)),
+        ("contradicted", overall.get("contradicted", 0)),
+        ("mixed", overall.get("mixed", 0)),
+        ("expired", overall.get("expired", 0)),
+        ("resolved_total", overall.get("resolved_total", 0)),
+    ):
+        print(f"{label}\t{int(value or 0)}")
+
+    print("[OutcomeSuggestionStats] Suggestion buckets for open predictions")
+    print("bucket\tcount")
+    for label in (
+        "review_for_support",
+        "review_for_contradiction",
+        "conflicting_evidence",
+        "waiting_on_review",
+        "insufficient_evidence",
+    ):
+        print(f"{label}\t{int(suggestion_buckets.get(label, 0) or 0)}")
+
+    print("[OutcomeSuggestionStats] Resolution overlap summary")
+    print("metric\tcount")
+    for label, value in (
+        ("resolved_total", resolution_overlap.get("resolved_total", 0)),
+        ("supported", resolution_overlap.get("supported", 0)),
+        ("contradicted", resolution_overlap.get("contradicted", 0)),
+        ("mixed", resolution_overlap.get("mixed", 0)),
+        ("expired", resolution_overlap.get("expired", 0)),
+        (
+            "resolved_with_unreviewed_reviewable_hits",
+            resolution_overlap.get("resolved_with_unreviewed_reviewable_hits", 0),
+        ),
+        (
+            "resolved_with_accepted_conflicting_evidence",
+            resolution_overlap.get("resolved_with_accepted_conflicting_evidence", 0),
+        ),
+    ):
+        print(f"{label}\t{int(value or 0)}")
+
+    print("[OutcomeSuggestionStats] By mechanism type")
+    print(
+        "mechanism_type\ttotal_predictions\topen_predictions\treview_for_support\t"
+        "review_for_contradiction\tconflicting_evidence\twaiting_on_review\t"
+        "insufficient_evidence"
+    )
+    mechanism_rows = report.get("by_mechanism_type") or []
+    if not mechanism_rows:
+        print("none")
+    else:
+        for row in mechanism_rows:
+            print(
+                f"{_truncate_text(row.get('label'), 28)}\t"
+                f"{int(row.get('total_predictions', 0) or 0)}\t"
+                f"{int(row.get('open_predictions', 0) or 0)}\t"
+                f"{int(row.get('review_for_support', 0) or 0)}\t"
+                f"{int(row.get('review_for_contradiction', 0) or 0)}\t"
+                f"{int(row.get('conflicting_evidence', 0) or 0)}\t"
+                f"{int(row.get('waiting_on_review', 0) or 0)}\t"
+                f"{int(row.get('insufficient_evidence', 0) or 0)}"
+            )
+
+    print("[OutcomeSuggestionStats] By utility class")
+    print(
+        "utility_class\ttotal_predictions\topen_predictions\treview_for_support\t"
+        "review_for_contradiction\tconflicting_evidence\twaiting_on_review\t"
+        "insufficient_evidence"
+    )
+    for row in report.get("by_utility_class") or []:
+        print(
+            f"{row.get('label')}\t"
+            f"{int(row.get('total_predictions', 0) or 0)}\t"
+            f"{int(row.get('open_predictions', 0) or 0)}\t"
+            f"{int(row.get('review_for_support', 0) or 0)}\t"
+            f"{int(row.get('review_for_contradiction', 0) or 0)}\t"
+            f"{int(row.get('conflicting_evidence', 0) or 0)}\t"
+            f"{int(row.get('waiting_on_review', 0) or 0)}\t"
+            f"{int(row.get('insufficient_evidence', 0) or 0)}"
+        )
+
+    print("[OutcomeSuggestionStats] Review backlog summary")
+    print("metric\tcount")
+    for label, value in (
+        (
+            "open_predictions_with_needs_review",
+            review_backlog.get("open_predictions_needing_review", 0),
+        ),
+        (
+            "total_unreviewed_reviewable_evidence_hits",
+            review_backlog.get("total_unreviewed_reviewable_evidence_hits", 0),
+        ),
+        (
+            "open_predictions_with_accepted_support_only",
+            review_backlog.get("open_predictions_with_accepted_support_only", 0),
+        ),
+        (
+            "open_predictions_with_accepted_contradiction_only",
+            review_backlog.get("open_predictions_with_accepted_contradiction_only", 0),
+        ),
+        (
+            "open_predictions_with_accepted_conflicting_evidence",
+            review_backlog.get("open_predictions_with_accepted_conflicting_evidence", 0),
+        ),
+    ):
+        print(f"{label}\t{int(value or 0)}")
+
+    print("[OutcomeSuggestionStats] Top actionable predictions")
+    print(
+        "prediction_id\ttx\tsuggestion_bucket\tmechanism_type\tutility_class\t"
+        "accepted_support_hits\taccepted_contradiction_hits\t"
+        "unreviewed_reviewable_hits\tprediction"
+    )
+    if not top_actionable:
+        print("none")
+        return
+    for row in top_actionable:
+        print(
+            f"{int(row.get('id', 0) or 0)}\t"
+            f"{row.get('transmission_number') or '—'}\t"
+            f"{row.get('suggestion_bucket') or 'insufficient_evidence'}\t"
+            f"{_truncate_text(row.get('mechanism_type') or 'unknown', 24)}\t"
+            f"{row.get('utility_class') or 'unknown'}\t"
+            f"{int(row.get('accepted_support_hits', 0) or 0)}\t"
+            f"{int(row.get('accepted_contradiction_hits', 0) or 0)}\t"
+            f"{int(row.get('unreviewed_reviewable_hits', 0) or 0)}\t"
+            f"{_truncate_text(row.get('prediction_summary'), 96)}"
+        )
 
 
 def _print_predictions_list(limit: int = 20):
@@ -1593,6 +1738,7 @@ if __name__ == "__main__":
             _early_report_args.predictions,
             _early_report_args.prediction_outcomes,
             _early_report_args.prediction_outcome_stats,
+            _early_report_args.outcome_suggestion_stats,
             _early_report_args.prediction is not None,
             _early_report_args.prediction_evidence,
             _early_report_args.prediction_evidence_stats,
@@ -1666,7 +1812,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_prediction_action_count > 1:
         print(
-            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --outcome-review, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
+            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --outcome-suggestion-stats, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --outcome-review, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
         )
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
@@ -1772,6 +1918,7 @@ if __name__ == "__main__":
         or _early_report_args.check_mechanisms
         or _early_report_args.prediction_outcomes
         or _early_report_args.prediction_outcome_stats
+        or _early_report_args.outcome_suggestion_stats
         or _early_report_args.prediction_evidence
         or _early_report_args.prediction_evidence_stats
         or _early_report_args.outcome_review_queue
@@ -1834,6 +1981,10 @@ if __name__ == "__main__":
             _print_prediction_outcomes(limit=20)
         if _early_report_args.prediction_outcome_stats:
             _print_prediction_outcome_stats(get_prediction_outcome_stats())
+        if _early_report_args.outcome_suggestion_stats:
+            _print_prediction_outcome_suggestion_stats(
+                get_prediction_outcome_suggestion_stats()
+            )
         if _early_report_args.prediction_evidence:
             _print_prediction_evidence_hits(
                 limit=_early_report_args.limit or 20,
@@ -2354,6 +2505,11 @@ def parse_args():
         "--prediction-outcome-stats",
         action="store_true",
         help="Summarize prediction outcomes by mechanism, score bands, and domains",
+    )
+    parser.add_argument(
+        "--outcome-suggestion-stats",
+        action="store_true",
+        help="Summarize local outcome-review suggestion buckets without updating outcomes",
     )
     parser.add_argument(
         "--mark-supported",
@@ -3908,6 +4064,7 @@ def main():
             args.scan_open_predictions,
             args.prediction_outcomes,
             args.prediction_outcome_stats,
+            args.outcome_suggestion_stats,
             args.check_predictions,
             args.check_provenance,
             args.check_mechanisms,
@@ -3956,7 +4113,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --outcome-review, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --outcome-review, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --outcome-suggestion-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if strong_rejection_action_count > 1:
@@ -4196,6 +4353,12 @@ def main():
 
     if args.prediction_outcome_stats:
         _print_prediction_outcome_stats(get_prediction_outcome_stats())
+        return
+
+    if args.outcome_suggestion_stats:
+        _print_prediction_outcome_suggestion_stats(
+            get_prediction_outcome_suggestion_stats()
+        )
         return
 
     if args.check_predictions:

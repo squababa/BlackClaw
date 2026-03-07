@@ -82,6 +82,13 @@ PREDICTION_EVIDENCE_REVIEWABLE_CLASSIFICATIONS = (
     "possible_support",
     "possible_contradiction",
 )
+PREDICTION_OUTCOME_SUGGESTION_BUCKETS = (
+    "review_for_support",
+    "review_for_contradiction",
+    "conflicting_evidence",
+    "waiting_on_review",
+    "insufficient_evidence",
+)
 STRONG_REJECTION_STATUSES = ("open", "salvaged", "dismissed")
 PREDICTION_OUTCOME_BY_STATUS = {
     "open": "open",
@@ -1821,6 +1828,156 @@ def _prediction_outcome_review_rationale(recommendation: object) -> str:
     return "No accepted or unreviewed reviewable evidence exists."
 
 
+def _empty_outcome_suggestion_bucket_counts() -> dict:
+    """Create a fresh set of suggestion-bucket counters."""
+    return {
+        label: 0 for label in PREDICTION_OUTCOME_SUGGESTION_BUCKETS
+    }
+
+
+def _new_outcome_suggestion_group(label: str) -> dict:
+    """Create one grouped suggestion row with consistent columns."""
+    payload = {
+        "label": label,
+        "total_predictions": 0,
+        "open_predictions": 0,
+    }
+    payload.update(_empty_outcome_suggestion_bucket_counts())
+    return payload
+
+
+def _sorted_outcome_suggestion_group_rows(
+    grouped: dict[str, dict],
+    labels: tuple[str, ...] | None = None,
+) -> list[dict]:
+    """Sort grouped suggestion rows for CLI reports."""
+    if labels is not None:
+        return [
+            grouped.get(label, _new_outcome_suggestion_group(label))
+            for label in labels
+        ]
+    rows = list(grouped.values())
+    rows.sort(
+        key=lambda item: (
+            -int(item.get("total_predictions", 0) or 0),
+            str(item.get("label") or ""),
+        )
+    )
+    return rows
+
+
+def _prediction_outcome_suggestion_sort_key(row: dict) -> tuple:
+    """Prioritize open predictions that are closest to manual action."""
+    bucket_priority = {
+        "conflicting_evidence": 0,
+        "review_for_support": 1,
+        "review_for_contradiction": 2,
+        "waiting_on_review": 3,
+        "insufficient_evidence": 4,
+    }
+    support_hits = int(row.get("accepted_support_hits", 0) or 0)
+    contradiction_hits = int(row.get("accepted_contradiction_hits", 0) or 0)
+    unreviewed_hits = int(row.get("unreviewed_reviewable_hits", 0) or 0)
+    return (
+        bucket_priority.get(row.get("suggestion_bucket"), 99),
+        -(support_hits + contradiction_hits),
+        -max(support_hits, contradiction_hits),
+        -unreviewed_hits,
+        -int(row.get("id", 0) or 0),
+    )
+
+
+def _list_prediction_outcome_suggestion_rows() -> list[dict]:
+    """Load normalized prediction rows plus local evidence counts for suggestions."""
+    conn = _connect()
+    rows = conn.execute(
+        """WITH evidence_counts AS (
+            SELECT
+                prediction_id,
+                SUM(
+                    CASE
+                        WHEN classification = 'possible_support'
+                             AND review_status = 'accepted'
+                        THEN 1 ELSE 0
+                    END
+                ) AS accepted_support_hits,
+                SUM(
+                    CASE
+                        WHEN classification = 'possible_contradiction'
+                             AND review_status = 'accepted'
+                        THEN 1 ELSE 0
+                    END
+                ) AS accepted_contradiction_hits,
+                SUM(
+                    CASE
+                        WHEN classification IN ('possible_support', 'possible_contradiction')
+                             AND review_status = 'unreviewed'
+                        THEN 1 ELSE 0
+                    END
+                ) AS unreviewed_reviewable_hits
+            FROM prediction_evidence_hits
+            GROUP BY prediction_id
+        )
+        SELECT
+            p.id,
+            p.transmission_number,
+            p.prediction,
+            p.test,
+            p.metric,
+            p.prediction_json,
+            p.prediction_quality_json,
+            p.prediction_quality_score,
+            p.status,
+            p.outcome_status,
+            p.validation_source,
+            p.validation_note,
+            p.validated_at,
+            p.utility_class,
+            p.last_scanned_at,
+            p.needs_review,
+            p.notes,
+            p.created_at,
+            p.updated_at,
+            t.mechanism_typing_json,
+            COALESCE(ec.accepted_support_hits, 0) AS accepted_support_hits,
+            COALESCE(ec.accepted_contradiction_hits, 0) AS accepted_contradiction_hits,
+            COALESCE(ec.unreviewed_reviewable_hits, 0) AS unreviewed_reviewable_hits
+        FROM predictions p
+        LEFT JOIN evidence_counts ec
+            ON ec.prediction_id = p.id
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        ORDER BY p.id DESC"""
+    ).fetchall()
+    conn.close()
+
+    payloads = []
+    for row in rows:
+        payload = _prediction_context_row_to_dict(row)
+        accepted_support_hits = max(0, int(row["accepted_support_hits"] or 0))
+        accepted_contradiction_hits = max(
+            0, int(row["accepted_contradiction_hits"] or 0)
+        )
+        unreviewed_reviewable_hits = max(
+            0, int(row["unreviewed_reviewable_hits"] or 0)
+        )
+        payload["accepted_support_hits"] = accepted_support_hits
+        payload["accepted_contradiction_hits"] = accepted_contradiction_hits
+        payload["unreviewed_reviewable_hits"] = unreviewed_reviewable_hits
+        payload["suggestion_bucket"] = _prediction_outcome_review_recommendation(
+            accepted_support_hits,
+            accepted_contradiction_hits,
+            unreviewed_reviewable_hits,
+        )
+        payload["prediction_summary"] = (
+            prediction_summary_text(payload.get("prediction_json") or {})
+            or _clean_optional_text(payload.get("prediction"))
+            or "—"
+        )
+        payloads.append(payload)
+    return payloads
+
+
 def _prediction_outcome_review_row_to_dict(row: sqlite3.Row | dict) -> dict:
     """Normalize one outcome-review queue row for CLI output."""
     payload = _prediction_context_row_to_dict(row)
@@ -2252,6 +2409,132 @@ def get_prediction_outcome_stats(window: int | None = None) -> dict:
     )
     report["window_requested"] = safe_window
     return report
+
+
+def get_prediction_outcome_suggestion_stats() -> dict:
+    """Summarize open-prediction review suggestions from local evidence only."""
+    rows = _list_prediction_outcome_suggestion_rows()
+    overall_bucket = _empty_outcome_bucket()
+    suggestion_buckets = _empty_outcome_suggestion_bucket_counts()
+    resolution_overlap = {
+        "resolved_total": 0,
+        "supported": 0,
+        "contradicted": 0,
+        "mixed": 0,
+        "expired": 0,
+        "resolved_with_unreviewed_reviewable_hits": 0,
+        "resolved_with_accepted_conflicting_evidence": 0,
+    }
+    by_mechanism_type: dict[str, dict] = {}
+    by_utility_class: dict[str, dict] = {
+        label: _new_outcome_suggestion_group(label)
+        for label in PREDICTION_UTILITY_CLASSES
+    }
+    review_backlog = {
+        "open_predictions_needing_review": 0,
+        "total_unreviewed_reviewable_evidence_hits": 0,
+        "open_predictions_with_accepted_support_only": 0,
+        "open_predictions_with_accepted_contradiction_only": 0,
+        "open_predictions_with_accepted_conflicting_evidence": 0,
+    }
+    actionable_predictions: list[dict] = []
+
+    for row in rows:
+        outcome_status = _normalize_prediction_outcome_status(row.get("outcome_status"))
+        accepted_support_hits = int(row.get("accepted_support_hits", 0) or 0)
+        accepted_contradiction_hits = int(
+            row.get("accepted_contradiction_hits", 0) or 0
+        )
+        unreviewed_reviewable_hits = int(
+            row.get("unreviewed_reviewable_hits", 0) or 0
+        )
+        mechanism_type = _clean_optional_text(row.get("mechanism_type")) or "unknown"
+        utility_class = _normalize_prediction_utility_class(row.get("utility_class"))
+        suggestion_bucket = row.get("suggestion_bucket") or "insufficient_evidence"
+
+        _accumulate_outcome(overall_bucket, outcome_status)
+        mechanism_group = by_mechanism_type.setdefault(
+            mechanism_type,
+            _new_outcome_suggestion_group(mechanism_type),
+        )
+        utility_group = by_utility_class.setdefault(
+            utility_class,
+            _new_outcome_suggestion_group(utility_class),
+        )
+        mechanism_group["total_predictions"] += 1
+        utility_group["total_predictions"] += 1
+
+        if outcome_status == "open":
+            suggestion_buckets[suggestion_bucket] += 1
+            mechanism_group["open_predictions"] += 1
+            mechanism_group[suggestion_bucket] += 1
+            utility_group["open_predictions"] += 1
+            utility_group[suggestion_bucket] += 1
+
+            if row.get("needs_review"):
+                review_backlog["open_predictions_needing_review"] += 1
+            review_backlog["total_unreviewed_reviewable_evidence_hits"] += (
+                unreviewed_reviewable_hits
+            )
+            if accepted_support_hits > 0 and accepted_contradiction_hits == 0:
+                review_backlog["open_predictions_with_accepted_support_only"] += 1
+            if accepted_contradiction_hits > 0 and accepted_support_hits == 0:
+                review_backlog[
+                    "open_predictions_with_accepted_contradiction_only"
+                ] += 1
+            if accepted_support_hits > 0 and accepted_contradiction_hits > 0:
+                review_backlog[
+                    "open_predictions_with_accepted_conflicting_evidence"
+                ] += 1
+
+            if suggestion_bucket != "insufficient_evidence":
+                actionable_predictions.append(
+                    {
+                        "id": int(row.get("id", 0) or 0),
+                        "transmission_number": row.get("transmission_number"),
+                        "suggestion_bucket": suggestion_bucket,
+                        "mechanism_type": mechanism_type,
+                        "utility_class": utility_class,
+                        "accepted_support_hits": accepted_support_hits,
+                        "accepted_contradiction_hits": accepted_contradiction_hits,
+                        "unreviewed_reviewable_hits": unreviewed_reviewable_hits,
+                        "prediction_summary": row.get("prediction_summary") or "—",
+                    }
+                )
+            continue
+
+        resolution_overlap["resolved_total"] += 1
+        resolution_overlap[outcome_status] += 1
+        if unreviewed_reviewable_hits > 0:
+            resolution_overlap["resolved_with_unreviewed_reviewable_hits"] += 1
+        if accepted_support_hits > 0 and accepted_contradiction_hits > 0:
+            resolution_overlap["resolved_with_accepted_conflicting_evidence"] += 1
+
+    actionable_predictions.sort(key=_prediction_outcome_suggestion_sort_key)
+
+    overview = _finalize_outcome_bucket("overall", overall_bucket)
+    return {
+        "overall": {
+            "total_predictions": int(overview.get("total", 0) or 0),
+            "open": int(overview.get("open", 0) or 0),
+            "supported": int(overview.get("supported", 0) or 0),
+            "contradicted": int(overview.get("contradicted", 0) or 0),
+            "mixed": int(overview.get("mixed", 0) or 0),
+            "expired": int(overview.get("expired", 0) or 0),
+            "resolved_total": int(overview.get("resolved", 0) or 0),
+        },
+        "suggestion_buckets": suggestion_buckets,
+        "resolution_overlap": resolution_overlap,
+        "by_mechanism_type": _sorted_outcome_suggestion_group_rows(
+            by_mechanism_type
+        ),
+        "by_utility_class": _sorted_outcome_suggestion_group_rows(
+            by_utility_class,
+            labels=PREDICTION_UTILITY_CLASSES,
+        ),
+        "review_backlog": review_backlog,
+        "top_actionable_predictions": actionable_predictions[:10],
+    }
 
 
 def get_prediction(id: int) -> dict | None:
