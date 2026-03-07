@@ -49,6 +49,7 @@ from store import (
     rut_report,
     save_evaluation,
     list_evaluation_run_summaries,
+    get_credibility_stats,
     list_recent_transmission_mechanisms,
     list_recent_transmission_provenance,
     list_open_predictions_for_evidence_scan,
@@ -77,6 +78,10 @@ def _parse_report_only_args():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument(
         "--kill-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--credibility-stats",
         action="store_true",
     )
     parser.add_argument(
@@ -634,6 +639,123 @@ def _print_prediction_evidence_stats(report: dict):
     print("review_status\tcount")
     for label in ("unreviewed", "accepted", "dismissed"):
         print(f"{label}\t{int(by_review_status.get(label, 0) or 0)}")
+
+
+def _print_credibility_stats(report: dict, window_requested: int):
+    """Render local-only credibility coverage and source bucket counts."""
+    exploration = report.get("explorations") or {}
+    evidence = report.get("prediction_evidence") or {}
+
+    exploration_rows = int(exploration.get("rows", 0) or 0)
+    evidence_rows = int(evidence.get("rows", 0) or 0)
+    if exploration_rows <= 0 and evidence_rows <= 0:
+        print("[CredibilityStats] No local exploration or evidence records found.")
+        return
+
+    def _ratio(count: int, total: int) -> str:
+        if total <= 0:
+            return "—"
+        return _format_percent(count / total)
+
+    print("[CredibilityStats]")
+    print(f"Window requested: {window_requested}")
+    print("Heuristic buckets only; reads local DB rows without model or search APIs.")
+
+    print("[CredibilityStats] Explorations")
+    print(
+        f"rows={exploration_rows} | "
+        f"seed_url_present={int(exploration.get('seed_url_present', 0) or 0)} "
+        f"({_ratio(int(exploration.get('seed_url_present', 0) or 0), exploration_rows)}) | "
+        f"target_url_present={int(exploration.get('target_url_present', 0) or 0)} "
+        f"({_ratio(int(exploration.get('target_url_present', 0) or 0), exploration_rows)})"
+    )
+    print(
+        f"any_url_present={int(exploration.get('any_url_present', 0) or 0)} "
+        f"({_ratio(int(exploration.get('any_url_present', 0) or 0), exploration_rows)}) | "
+        f"both_urls_present={int(exploration.get('both_urls_present', 0) or 0)} "
+        f"({_ratio(int(exploration.get('both_urls_present', 0) or 0), exploration_rows)}) | "
+        f"urls_observed={int(exploration.get('urls_observed', 0) or 0)}"
+    )
+
+    print("[CredibilityStats] Exploration URL buckets")
+    print("bucket\tcount")
+    for label in (
+        "scholarly",
+        "institutional",
+        "reference",
+        "community",
+        "general_web",
+        "unknown",
+    ):
+        print(f"{label}\t{int((exploration.get('by_bucket') or {}).get(label, 0) or 0)}")
+
+    print("[CredibilityStats] Exploration top hosts")
+    print("host\tcount\tshare")
+    exploration_hosts = exploration.get("top_hosts") or []
+    if not exploration_hosts:
+        print("none\t0\t—")
+    else:
+        for row in exploration_hosts:
+            print(
+                f"{row.get('label')}\t{int(row.get('count', 0) or 0)}\t"
+                f"{_format_percent(row.get('share'))}"
+            )
+
+    average_score = evidence.get("average_score")
+    average_score_text = (
+        f"{float(average_score):.3f}" if average_score is not None else "n/a"
+    )
+    print("[CredibilityStats] Prediction evidence")
+    print(
+        f"rows={evidence_rows} | "
+        f"urls_present={int(evidence.get('urls_present', 0) or 0)} "
+        f"({_ratio(int(evidence.get('urls_present', 0) or 0), evidence_rows)}) | "
+        f"average_score={average_score_text}"
+    )
+
+    print("[CredibilityStats] Evidence source types")
+    print("source_type\tcount")
+    source_types = evidence.get("by_source_type") or {}
+    if not source_types:
+        print("none\t0")
+    else:
+        for label, count in source_types.items():
+            print(f"{label}\t{int(count or 0)}")
+
+    print("[CredibilityStats] Evidence URL buckets")
+    print("bucket\tcount")
+    for label in (
+        "scholarly",
+        "institutional",
+        "reference",
+        "community",
+        "general_web",
+        "unknown",
+    ):
+        print(f"{label}\t{int((evidence.get('by_bucket') or {}).get(label, 0) or 0)}")
+
+    print("[CredibilityStats] Evidence classifications")
+    print("classification\tcount")
+    for label in (
+        "possible_support",
+        "possible_contradiction",
+        "unclear",
+    ):
+        print(
+            f"{label}\t{int((evidence.get('by_classification') or {}).get(label, 0) or 0)}"
+        )
+
+    print("[CredibilityStats] Evidence top hosts")
+    print("host\tcount\tshare")
+    evidence_hosts = evidence.get("top_hosts") or []
+    if not evidence_hosts:
+        print("none\t0\t—")
+    else:
+        for row in evidence_hosts:
+            print(
+                f"{row.get('label')}\t{int(row.get('count', 0) or 0)}\t"
+                f"{_format_percent(row.get('share'))}"
+            )
 
 
 def _strong_rejection_reasons_text(row: dict, limit: int = 110) -> str:
@@ -1209,6 +1331,7 @@ if __name__ == "__main__":
     _early_other_report_count = sum(
         [
             _early_report_args.kill_stats,
+            _early_report_args.credibility_stats,
             _early_report_args.check_predictions,
             _early_report_args.check_provenance,
             _early_report_args.check_mechanisms,
@@ -1220,6 +1343,7 @@ if __name__ == "__main__":
     if (
         (
             _early_report_args.kill_stats
+            or _early_report_args.credibility_stats
             or _early_report_args.check_predictions
             or _early_report_args.check_provenance
             or _early_report_args.check_mechanisms
@@ -1339,6 +1463,7 @@ if __name__ == "__main__":
             sys.exit(1)
     _early_report_action_requested = (
         _early_report_args.kill_stats
+        or _early_report_args.credibility_stats
         or _early_report_args.predictions
         or _early_report_args.check_predictions
         or _early_report_args.check_provenance
@@ -1381,6 +1506,11 @@ if __name__ == "__main__":
         if _early_report_args.kill_stats:
             _print_kill_stats(
                 _get_kill_stats(window=_early_report_args.window),
+                _early_report_args.window,
+            )
+        if _early_report_args.credibility_stats:
+            _print_credibility_stats(
+                get_credibility_stats(window=_early_report_args.window),
                 _early_report_args.window,
             )
         if _early_report_args.check_predictions:
@@ -1634,11 +1764,16 @@ def parse_args():
         help="Print kill stats for recent explorations and exit",
     )
     parser.add_argument(
+        "--credibility-stats",
+        action="store_true",
+        help="Summarize local source credibility signals and exit",
+    )
+    parser.add_argument(
         "--window",
         type=int,
         default=200,
         metavar="N",
-        help="How many recent rows to inspect for kill stats or prediction checks (default: 200)",
+        help="How many recent rows to inspect for kill stats, credibility stats, or prediction checks (default: 200)",
     )
     parser.add_argument(
         "--limit",

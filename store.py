@@ -11,6 +11,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 try:
     from dotenv import load_dotenv
 except ImportError:
@@ -94,6 +95,55 @@ LEGACY_PREDICTION_STATUS_BY_OUTCOME = {
     "mixed": "mixed",
     "expired": "expired",
 }
+CREDIBILITY_BUCKETS = (
+    "scholarly",
+    "institutional",
+    "reference",
+    "community",
+    "general_web",
+    "unknown",
+)
+_SCHOLARLY_HOST_SUFFIXES = (
+    "doi.org",
+    "arxiv.org",
+    "biorxiv.org",
+    "medrxiv.org",
+    "crossref.org",
+    "openalex.org",
+    "semanticscholar.org",
+    "europepmc.org",
+    "ncbi.nlm.nih.gov",
+    "pubmed.ncbi.nlm.nih.gov",
+    "nature.com",
+    "science.org",
+    "cell.com",
+    "sciencedirect.com",
+    "springer.com",
+    "link.springer.com",
+    "frontiersin.org",
+    "plos.org",
+    "jstor.org",
+    "ssrn.com",
+)
+_INSTITUTIONAL_HOST_SUFFIXES = (
+    "who.int",
+    "oecd.org",
+    "imf.org",
+    "worldbank.org",
+    "europa.eu",
+    "un.org",
+)
+_REFERENCE_HOST_SUFFIXES = (
+    "wikipedia.org",
+    "britannica.com",
+)
+_COMMUNITY_HOST_SUFFIXES = (
+    "reddit.com",
+    "stackexchange.com",
+    "medium.com",
+    "substack.com",
+    "github.io",
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -151,6 +201,76 @@ def _clean_optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _extract_url_host(value: object) -> str | None:
+    """Parse a stored URL into a normalized host when possible."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return None
+    candidate = text if "://" in text else f"https://{text}"
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return None
+    host = (parsed.netloc or parsed.path).strip().lower()
+    if not host:
+        return None
+    if "@" in host:
+        host = host.rsplit("@", 1)[-1]
+    if host.startswith("[") and "]" in host:
+        host = host[1 : host.find("]")]
+    elif ":" in host:
+        host = host.split(":", 1)[0]
+    host = host.lstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
+
+
+def _host_matches_any(host: str, suffixes: tuple[str, ...]) -> bool:
+    """Match a host against exact names or subdomains."""
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
+
+
+def _classify_source_credibility(url: object) -> tuple[str, str | None]:
+    """Assign a conservative heuristic credibility bucket to a stored URL."""
+    host = _extract_url_host(url)
+    if host is None:
+        return "unknown", None
+    if (
+        host.endswith(".edu")
+        or bool(re.search(r"\.ac\.[a-z]{2}$", host))
+        or _host_matches_any(host, _SCHOLARLY_HOST_SUFFIXES)
+    ):
+        return "scholarly", host
+    if (
+        host.endswith(".gov")
+        or host.endswith(".mil")
+        or host.endswith(".int")
+        or _host_matches_any(host, _INSTITUTIONAL_HOST_SUFFIXES)
+    ):
+        return "institutional", host
+    if _host_matches_any(host, _REFERENCE_HOST_SUFFIXES):
+        return "reference", host
+    if _host_matches_any(host, _COMMUNITY_HOST_SUFFIXES):
+        return "community", host
+    return "general_web", host
+
+
+def _ranked_counter_rows(counter: Counter, total: int, limit: int = 5) -> list[dict]:
+    """Convert a counter into sorted rows with optional shares."""
+    rows = [
+        {
+            "label": label,
+            "count": int(count or 0),
+            "share": (int(count or 0) / total) if total > 0 else None,
+        }
+        for label, count in counter.items()
+        if int(count or 0) > 0
+    ]
+    rows.sort(key=lambda row: (-row["count"], row["label"]))
+    return rows[: max(1, int(limit))]
 
 
 def _normalize_prediction_outcome_status(
@@ -2108,6 +2228,135 @@ def get_prediction_evidence_stats() -> dict:
         "open_predictions_needing_review": open_predictions_needing_review,
         "open_predictions_scanned": open_predictions_scanned,
         "total_predictions_scanned": total_predictions_scanned,
+    }
+
+
+def get_credibility_stats(window: int = 200) -> dict:
+    """Summarize stored source credibility signals without any runtime API calls."""
+    safe_window = max(1, int(window))
+    conn = _connect()
+    exploration_rows = conn.execute(
+        """SELECT
+            seed_url,
+            target_url
+        FROM explorations
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?""",
+        (safe_window,),
+    ).fetchall()
+    evidence_rows = conn.execute(
+        """SELECT
+            source_type,
+            url,
+            score,
+            classification
+        FROM prediction_evidence_hits
+        ORDER BY id DESC
+        LIMIT ?""",
+        (safe_window,),
+    ).fetchall()
+    conn.close()
+
+    exploration_bucket_counts = Counter({label: 0 for label in CREDIBILITY_BUCKETS})
+    exploration_host_counts: Counter = Counter()
+    seed_url_present = 0
+    target_url_present = 0
+    any_url_present = 0
+    both_urls_present = 0
+    exploration_urls_observed = 0
+
+    for row in exploration_rows:
+        seed_url = _clean_optional_text(row["seed_url"])
+        target_url = _clean_optional_text(row["target_url"])
+        if seed_url is not None:
+            seed_url_present += 1
+        if target_url is not None:
+            target_url_present += 1
+        if seed_url is not None or target_url is not None:
+            any_url_present += 1
+        if seed_url is not None and target_url is not None:
+            both_urls_present += 1
+        for url in (seed_url, target_url):
+            if url is None:
+                continue
+            exploration_urls_observed += 1
+            bucket, host = _classify_source_credibility(url)
+            exploration_bucket_counts[bucket] += 1
+            if host is not None:
+                exploration_host_counts[host] += 1
+
+    evidence_bucket_counts = Counter({label: 0 for label in CREDIBILITY_BUCKETS})
+    evidence_source_type_counts: Counter = Counter()
+    evidence_classification_counts = Counter(
+        {label: 0 for label in PREDICTION_EVIDENCE_CLASSIFICATIONS}
+    )
+    evidence_host_counts: Counter = Counter()
+    evidence_scores: list[float] = []
+    evidence_urls_present = 0
+
+    for row in evidence_rows:
+        source_type = _clean_optional_text(row["source_type"]) or "web_search"
+        evidence_source_type_counts[source_type] += 1
+        evidence_classification = _normalize_prediction_evidence_classification(
+            row["classification"]
+        )
+        evidence_classification_counts[evidence_classification] += 1
+        score = _coerce_optional_float(row["score"])
+        if score is not None:
+            evidence_scores.append(score)
+
+        bucket, host = _classify_source_credibility(row["url"])
+        evidence_bucket_counts[bucket] += 1
+        if _clean_optional_text(row["url"]) is not None:
+            evidence_urls_present += 1
+        if host is not None:
+            evidence_host_counts[host] += 1
+
+    return {
+        "window_requested": safe_window,
+        "explorations": {
+            "rows": len(exploration_rows),
+            "seed_url_present": seed_url_present,
+            "target_url_present": target_url_present,
+            "any_url_present": any_url_present,
+            "both_urls_present": both_urls_present,
+            "urls_observed": exploration_urls_observed,
+            "by_bucket": {
+                label: int(exploration_bucket_counts.get(label, 0) or 0)
+                for label in CREDIBILITY_BUCKETS
+            },
+            "top_hosts": _ranked_counter_rows(
+                exploration_host_counts,
+                exploration_urls_observed,
+            ),
+        },
+        "prediction_evidence": {
+            "rows": len(evidence_rows),
+            "urls_present": evidence_urls_present,
+            "average_score": (
+                sum(evidence_scores) / len(evidence_scores) if evidence_scores else None
+            ),
+            "by_bucket": {
+                label: int(evidence_bucket_counts.get(label, 0) or 0)
+                for label in CREDIBILITY_BUCKETS
+            },
+            "by_source_type": {
+                row["label"]: row["count"]
+                for row in _ranked_counter_rows(
+                    evidence_source_type_counts,
+                    len(evidence_rows),
+                    limit=max(5, len(evidence_source_type_counts) or 1),
+                )
+            },
+            "by_classification": {
+                label: int(evidence_classification_counts.get(label, 0) or 0)
+                for label in PREDICTION_EVIDENCE_CLASSIFICATIONS
+            },
+            "top_hosts": _ranked_counter_rows(
+                evidence_host_counts,
+                evidence_urls_present,
+            ),
+        },
     }
 
 
