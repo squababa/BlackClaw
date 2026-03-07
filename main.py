@@ -429,6 +429,26 @@ def _format_percent(value: float | None) -> str:
     return f"{value * 100:.1f}%"
 
 
+def _print_outcome_breakdown_section(title: str, rows: list[dict]):
+    """Render one outcome breakdown table."""
+    print(title)
+    print(
+        "label\ttotal\topen\tsupported\tcontradicted\tmixed\texpired\tvalidated\tval_rate\tsupport_rate"
+    )
+    if not rows:
+        print("none")
+        return
+    for row in rows:
+        print(
+            f"{_truncate_text(row.get('label'), 28)}\t{row.get('total', 0)}\t"
+            f"{row.get('open', 0)}\t{row.get('supported', 0)}\t"
+            f"{row.get('contradicted', 0)}\t{row.get('mixed', 0)}\t"
+            f"{row.get('expired', 0)}\t{row.get('validated', 0)}\t"
+            f"{_format_percent(row.get('validation_rate'))}\t"
+            f"{_format_percent(row.get('support_rate'))}"
+        )
+
+
 def _print_prediction_outcomes(limit: int = 20):
     """Render recent predictions with explicit outcome metadata."""
     rows = list_prediction_outcomes(limit=max(1, int(limit)))
@@ -472,44 +492,27 @@ def _print_prediction_outcome_stats(report: dict):
         f"support_rate={_format_percent(overview.get('support_rate'))}"
     )
 
-    def _print_section(title: str, rows: list[dict]):
-        print(title)
-        if not rows:
-            print("label\ttotal\topen\tsupported\tcontradicted\tmixed\texpired\tvalidated\tval_rate\tsupport_rate")
-            print("none")
-            return
-        print("label\ttotal\topen\tsupported\tcontradicted\tmixed\texpired\tvalidated\tval_rate\tsupport_rate")
-        for row in rows:
-            print(
-                f"{_truncate_text(row.get('label'), 28)}\t{row.get('total', 0)}\t"
-                f"{row.get('open', 0)}\t{row.get('supported', 0)}\t"
-                f"{row.get('contradicted', 0)}\t{row.get('mixed', 0)}\t"
-                f"{row.get('expired', 0)}\t{row.get('validated', 0)}\t"
-                f"{_format_percent(row.get('validation_rate'))}\t"
-                f"{_format_percent(row.get('support_rate'))}"
-            )
-
-    _print_section(
+    _print_outcome_breakdown_section(
         "[PredictionOutcomeStats] By mechanism type",
         report.get("by_mechanism_type") or [],
     )
-    _print_section(
+    _print_outcome_breakdown_section(
         "[PredictionOutcomeStats] By prediction quality band",
         report.get("by_prediction_quality_band") or [],
     )
-    _print_section(
+    _print_outcome_breakdown_section(
         "[PredictionOutcomeStats] By depth score band",
         report.get("by_depth_score_band") or [],
     )
-    _print_section(
+    _print_outcome_breakdown_section(
         "[PredictionOutcomeStats] By adversarial survival band",
         report.get("by_adversarial_survival_band") or [],
     )
-    _print_section(
+    _print_outcome_breakdown_section(
         "[PredictionOutcomeStats] By source domain",
         report.get("by_source_domain") or [],
     )
-    _print_section(
+    _print_outcome_breakdown_section(
         "[PredictionOutcomeStats] By target domain",
         report.get("by_target_domain") or [],
     )
@@ -642,120 +645,127 @@ def _print_prediction_evidence_stats(report: dict):
 
 
 def _print_credibility_stats(report: dict, window_requested: int):
-    """Render local-only credibility coverage and source bucket counts."""
-    exploration = report.get("explorations") or {}
-    evidence = report.get("prediction_evidence") or {}
-
-    exploration_rows = int(exploration.get("rows", 0) or 0)
-    evidence_rows = int(evidence.get("rows", 0) or 0)
-    if exploration_rows <= 0 and evidence_rows <= 0:
-        print("[CredibilityStats] No local exploration or evidence records found.")
-        return
-
-    def _ratio(count: int, total: int) -> str:
-        if total <= 0:
-            return "—"
-        return _format_percent(count / total)
+    """Render local-only empirical credibility and problem-finding stats."""
+    sample = report.get("sample") or {}
+    prediction_outcomes = report.get("prediction_outcomes") or {}
+    overview = prediction_outcomes.get("overview") or {}
+    coverage = prediction_outcomes.get("coverage") or {}
+    strong_rejections = report.get("strong_rejections") or {}
+    evidence_review = report.get("evidence_review") or {}
+    applied_window = report.get("window_requested", window_requested)
+    window_display = applied_window if applied_window is not None else "all"
+    window_scope_text = (
+        "all local rows per table"
+        if applied_window is None
+        else f"up to the latest {applied_window} rows per local table"
+    )
+    average_total_score = strong_rejections.get("average_total_score")
+    average_total_score_text = (
+        f"{float(average_total_score):.3f}"
+        if average_total_score is not None
+        else "n/a"
+    )
 
     print("[CredibilityStats]")
-    print(f"Window requested: {window_requested}")
-    print("Heuristic buckets only; reads local DB rows without model or search APIs.")
-
-    print("[CredibilityStats] Explorations")
+    print(f"Window requested: {window_display}")
     print(
-        f"rows={exploration_rows} | "
-        f"seed_url_present={int(exploration.get('seed_url_present', 0) or 0)} "
-        f"({_ratio(int(exploration.get('seed_url_present', 0) or 0), exploration_rows)}) | "
-        f"target_url_present={int(exploration.get('target_url_present', 0) or 0)} "
-        f"({_ratio(int(exploration.get('target_url_present', 0) or 0), exploration_rows)})"
+        "Local SQLite only. Report-only fast path. "
+        f"Sample uses {window_scope_text}."
     )
     print(
-        f"any_url_present={int(exploration.get('any_url_present', 0) or 0)} "
-        f"({_ratio(int(exploration.get('any_url_present', 0) or 0), exploration_rows)}) | "
-        f"both_urls_present={int(exploration.get('both_urls_present', 0) or 0)} "
-        f"({_ratio(int(exploration.get('both_urls_present', 0) or 0), exploration_rows)}) | "
-        f"urls_observed={int(exploration.get('urls_observed', 0) or 0)}"
+        f"Sampled rows: predictions={int(sample.get('predictions', 0) or 0)} | "
+        f"strong_rejections={int(sample.get('strong_rejections', 0) or 0)} | "
+        f"evidence_hits={int(sample.get('evidence_hits', 0) or 0)}"
     )
 
-    print("[CredibilityStats] Exploration URL buckets")
-    print("bucket\tcount")
-    for label in (
-        "scholarly",
-        "institutional",
-        "reference",
-        "community",
-        "general_web",
-        "unknown",
-    ):
-        print(f"{label}\t{int((exploration.get('by_bucket') or {}).get(label, 0) or 0)}")
-
-    print("[CredibilityStats] Exploration top hosts")
-    print("host\tcount\tshare")
-    exploration_hosts = exploration.get("top_hosts") or []
-    if not exploration_hosts:
-        print("none\t0\t—")
-    else:
-        for row in exploration_hosts:
-            print(
-                f"{row.get('label')}\t{int(row.get('count', 0) or 0)}\t"
-                f"{_format_percent(row.get('share'))}"
-            )
-
-    average_score = evidence.get("average_score")
-    average_score_text = (
-        f"{float(average_score):.3f}" if average_score is not None else "n/a"
-    )
-    print("[CredibilityStats] Prediction evidence")
+    print("[CredibilityStats] Overall prediction/outcome summary")
     print(
-        f"rows={evidence_rows} | "
-        f"urls_present={int(evidence.get('urls_present', 0) or 0)} "
-        f"({_ratio(int(evidence.get('urls_present', 0) or 0), evidence_rows)}) | "
-        f"average_score={average_score_text}"
+        "total\topen\tsupported\tcontradicted\tmixed\texpired\tvalidated\tvalidation_rate\tsupport_rate"
+    )
+    print(
+        f"{overview.get('total', 0)}\t{overview.get('open', 0)}\t"
+        f"{overview.get('supported', 0)}\t{overview.get('contradicted', 0)}\t"
+        f"{overview.get('mixed', 0)}\t{overview.get('expired', 0)}\t"
+        f"{overview.get('validated', 0)}\t"
+        f"{_format_percent(overview.get('validation_rate'))}\t"
+        f"{_format_percent(overview.get('support_rate'))}"
     )
 
-    print("[CredibilityStats] Evidence source types")
-    print("source_type\tcount")
-    source_types = evidence.get("by_source_type") or {}
-    if not source_types:
-        print("none\t0")
-    else:
-        for label, count in source_types.items():
-            print(f"{label}\t{int(count or 0)}")
+    _print_outcome_breakdown_section(
+        "[CredibilityStats] By mechanism type",
+        prediction_outcomes.get("by_mechanism_type") or [],
+    )
+    _print_outcome_breakdown_section(
+        "[CredibilityStats] By prediction quality band",
+        prediction_outcomes.get("by_prediction_quality_band") or [],
+    )
+    _print_outcome_breakdown_section(
+        "[CredibilityStats] By depth score band",
+        prediction_outcomes.get("by_depth_score_band") or [],
+    )
+    _print_outcome_breakdown_section(
+        "[CredibilityStats] By adversarial survival band",
+        prediction_outcomes.get("by_adversarial_survival_band") or [],
+    )
+    _print_outcome_breakdown_section(
+        "[CredibilityStats] By source domain (top 10)",
+        prediction_outcomes.get("by_source_domain") or [],
+    )
+    _print_outcome_breakdown_section(
+        "[CredibilityStats] By target domain (top 10)",
+        prediction_outcomes.get("by_target_domain") or [],
+    )
 
-    print("[CredibilityStats] Evidence URL buckets")
-    print("bucket\tcount")
-    for label in (
-        "scholarly",
-        "institutional",
-        "reference",
-        "community",
-        "general_web",
-        "unknown",
+    print("[CredibilityStats] Coverage")
+    print("field\tpresent\tmissing")
+    for field_name, coverage_key in (
+        ("mechanism_type", "mechanism_type"),
+        ("prediction_quality_score", "prediction_quality_score"),
+        ("depth_score", "depth_score"),
+        ("adversarial_survival_score", "adversarial_survival"),
+        ("source_domain", "source_domain"),
+        ("target_domain", "target_domain"),
     ):
-        print(f"{label}\t{int((evidence.get('by_bucket') or {}).get(label, 0) or 0)}")
-
-    print("[CredibilityStats] Evidence classifications")
-    print("classification\tcount")
-    for label in (
-        "possible_support",
-        "possible_contradiction",
-        "unclear",
-    ):
+        field_coverage = coverage.get(coverage_key) or {}
         print(
-            f"{label}\t{int((evidence.get('by_classification') or {}).get(label, 0) or 0)}"
+            f"{field_name}\t{int(field_coverage.get('available', 0) or 0)}\t"
+            f"{int(field_coverage.get('missing', 0) or 0)}"
         )
 
-    print("[CredibilityStats] Evidence top hosts")
-    print("host\tcount\tshare")
-    evidence_hosts = evidence.get("top_hosts") or []
-    if not evidence_hosts:
-        print("none\t0\t—")
+    print("[CredibilityStats] Strong rejection summary")
+    print("total\topen\tsalvaged\tdismissed\tavg_total_score")
+    print(
+        f"{int(strong_rejections.get('total', 0) or 0)}\t"
+        f"{int(strong_rejections.get('open', 0) or 0)}\t"
+        f"{int(strong_rejections.get('salvaged', 0) or 0)}\t"
+        f"{int(strong_rejections.get('dismissed', 0) or 0)}\t"
+        f"{average_total_score_text}"
+    )
+    print("top_salvage_reason\tcount")
+    salvage_reasons = strong_rejections.get("top_salvage_reasons") or []
+    if not salvage_reasons:
+        print("none\t0")
     else:
-        for row in evidence_hosts:
+        for row in salvage_reasons:
             print(
-                f"{row.get('label')}\t{int(row.get('count', 0) or 0)}\t"
-                f"{_format_percent(row.get('share'))}"
+                f"{_truncate_text(row.get('reason'), 64)}\t"
+                f"{int(row.get('count', 0) or 0)}"
             )
+
+    print("[CredibilityStats] Evidence review summary")
+    print("Auxiliary only; sparse evidence should not dominate this report.")
+    print(
+        "total_hits\tpossible_support\tpossible_contradiction\tunclear\tunreviewed\taccepted\tdismissed"
+    )
+    print(
+        f"{int(evidence_review.get('total_hits', 0) or 0)}\t"
+        f"{int(evidence_review.get('possible_support', 0) or 0)}\t"
+        f"{int(evidence_review.get('possible_contradiction', 0) or 0)}\t"
+        f"{int(evidence_review.get('unclear', 0) or 0)}\t"
+        f"{int(evidence_review.get('unreviewed', 0) or 0)}\t"
+        f"{int(evidence_review.get('accepted', 0) or 0)}\t"
+        f"{int(evidence_review.get('dismissed', 0) or 0)}"
+    )
 
 
 def _strong_rejection_reasons_text(row: dict, limit: int = 110) -> str:
@@ -1766,7 +1776,7 @@ def parse_args():
     parser.add_argument(
         "--credibility-stats",
         action="store_true",
-        help="Summarize local source credibility signals and exit",
+        help="Summarize local prediction credibility and problem-finding quality stats and exit",
     )
     parser.add_argument(
         "--window",

@@ -1822,9 +1822,8 @@ def _sorted_outcome_rows(
     return rows
 
 
-def get_prediction_outcome_stats() -> dict:
-    """Summarize outcome coverage and support rates across stored predictions."""
-    rows = list_prediction_outcomes(limit=None)
+def _aggregate_prediction_outcome_rows(rows: list[dict]) -> dict:
+    """Summarize outcome coverage and support rates across normalized prediction rows."""
     overview = _empty_outcome_bucket()
     by_mechanism_type: dict[str, dict] = {}
     by_prediction_quality_band: dict[str, dict] = {}
@@ -1916,6 +1915,16 @@ def get_prediction_outcome_stats() -> dict:
         "by_source_domain": _sorted_outcome_rows(by_source_domain, max_rows=10),
         "by_target_domain": _sorted_outcome_rows(by_target_domain, max_rows=10),
     }
+
+
+def get_prediction_outcome_stats(window: int | None = None) -> dict:
+    """Summarize outcome coverage and support rates across stored predictions."""
+    safe_window = max(1, int(window)) if window is not None else None
+    report = _aggregate_prediction_outcome_rows(
+        list_prediction_outcomes(limit=safe_window)
+    )
+    report["window_requested"] = safe_window
+    return report
 
 
 def get_prediction(id: int) -> dict | None:
@@ -2231,131 +2240,103 @@ def get_prediction_evidence_stats() -> dict:
     }
 
 
-def get_credibility_stats(window: int = 200) -> dict:
-    """Summarize stored source credibility signals without any runtime API calls."""
-    safe_window = max(1, int(window))
+def get_credibility_stats(window: int | None = 200) -> dict:
+    """Summarize local empirical prediction credibility signals from SQLite only."""
+    safe_window = max(1, int(window)) if window is not None else None
+    prediction_outcomes = get_prediction_outcome_stats(window=safe_window)
+
     conn = _connect()
-    exploration_rows = conn.execute(
-        """SELECT
-            seed_url,
-            target_url
-        FROM explorations
-        ORDER BY timestamp DESC, id DESC
-        LIMIT ?""",
-        (safe_window,),
-    ).fetchall()
-    evidence_rows = conn.execute(
-        """SELECT
-            source_type,
-            url,
-            score,
-            classification
+
+    strong_query = """SELECT
+            status,
+            total_score,
+            salvage_reason
+        FROM strong_rejections
+        ORDER BY timestamp DESC, id DESC"""
+    strong_params: tuple[object, ...] = ()
+    if safe_window is not None:
+        strong_query += "\n        LIMIT ?"
+        strong_params = (safe_window,)
+    strong_rows = conn.execute(strong_query, strong_params).fetchall()
+
+    strong_status_counts = Counter({label: 0 for label in STRONG_REJECTION_STATUSES})
+    strong_total_scores: list[float] = []
+    salvage_reasons: Counter[str] = Counter()
+    for row in strong_rows:
+        status = _normalize_strong_rejection_status(row["status"])
+        strong_status_counts[status] += 1
+        total_score = _coerce_optional_float(row["total_score"])
+        if total_score is not None:
+            strong_total_scores.append(total_score)
+        salvage_reason = _clean_optional_text(row["salvage_reason"])
+        if salvage_reason is not None:
+            salvage_reasons[salvage_reason] += 1
+
+    evidence_query = """SELECT
+            classification,
+            review_status
         FROM prediction_evidence_hits
-        ORDER BY id DESC
-        LIMIT ?""",
-        (safe_window,),
-    ).fetchall()
+        ORDER BY id DESC"""
+    evidence_params: tuple[object, ...] = ()
+    if safe_window is not None:
+        evidence_query += "\n        LIMIT ?"
+        evidence_params = (safe_window,)
+    evidence_rows = conn.execute(evidence_query, evidence_params).fetchall()
     conn.close()
 
-    exploration_bucket_counts = Counter({label: 0 for label in CREDIBILITY_BUCKETS})
-    exploration_host_counts: Counter = Counter()
-    seed_url_present = 0
-    target_url_present = 0
-    any_url_present = 0
-    both_urls_present = 0
-    exploration_urls_observed = 0
-
-    for row in exploration_rows:
-        seed_url = _clean_optional_text(row["seed_url"])
-        target_url = _clean_optional_text(row["target_url"])
-        if seed_url is not None:
-            seed_url_present += 1
-        if target_url is not None:
-            target_url_present += 1
-        if seed_url is not None or target_url is not None:
-            any_url_present += 1
-        if seed_url is not None and target_url is not None:
-            both_urls_present += 1
-        for url in (seed_url, target_url):
-            if url is None:
-                continue
-            exploration_urls_observed += 1
-            bucket, host = _classify_source_credibility(url)
-            exploration_bucket_counts[bucket] += 1
-            if host is not None:
-                exploration_host_counts[host] += 1
-
-    evidence_bucket_counts = Counter({label: 0 for label in CREDIBILITY_BUCKETS})
-    evidence_source_type_counts: Counter = Counter()
     evidence_classification_counts = Counter(
         {label: 0 for label in PREDICTION_EVIDENCE_CLASSIFICATIONS}
     )
-    evidence_host_counts: Counter = Counter()
-    evidence_scores: list[float] = []
-    evidence_urls_present = 0
-
+    evidence_review_status_counts = Counter(
+        {label: 0 for label in PREDICTION_EVIDENCE_REVIEW_STATUSES}
+    )
     for row in evidence_rows:
-        source_type = _clean_optional_text(row["source_type"]) or "web_search"
-        evidence_source_type_counts[source_type] += 1
-        evidence_classification = _normalize_prediction_evidence_classification(
-            row["classification"]
-        )
-        evidence_classification_counts[evidence_classification] += 1
-        score = _coerce_optional_float(row["score"])
-        if score is not None:
-            evidence_scores.append(score)
-
-        bucket, host = _classify_source_credibility(row["url"])
-        evidence_bucket_counts[bucket] += 1
-        if _clean_optional_text(row["url"]) is not None:
-            evidence_urls_present += 1
-        if host is not None:
-            evidence_host_counts[host] += 1
+        evidence_classification_counts[
+            _normalize_prediction_evidence_classification(row["classification"])
+        ] += 1
+        evidence_review_status_counts[
+            _normalize_prediction_evidence_review_status(row["review_status"])
+        ] += 1
 
     return {
         "window_requested": safe_window,
-        "explorations": {
-            "rows": len(exploration_rows),
-            "seed_url_present": seed_url_present,
-            "target_url_present": target_url_present,
-            "any_url_present": any_url_present,
-            "both_urls_present": both_urls_present,
-            "urls_observed": exploration_urls_observed,
-            "by_bucket": {
-                label: int(exploration_bucket_counts.get(label, 0) or 0)
-                for label in CREDIBILITY_BUCKETS
-            },
-            "top_hosts": _ranked_counter_rows(
-                exploration_host_counts,
-                exploration_urls_observed,
+        "sample": {
+            "mode": (
+                "latest_local_rows_per_table"
+                if safe_window is not None
+                else "all_local_rows_per_table"
             ),
+            "predictions": int(prediction_outcomes.get("sample_size", 0) or 0),
+            "strong_rejections": len(strong_rows),
+            "evidence_hits": len(evidence_rows),
         },
-        "prediction_evidence": {
-            "rows": len(evidence_rows),
-            "urls_present": evidence_urls_present,
-            "average_score": (
-                sum(evidence_scores) / len(evidence_scores) if evidence_scores else None
+        "prediction_outcomes": prediction_outcomes,
+        "strong_rejections": {
+            "total": len(strong_rows),
+            "open": int(strong_status_counts.get("open", 0) or 0),
+            "salvaged": int(strong_status_counts.get("salvaged", 0) or 0),
+            "dismissed": int(strong_status_counts.get("dismissed", 0) or 0),
+            "average_total_score": (
+                sum(strong_total_scores) / len(strong_total_scores)
+                if strong_total_scores
+                else None
             ),
-            "by_bucket": {
-                label: int(evidence_bucket_counts.get(label, 0) or 0)
-                for label in CREDIBILITY_BUCKETS
-            },
-            "by_source_type": {
-                row["label"]: row["count"]
-                for row in _ranked_counter_rows(
-                    evidence_source_type_counts,
-                    len(evidence_rows),
-                    limit=max(5, len(evidence_source_type_counts) or 1),
-                )
-            },
-            "by_classification": {
-                label: int(evidence_classification_counts.get(label, 0) or 0)
-                for label in PREDICTION_EVIDENCE_CLASSIFICATIONS
-            },
-            "top_hosts": _ranked_counter_rows(
-                evidence_host_counts,
-                evidence_urls_present,
+            "top_salvage_reasons": _top_reason_rows(salvage_reasons, top_n=5),
+        },
+        "evidence_review": {
+            "total_hits": len(evidence_rows),
+            "possible_support": int(
+                evidence_classification_counts.get("possible_support", 0) or 0
             ),
+            "possible_contradiction": int(
+                evidence_classification_counts.get("possible_contradiction", 0) or 0
+            ),
+            "unclear": int(evidence_classification_counts.get("unclear", 0) or 0),
+            "unreviewed": int(
+                evidence_review_status_counts.get("unreviewed", 0) or 0
+            ),
+            "accepted": int(evidence_review_status_counts.get("accepted", 0) or 0),
+            "dismissed": int(evidence_review_status_counts.get("dismissed", 0) or 0),
         },
     }
 
