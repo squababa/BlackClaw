@@ -78,6 +78,10 @@ PREDICTION_EVIDENCE_REVIEW_STATUSES = (
     "accepted",
     "dismissed",
 )
+PREDICTION_EVIDENCE_REVIEWABLE_CLASSIFICATIONS = (
+    "possible_support",
+    "possible_contradiction",
+)
 STRONG_REJECTION_STATUSES = ("open", "salvaged", "dismissed")
 PREDICTION_OUTCOME_BY_STATUS = {
     "open": "open",
@@ -559,6 +563,7 @@ def init_db():
             score REAL,
             query_used TEXT NOT NULL,
             review_status TEXT NOT NULL DEFAULT "unreviewed",
+            notes TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (prediction_id) REFERENCES predictions(id)
@@ -750,6 +755,7 @@ def init_db():
             score REAL,
             query_used TEXT NOT NULL,
             review_status TEXT NOT NULL DEFAULT "unreviewed",
+            notes TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (prediction_id) REFERENCES predictions(id)
@@ -787,6 +793,8 @@ def init_db():
         conn.execute(
             'ALTER TABLE prediction_evidence_hits ADD COLUMN review_status TEXT NOT NULL DEFAULT "unreviewed"'
         )
+    if "notes" not in evidence_columns:
+        conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN notes TEXT")
     if "created_at" not in evidence_columns:
         conn.execute("ALTER TABLE prediction_evidence_hits ADD COLUMN created_at TEXT")
     if "updated_at" not in evidence_columns:
@@ -851,14 +859,22 @@ def init_db():
     )
     conn.execute(
         """UPDATE predictions
-        SET needs_review = 1
-        WHERE COALESCE(needs_review, 0) = 0
-            AND EXISTS (
+        SET needs_review = CASE
+            WHEN EXISTS (
                 SELECT 1
                 FROM prediction_evidence_hits h
                 WHERE h.prediction_id = predictions.id
                   AND h.classification IN ('possible_support', 'possible_contradiction')
-            )"""
+                  AND h.review_status = 'unreviewed'
+            ) THEN 1
+            ELSE 0
+        END
+        WHERE EXISTS (
+                SELECT 1
+                FROM prediction_evidence_hits h
+                WHERE h.prediction_id = predictions.id
+            )
+           OR COALESCE(needs_review, 0) <> 0"""
     )
     _ensure_api_usage_schema(conn)
     convergence_columns = {
@@ -2011,6 +2027,59 @@ def list_open_predictions_for_evidence_scan(limit: int | None = 10) -> list[dict
     return [_prediction_context_row_to_dict(row) for row in rows]
 
 
+def _prediction_requires_evidence_review(
+    conn: sqlite3.Connection,
+    prediction_id: int,
+) -> bool:
+    """Return whether a prediction still has unreviewed reviewable evidence hits."""
+    row = conn.execute(
+        """SELECT 1
+        FROM prediction_evidence_hits
+        WHERE prediction_id = ?
+          AND LOWER(COALESCE(classification, '')) IN (?, ?)
+          AND LOWER(COALESCE(review_status, '')) = ?
+        LIMIT 1""",
+        (
+            prediction_id,
+            *PREDICTION_EVIDENCE_REVIEWABLE_CLASSIFICATIONS,
+            "unreviewed",
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def _recalculate_prediction_needs_review_for_connection(
+    conn: sqlite3.Connection,
+    prediction_id: int,
+    touch_updated_at: bool = True,
+) -> bool | None:
+    """Refresh one prediction's review flag from its evidence-hit review state."""
+    row = conn.execute(
+        "SELECT needs_review FROM predictions WHERE id = ? LIMIT 1",
+        (prediction_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    needs_review = _prediction_requires_evidence_review(conn, prediction_id)
+    current_value = _normalize_bool_flag(row["needs_review"])
+    next_value = 1 if needs_review else 0
+    if current_value != next_value:
+        if touch_updated_at:
+            conn.execute(
+                """UPDATE predictions
+                SET needs_review = ?, updated_at = ?
+                WHERE id = ?""",
+                (next_value, _now(), prediction_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE predictions SET needs_review = ? WHERE id = ?",
+                (next_value, prediction_id),
+            )
+    return needs_review
+
+
 def save_prediction_evidence_scan(
     prediction_id: int,
     hits: list[dict] | None = None,
@@ -2049,7 +2118,7 @@ def save_prediction_evidence_scan(
 
     conn = _connect()
     existing = conn.execute(
-        "SELECT needs_review FROM predictions WHERE id = ? LIMIT 1",
+        "SELECT 1 FROM predictions WHERE id = ? LIMIT 1",
         (prediction_id,),
     ).fetchone()
     if not existing:
@@ -2064,7 +2133,6 @@ def save_prediction_evidence_scan(
 
     now = _now()
     inserted_hits = 0
-    needs_review = bool(_normalize_bool_flag(existing["needs_review"]))
     for hit in normalized_hits:
         conn.execute(
             """INSERT INTO prediction_evidence_hits
@@ -2087,8 +2155,8 @@ def save_prediction_evidence_scan(
             ),
         )
         inserted_hits += 1
-        if hit["classification"] in {"possible_support", "possible_contradiction"}:
-            needs_review = True
+
+    needs_review = _prediction_requires_evidence_review(conn, prediction_id)
 
     conn.execute(
         """UPDATE predictions
@@ -2127,6 +2195,7 @@ def _prediction_evidence_row_to_dict(row: sqlite3.Row | dict) -> dict:
         payload.get("review_status")
     )
     payload["query_used"] = _clean_optional_text(payload.get("query_used")) or "(unknown query)"
+    payload["notes"] = _clean_optional_text(payload.get("notes"))
     payload["created_at"] = _clean_optional_text(payload.get("created_at"))
     payload["updated_at"] = _clean_optional_text(payload.get("updated_at"))
     score = _coerce_optional_float(payload.get("score"))
@@ -2152,6 +2221,7 @@ def list_prediction_evidence_hits(
             score,
             query_used,
             review_status,
+            notes,
             created_at,
             updated_at
         FROM prediction_evidence_hits"""
@@ -2166,6 +2236,163 @@ def list_prediction_evidence_hits(
     rows = conn.execute(query, tuple(params)).fetchall()
     conn.close()
     return [_prediction_evidence_row_to_dict(row) for row in rows]
+
+
+def get_prediction_evidence_hit(id: int) -> dict | None:
+    """Fetch one stored evidence hit by id."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            id,
+            prediction_id,
+            scan_timestamp,
+            source_type,
+            title,
+            url,
+            snippet,
+            classification,
+            score,
+            query_used,
+            review_status,
+            notes,
+            created_at,
+            updated_at
+        FROM prediction_evidence_hits
+        WHERE id = ?
+        LIMIT 1""",
+        (id,),
+    ).fetchone()
+    conn.close()
+    return _prediction_evidence_row_to_dict(row) if row else None
+
+
+def update_prediction_evidence_review_status(
+    id: int,
+    review_status: str,
+    notes: str | None = None,
+) -> bool:
+    """Update one evidence hit review state and refresh its prediction review flag."""
+    clean_review_status = _normalize_prediction_evidence_review_status(review_status)
+    conn = _connect()
+    row = conn.execute(
+        """SELECT prediction_id
+        FROM prediction_evidence_hits
+        WHERE id = ?
+        LIMIT 1""",
+        (id,),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return False
+
+    now = _now()
+    if notes is None:
+        conn.execute(
+            """UPDATE prediction_evidence_hits
+            SET review_status = ?, updated_at = ?
+            WHERE id = ?""",
+            (clean_review_status, now, id),
+        )
+    else:
+        conn.execute(
+            """UPDATE prediction_evidence_hits
+            SET review_status = ?, notes = ?, updated_at = ?
+            WHERE id = ?""",
+            (clean_review_status, _clean_optional_text(notes), now, id),
+        )
+    _recalculate_prediction_needs_review_for_connection(
+        conn,
+        int(row["prediction_id"]),
+        touch_updated_at=True,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def list_prediction_evidence_review_queue(limit: int = 20) -> list[dict]:
+    """List recent unreviewed evidence hits in operational review priority order."""
+    conn = _connect()
+    safe_limit = max(1, int(limit))
+    rows = conn.execute(
+        """SELECT
+            id,
+            prediction_id,
+            scan_timestamp,
+            source_type,
+            title,
+            url,
+            snippet,
+            classification,
+            score,
+            query_used,
+            review_status,
+            notes,
+            created_at,
+            updated_at
+        FROM prediction_evidence_hits
+        WHERE LOWER(COALESCE(review_status, '')) = 'unreviewed'
+        ORDER BY
+            CASE LOWER(COALESCE(classification, ''))
+                WHEN 'possible_support' THEN 0
+                WHEN 'possible_contradiction' THEN 1
+                ELSE 2
+            END ASC,
+            COALESCE(NULLIF(scan_timestamp, ''), created_at) DESC,
+            id DESC
+        LIMIT ?""",
+        (safe_limit,),
+    ).fetchall()
+    conn.close()
+    return [_prediction_evidence_row_to_dict(row) for row in rows]
+
+
+def get_prediction_evidence_review_stats() -> dict:
+    """Summarize evidence review totals and classification-by-status breakdowns."""
+    conn = _connect()
+    by_review_status = {label: 0 for label in PREDICTION_EVIDENCE_REVIEW_STATUSES}
+    by_classification = {
+        label: {
+            "unreviewed": 0,
+            "accepted": 0,
+            "dismissed": 0,
+            "total": 0,
+        }
+        for label in PREDICTION_EVIDENCE_CLASSIFICATIONS
+    }
+    total_hits = 0
+    for row in conn.execute(
+        """SELECT classification, review_status, COUNT(*) AS count
+        FROM prediction_evidence_hits
+        GROUP BY classification, review_status"""
+    ).fetchall():
+        classification = _normalize_prediction_evidence_classification(
+            row["classification"]
+        )
+        review_status = _normalize_prediction_evidence_review_status(
+            row["review_status"]
+        )
+        count = int(row["count"] or 0)
+        by_classification[classification][review_status] += count
+        by_classification[classification]["total"] += count
+        by_review_status[review_status] += count
+        total_hits += count
+
+    predictions_needing_review = int(
+        conn.execute(
+            """SELECT COUNT(*) AS count
+            FROM predictions
+            WHERE COALESCE(needs_review, 0) <> 0"""
+        ).fetchone()["count"]
+        or 0
+    )
+    conn.close()
+    return {
+        "total_hits": total_hits,
+        "by_review_status": by_review_status,
+        "by_classification": by_classification,
+        "predictions_needing_review": predictions_needing_review,
+    }
 
 
 def get_prediction_evidence_stats() -> dict:

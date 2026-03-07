@@ -54,8 +54,12 @@ from store import (
     list_recent_transmission_provenance,
     list_open_predictions_for_evidence_scan,
     save_prediction_evidence_scan,
+    get_prediction_evidence_hit,
     list_prediction_evidence_hits,
     get_prediction_evidence_stats,
+    update_prediction_evidence_review_status,
+    list_prediction_evidence_review_queue,
+    get_prediction_evidence_review_stats,
     list_strong_rejections,
     get_strong_rejection,
     update_strong_rejection_status,
@@ -121,6 +125,32 @@ def _parse_report_only_args():
     parser.add_argument(
         "--prediction-evidence-stats",
         action="store_true",
+    )
+    parser.add_argument(
+        "--evidence-review-queue",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--evidence-review-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--review-evidence",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--accept-evidence",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--dismiss-evidence",
+        type=int,
+        default=None,
+        metavar="ID",
     )
     parser.add_argument(
         "--strong-rejections",
@@ -642,6 +672,95 @@ def _print_prediction_evidence_stats(report: dict):
     print("review_status\tcount")
     for label in ("unreviewed", "accepted", "dismissed"):
         print(f"{label}\t{int(by_review_status.get(label, 0) or 0)}")
+
+
+def _print_prediction_evidence_detail(evidence_hit_id: int) -> bool:
+    """Render one stored evidence hit as JSON."""
+    row = get_prediction_evidence_hit(evidence_hit_id)
+    if row is None:
+        print(f"  [!] Evidence hit #{evidence_hit_id} not found.")
+        return False
+    print(json.dumps(row, ensure_ascii=False, indent=2))
+    return True
+
+
+def _apply_prediction_evidence_review_status_update(
+    evidence_hit_id: int,
+    review_status: str,
+    note: str | None = None,
+) -> bool:
+    """Update one evidence hit review state and print a concise status line."""
+    updated = update_prediction_evidence_review_status(
+        evidence_hit_id,
+        review_status,
+        notes=note,
+    )
+    if not updated:
+        print(f"  [!] Evidence hit #{evidence_hit_id} not found.")
+        return False
+
+    print(
+        f"[PredictionEvidence] Marked evidence hit #{evidence_hit_id} as "
+        f"{_truncate_text(review_status, 32)}."
+    )
+    if note is not None:
+        print("  [PredictionEvidence] Note saved.")
+    return True
+
+
+def _print_prediction_evidence_review_queue(limit: int = 20):
+    """Render the unreviewed evidence queue in manual-review priority order."""
+    rows = list_prediction_evidence_review_queue(limit=max(1, int(limit)))
+    if not rows:
+        print("[PredictionEvidenceReviewQueue] No unreviewed evidence hits found.")
+        return
+
+    print(f"[PredictionEvidenceReviewQueue] Recent {len(rows)} unreviewed hits")
+    print(
+        "evidence_hit_id\tprediction_id\tclassification\tscore\tsource_type\t"
+        "title\tquery\tscan_timestamp"
+    )
+    for row in rows:
+        score_text = (
+            f"{float(row.get('score')):.3f}" if row.get("score") is not None else "—"
+        )
+        print(
+            f"{row.get('id')}\t{row.get('prediction_id')}\t"
+            f"{row.get('classification')}\t{score_text}\t"
+            f"{_truncate_text(row.get('source_type'), 20)}\t"
+            f"{_truncate_text(row.get('title'), 56)}\t"
+            f"{_truncate_text(row.get('query_used'), 56)}\t"
+            f"{_short_timestamp(row.get('scan_timestamp'))}"
+        )
+
+
+def _print_prediction_evidence_review_stats(report: dict):
+    """Render evidence review status totals and classification breakdowns."""
+    by_review_status = report.get("by_review_status") or {}
+    print(
+        f"[PredictionEvidenceReviewStats] total_hits={int(report.get('total_hits', 0) or 0)} | "
+        f"unreviewed={int(by_review_status.get('unreviewed', 0) or 0)} | "
+        f"accepted={int(by_review_status.get('accepted', 0) or 0)} | "
+        f"dismissed={int(by_review_status.get('dismissed', 0) or 0)} | "
+        f"predictions_needing_review={int(report.get('predictions_needing_review', 0) or 0)}"
+    )
+
+    print("[PredictionEvidenceReviewStats] By classification and review status")
+    print("classification\tunreviewed\taccepted\tdismissed\ttotal")
+    by_classification = report.get("by_classification") or {}
+    for label in (
+        "possible_support",
+        "possible_contradiction",
+        "unclear",
+    ):
+        row = by_classification.get(label) or {}
+        print(
+            f"{label}\t"
+            f"{int(row.get('unreviewed', 0) or 0)}\t"
+            f"{int(row.get('accepted', 0) or 0)}\t"
+            f"{int(row.get('dismissed', 0) or 0)}\t"
+            f"{int(row.get('total', 0) or 0)}"
+        )
 
 
 def _print_credibility_stats(report: dict, window_requested: int):
@@ -1321,6 +1440,11 @@ if __name__ == "__main__":
             _early_report_args.prediction is not None,
             _early_report_args.prediction_evidence,
             _early_report_args.prediction_evidence_stats,
+            _early_report_args.evidence_review_queue,
+            _early_report_args.evidence_review_stats,
+            _early_report_args.review_evidence is not None,
+            _early_report_args.accept_evidence is not None,
+            _early_report_args.dismiss_evidence is not None,
             _early_report_args.scan_open_predictions,
             _early_report_args.mark_supported is not None,
             _early_report_args.mark_contradicted is not None,
@@ -1366,6 +1490,7 @@ if __name__ == "__main__":
     if (
         (
             _early_report_args.prediction_evidence
+            or _early_report_args.evidence_review_queue
             or _early_report_args.scan_open_predictions
             or _early_report_args.strong_rejections
         )
@@ -1382,7 +1507,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_prediction_action_count > 1:
         print(
-            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
+            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
         )
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
@@ -1413,11 +1538,12 @@ if __name__ == "__main__":
     if (
         _early_report_args.limit is not None
         and not _early_report_args.prediction_evidence
+        and not _early_report_args.evidence_review_queue
         and not _early_report_args.scan_open_predictions
         and not _early_report_args.strong_rejections
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --scan-open-predictions, or --strong-rejections."
+            "  [!] --limit can only be used with --prediction-evidence, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
         )
         sys.exit(1)
     if (
@@ -1428,11 +1554,13 @@ if __name__ == "__main__":
         and _early_report_args.mark_expired is None
         and _early_report_args.mark_failed is None
         and _early_report_args.mark_unknown is None
+        and _early_report_args.accept_evidence is None
+        and _early_report_args.dismiss_evidence is None
         and _early_report_args.mark_salvaged is None
         and _early_report_args.dismiss_strong_rejection is None
     ):
         print(
-            "  [!] --note can only be used with prediction outcome update flags or strong-rejection status updates."
+            "  [!] --note can only be used with evidence review updates, prediction outcome update flags, or strong-rejection status updates."
         )
         sys.exit(1)
     if (
@@ -1455,6 +1583,9 @@ if __name__ == "__main__":
     for flag_name, prediction_id in (
         ("--prediction", _early_report_args.prediction),
         ("--evidence-prediction", _early_report_args.evidence_prediction),
+        ("--review-evidence", _early_report_args.review_evidence),
+        ("--accept-evidence", _early_report_args.accept_evidence),
+        ("--dismiss-evidence", _early_report_args.dismiss_evidence),
         ("--mark-supported", _early_report_args.mark_supported),
         ("--mark-contradicted", _early_report_args.mark_contradicted),
         ("--mark-mixed", _early_report_args.mark_mixed),
@@ -1482,6 +1613,11 @@ if __name__ == "__main__":
         or _early_report_args.prediction_outcome_stats
         or _early_report_args.prediction_evidence
         or _early_report_args.prediction_evidence_stats
+        or _early_report_args.evidence_review_queue
+        or _early_report_args.evidence_review_stats
+        or _early_report_args.review_evidence is not None
+        or _early_report_args.accept_evidence is not None
+        or _early_report_args.dismiss_evidence is not None
         or _early_report_args.prediction is not None
         or _early_report_args.strong_rejections
         or _early_report_args.strong_rejection is not None
@@ -1542,6 +1678,39 @@ if __name__ == "__main__":
             )
         if _early_report_args.prediction_evidence_stats:
             _print_prediction_evidence_stats(get_prediction_evidence_stats())
+        if _early_report_args.evidence_review_queue:
+            _print_prediction_evidence_review_queue(
+                limit=_early_report_args.limit or 20
+            )
+        if _early_report_args.evidence_review_stats:
+            _print_prediction_evidence_review_stats(
+                get_prediction_evidence_review_stats()
+            )
+        if (
+            _early_report_args.review_evidence is not None
+            and not _print_prediction_evidence_detail(
+                _early_report_args.review_evidence
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.accept_evidence is not None
+            and not _apply_prediction_evidence_review_status_update(
+                _early_report_args.accept_evidence,
+                "accepted",
+                note=_early_report_args.note,
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.dismiss_evidence is not None
+            and not _apply_prediction_evidence_review_status_update(
+                _early_report_args.dismiss_evidence,
+                "dismissed",
+                note=_early_report_args.note,
+            )
+        ):
+            sys.exit(1)
         if _early_report_args.strong_rejections:
             _print_strong_rejections_list(limit=_early_report_args.limit or 20)
         if (
@@ -1790,7 +1959,7 @@ def parse_args():
         type=int,
         default=None,
         metavar="N",
-        help="Optional limit for scan, evidence-list, or strong-rejection list commands",
+        help="Optional limit for scan, evidence-list, evidence-review-queue, or strong-rejection list commands",
     )
     parser.add_argument(
         "--star",
@@ -1817,7 +1986,7 @@ def parse_args():
         "--note",
         type=str,
         default=None,
-        help="Optional note to store with feedback, prediction outcome updates, or strong-rejection status updates",
+        help="Optional note to store with feedback, evidence review updates, prediction outcome updates, or strong-rejection status updates",
     )
     parser.add_argument(
         "--source",
@@ -1920,6 +2089,37 @@ def parse_args():
         "--prediction-evidence-stats",
         action="store_true",
         help="Summarize stored prediction evidence hits and review flags",
+    )
+    parser.add_argument(
+        "--evidence-review-queue",
+        action="store_true",
+        help="List recent unreviewed evidence hits in review priority order and exit",
+    )
+    parser.add_argument(
+        "--evidence-review-stats",
+        action="store_true",
+        help="Summarize evidence review queue totals and status breakdowns",
+    )
+    parser.add_argument(
+        "--review-evidence",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Show full details for a stored evidence hit id and exit",
+    )
+    parser.add_argument(
+        "--accept-evidence",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark an evidence hit as accepted and exit",
+    )
+    parser.add_argument(
+        "--dismiss-evidence",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark an evidence hit as dismissed and exit",
     )
     parser.add_argument(
         "--strong-rejections",
@@ -3512,6 +3712,11 @@ def main():
             args.predictions,
             args.prediction_evidence,
             args.prediction_evidence_stats,
+            args.evidence_review_queue,
+            args.evidence_review_stats,
+            args.review_evidence is not None,
+            args.accept_evidence is not None,
+            args.dismiss_evidence is not None,
             args.scan_open_predictions,
             args.prediction_outcomes,
             args.prediction_outcome_stats,
@@ -3563,7 +3768,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if strong_rejection_action_count > 1:
@@ -3606,11 +3811,12 @@ def main():
     if (
         args.limit is not None
         and not args.prediction_evidence
+        and not args.evidence_review_queue
         and not args.scan_open_predictions
         and not args.strong_rejections
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --scan-open-predictions, or --strong-rejections."
+            "  [!] --limit can only be used with --prediction-evidence, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
         )
         sys.exit(1)
     if (
@@ -3623,11 +3829,13 @@ def main():
         and args.mark_expired is None
         and args.mark_failed is None
         and args.mark_unknown is None
+        and args.accept_evidence is None
+        and args.dismiss_evidence is None
         and args.mark_salvaged is None
         and args.dismiss_strong_rejection is None
     ):
         print(
-            "  [!] --note can only be used with --star, --dismiss, prediction outcome update flags, or strong-rejection status updates."
+            "  [!] --note can only be used with --star, --dismiss, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
         )
         sys.exit(1)
     if (
@@ -3649,6 +3857,9 @@ def main():
         ("--dive", args.dive),
         ("--prediction", args.prediction),
         ("--evidence-prediction", args.evidence_prediction),
+        ("--review-evidence", args.review_evidence),
+        ("--accept-evidence", args.accept_evidence),
+        ("--dismiss-evidence", args.dismiss_evidence),
         ("--mark-supported", args.mark_supported),
         ("--mark-contradicted", args.mark_contradicted),
         ("--mark-mixed", args.mark_mixed),
@@ -3714,6 +3925,39 @@ def main():
 
     if args.prediction_evidence_stats:
         _print_prediction_evidence_stats(get_prediction_evidence_stats())
+        return
+
+    if args.evidence_review_queue:
+        _print_prediction_evidence_review_queue(limit=args.limit or 20)
+        return
+
+    if args.evidence_review_stats:
+        _print_prediction_evidence_review_stats(
+            get_prediction_evidence_review_stats()
+        )
+        return
+
+    if args.review_evidence is not None:
+        if not _print_prediction_evidence_detail(args.review_evidence):
+            sys.exit(1)
+        return
+
+    if args.accept_evidence is not None:
+        if not _apply_prediction_evidence_review_status_update(
+            args.accept_evidence,
+            "accepted",
+            note=args.note,
+        ):
+            sys.exit(1)
+        return
+
+    if args.dismiss_evidence is not None:
+        if not _apply_prediction_evidence_review_status_update(
+            args.dismiss_evidence,
+            "dismissed",
+            note=args.note,
+        ):
+            sys.exit(1)
         return
 
     if args.strong_rejections:
