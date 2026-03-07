@@ -20,6 +20,7 @@ API_USAGE_INPUT_COLUMNS = ("input_tokens", "prompt_tokens")
 API_USAGE_OUTPUT_COLUMNS = ("output_tokens", "completion_tokens")
 API_USAGE_MODEL_COLUMNS = ("model", "model_name")
 API_USAGE_TIME_COLUMNS = ("timestamp", "created_at", "recorded_at", "date")
+VALID_STRONG_REJECTION_STATUSES = ("open", "salvaged", "dismissed")
 DB_PATH = str(
     Path(
         os.getenv("DB_PATH")
@@ -30,13 +31,17 @@ DB_PATH = str(
 os.environ["BLACKCLAW_DB_PATH"] = DB_PATH
 
 from store import (
+    get_strong_rejection,
+    get_strong_rejection_stats,
     get_prediction_evidence_hit,
     get_prediction_evidence_review_stats,
     get_prediction_outcome_review,
     get_prediction_outcome_suggestion_stats,
     init_db,
+    list_strong_rejections,
     list_prediction_evidence_review_queue,
     list_prediction_outcome_review_queue,
+    update_strong_rejection_status,
     update_prediction_evidence_review_status,
 )
 
@@ -119,6 +124,30 @@ def _update_evidence_review_status_response(
         {
             "ok": True,
             "evidence": get_prediction_evidence_hit(evidence_id),
+        }
+    )
+
+
+def _update_strong_rejection_status_response(
+    rejection_id: int,
+    status: str,
+):
+    try:
+        payload = _parse_optional_json_object()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    updated = update_strong_rejection_status(
+        rejection_id,
+        status,
+        notes=_parse_optional_note_payload(payload),
+    )
+    if not updated:
+        return jsonify({"error": "strong rejection not found", "id": rejection_id}), 404
+    return jsonify(
+        {
+            "ok": True,
+            "strong_rejection": get_strong_rejection(rejection_id),
         }
     )
 
@@ -845,6 +874,56 @@ def api_outcome_suggestion_stats():
     return jsonify(get_prediction_outcome_suggestion_stats())
 
 
+@app.get("/api/strong-rejections")
+def api_strong_rejections():
+    limit = _parse_positive_int(request.args.get("limit"), 20)
+    raw_status = _clean_optional_text(request.args.get("status"))
+    if raw_status is None:
+        status = None
+    else:
+        status = raw_status.lower()
+        if status not in VALID_STRONG_REJECTION_STATUSES:
+            return (
+                jsonify(
+                    {
+                        "error": "status must be one of: "
+                        + ", ".join(VALID_STRONG_REJECTION_STATUSES)
+                    }
+                ),
+                400,
+            )
+    return jsonify(
+        list_strong_rejections(
+            limit=limit,
+            status=status,
+            open_first=status is None,
+        )
+    )
+
+
+@app.get("/api/strong-rejection/<int:rejection_id>")
+def api_strong_rejection_detail(rejection_id: int):
+    row = get_strong_rejection(rejection_id)
+    if row is None:
+        return jsonify({"error": "strong rejection not found", "id": rejection_id}), 404
+    return jsonify(row)
+
+
+@app.get("/api/strong-rejection-stats")
+def api_strong_rejection_stats():
+    return jsonify(get_strong_rejection_stats())
+
+
+@app.post("/api/strong-rejection/<int:rejection_id>/salvage")
+def api_salvage_strong_rejection(rejection_id: int):
+    return _update_strong_rejection_status_response(rejection_id, "salvaged")
+
+
+@app.post("/api/strong-rejection/<int:rejection_id>/dismiss")
+def api_dismiss_strong_rejection(rejection_id: int):
+    return _update_strong_rejection_status_response(rejection_id, "dismissed")
+
+
 @app.get("/")
 def index():
     return """<!doctype html>
@@ -1138,6 +1217,10 @@ def index():
     .detail-panel p {
       margin: 0 0 10px;
     }
+    .detail-panel ul {
+      margin: 0 0 10px 18px;
+      padding: 0;
+    }
     .detail-stack {
       display: grid;
       gap: 10px;
@@ -1233,6 +1316,14 @@ def index():
   </section>
 
   <section>
+    <h2>Strong Rejections</h2>
+    <p class="muted">Salvage queue for locally stored high-scoring rejects. Open items are shown first by default; click a row to inspect and optionally mark it salvaged or dismissed.</p>
+    <div id="strong-rejection-stats" class="grid"><p class="muted">Loading…</p></div>
+    <div id="strong-rejection-queue"></div>
+    <div id="strong-rejection-detail" class="detail-panel"><p class="muted">Select a strong rejection to inspect details.</p></div>
+  </section>
+
+  <section>
     <h2>Transmissions</h2>
     <div id="grade-summary" class="grade-summary muted" hidden></div>
     <p id="transmission-count" class="muted">Loading…</p>
@@ -1259,8 +1350,10 @@ def index():
     let transmissionRows = [];
     let evidenceQueueRows = [];
     let outcomeQueueRows = [];
+    let strongRejectionRows = [];
     let selectedEvidenceId = null;
     let selectedOutcomePredictionId = null;
+    let selectedStrongRejectionId = null;
 
     function applyTheme() {
       document.documentElement.dataset.theme = isDarkMode ? "dark" : "light";
@@ -1395,6 +1488,48 @@ def index():
           `).join("")}
         </div>
       `;
+    }
+
+    function formatJsonForDisplay(value) {
+      if (value == null) {
+        return null;
+      }
+      if (typeof value === "string") {
+        const text = value.trim();
+        return text || null;
+      }
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (error) {
+        return String(value);
+      }
+    }
+
+    function renderJsonDetailSection(title, value) {
+      const text = formatJsonForDisplay(value);
+      if (!text) {
+        return "";
+      }
+      return `
+        <details open>
+          <summary>${escapeHtml(title)}</summary>
+          <pre>${escapeHtml(text)}</pre>
+        </details>
+      `;
+    }
+
+    function renderReasonList(items) {
+      if (!Array.isArray(items) || !items.length) {
+        return "—";
+      }
+      return `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+    }
+
+    function formatPathValue(path) {
+      if (!Array.isArray(path) || !path.length) {
+        return "—";
+      }
+      return path.join(" -> ");
     }
 
     function killRateClass(count, total) {
@@ -2019,6 +2154,165 @@ def index():
       }
     }
 
+    function renderStrongRejectionStats(stats) {
+      const items = [
+        { label: "Total strong rejections", value: stats.total || 0 },
+        { label: "Open", value: stats.open || 0, valueClass: "score-accent" },
+        { label: "Salvaged", value: stats.salvaged || 0 },
+        { label: "Dismissed", value: stats.dismissed || 0 },
+        { label: "Avg total score", value: formatScore(stats.average_total_score), valueClass: "score-accent" },
+      ];
+      document.getElementById("strong-rejection-stats").innerHTML = items.map((item) => `
+        <div class="stat">
+          <div class="muted">${escapeHtml(item.label)}</div>
+          <div class="stat-value ${item.valueClass || ""}">${escapeHtml(item.value)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderStrongRejectionQueue(rows) {
+      strongRejectionRows = rows;
+      const container = document.getElementById("strong-rejection-queue");
+      if (!rows.length) {
+        container.innerHTML = "<p class=\\"muted\\">No strong rejections found.</p>";
+        return;
+      }
+      const body = rows.map((row) => `
+        <tr
+          class="review-table-row ${Number(row.id) === selectedStrongRejectionId ? "is-selected" : ""}"
+          data-strong-rejection-id="${escapeHtml(row.id)}"
+        >
+          <td>${escapeHtml(row.id)}</td>
+          <td>${renderStatusPill(row.status)}</td>
+          <td class="score-accent">${escapeHtml(formatScore(row.total_score))}</td>
+          <td>${escapeHtml(row.mechanism_type || "unknown")}</td>
+          <td>${escapeHtml(row.seed_domain || "—")}</td>
+          <td>${escapeHtml(row.target_domain || "—")}</td>
+          <td>${escapeHtml(row.rejection_stage || "—")}</td>
+          <td>${escapeHtml(truncateText(row.salvage_reason || "—", 90))}</td>
+          <td>${escapeHtml(formatTimestamp(row.timestamp))}</td>
+        </tr>
+      `).join("");
+      container.innerHTML = `
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Rejection ID</th>
+                <th>Status</th>
+                <th>Total score</th>
+                <th>Mechanism type</th>
+                <th>Seed domain</th>
+                <th>Target domain</th>
+                <th>Rejection stage</th>
+                <th>Salvage reason</th>
+                <th>Timestamp</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+      attachStrongRejectionQueueHandlers();
+    }
+
+    function attachStrongRejectionQueueHandlers() {
+      document.querySelectorAll("#strong-rejection-queue [data-strong-rejection-id]").forEach((row) => {
+        row.addEventListener("click", () => {
+          loadStrongRejectionDetail(Number(row.dataset.strongRejectionId));
+        });
+      });
+    }
+
+    function renderStrongRejectionDetail(payload) {
+      return `
+        ${renderDetailGrid([
+          { label: "Rejection ID", value: payload.id },
+          { label: "Timestamp", value: formatTimestamp(payload.timestamp) },
+          { label: "Status", valueHtml: renderStatusPill(payload.status) },
+          { label: "Exploration ID", value: payload.exploration_id ?? "—" },
+          { label: "Seed domain", value: payload.seed_domain || "—" },
+          { label: "Target domain", value: payload.target_domain || "—" },
+          { label: "Total score", value: formatScore(payload.total_score) },
+          { label: "Novelty score", value: formatScore(payload.novelty_score) },
+          { label: "Distance score", value: formatScore(payload.distance_score) },
+          { label: "Depth score", value: formatScore(payload.depth_score) },
+          { label: "Prediction quality", value: formatScore(payload.prediction_quality_score) },
+          { label: "Mechanism type", value: payload.mechanism_type || "—" },
+          { label: "Rejection stage", value: payload.rejection_stage || "—" },
+        ])}
+        <p><strong>Path:</strong> ${escapeHtml(formatPathValue(payload.path))}</p>
+        <p><strong>Salvage reason:</strong> ${escapeHtml(payload.salvage_reason || "—")}</p>
+        <p><strong>Rejection reasons:</strong></p>
+        ${renderReasonList(payload.rejection_reasons)}
+        <p><strong>Notes:</strong> ${escapeHtml(payload.notes || "—")}</p>
+        <div class="review-actions">
+          <input
+            type="text"
+            class="strong-rejection-note-input"
+            placeholder="Optional note"
+            value="${inputValue(payload.notes)}"
+          >
+          <button type="button" class="strong-rejection-action" data-action="salvage" data-strong-rejection-id="${escapeHtml(payload.id)}">Mark salvaged</button>
+          <button type="button" class="strong-rejection-action" data-action="dismiss" data-strong-rejection-id="${escapeHtml(payload.id)}">Dismiss</button>
+          <span class="review-status"></span>
+        </div>
+        ${renderJsonDetailSection("Connection payload", payload.connection_payload)}
+        ${renderJsonDetailSection("Validation", payload.validation)}
+        ${renderJsonDetailSection("Evidence map", payload.evidence_map)}
+        ${renderJsonDetailSection("Mechanism typing", payload.mechanism_typing)}
+      `;
+    }
+
+    async function loadStrongRejectionDetail(rejectionId) {
+      selectedStrongRejectionId = rejectionId;
+      renderStrongRejectionQueue(strongRejectionRows);
+      const panel = document.getElementById("strong-rejection-detail");
+      panel.innerHTML = "<p class=\\"muted\\">Loading strong rejection detail…</p>";
+      try {
+        const payload = await fetchJson(`/api/strong-rejection/${rejectionId}`);
+        panel.innerHTML = renderStrongRejectionDetail(payload);
+        attachStrongRejectionActionHandlers();
+      } catch (error) {
+        panel.innerHTML = `<div class="error">${escapeHtml(
+          error instanceof Error ? error.message : "Failed to load strong rejection detail"
+        )}</div>`;
+      }
+    }
+
+    function attachStrongRejectionActionHandlers() {
+      document.querySelectorAll("#strong-rejection-detail .strong-rejection-action").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const panel = button.closest(".detail-panel");
+          const noteInput = panel.querySelector(".strong-rejection-note-input");
+          const status = panel.querySelector(".review-status");
+          const buttons = panel.querySelectorAll(".strong-rejection-action");
+          const rejectionId = Number(button.dataset.strongRejectionId);
+          const action = button.dataset.action;
+
+          status.textContent = "Saving...";
+          buttons.forEach((item) => {
+            item.disabled = true;
+          });
+          noteInput.disabled = true;
+
+          try {
+            await postJson(`/api/strong-rejection/${rejectionId}/${action}`, {
+              note: noteInput.value,
+            });
+            await loadReviewData();
+          } catch (error) {
+            status.textContent = error instanceof Error ? error.message : "Save failed";
+          } finally {
+            buttons.forEach((item) => {
+              item.disabled = false;
+            });
+            noteInput.disabled = false;
+          }
+        });
+      });
+    }
+
     function renderGradeSummary(rows) {
       const summary = document.getElementById("grade-summary");
       const counts = Object.fromEntries(GRADE_OPTIONS.map((grade) => [grade, 0]));
@@ -2173,21 +2467,30 @@ def index():
         evidenceReviewQueue,
         outcomeReviewQueue,
         outcomeSuggestionStats,
+        strongRejectionStats,
+        strongRejectionQueue,
       ] = await Promise.all([
         fetchJson("/api/evidence-review-stats"),
         fetchJson("/api/evidence-review-queue?limit=25"),
         fetchJson("/api/outcome-review-queue?limit=25"),
         fetchJson("/api/outcome-suggestion-stats"),
+        fetchJson("/api/strong-rejection-stats"),
+        fetchJson("/api/strong-rejections?limit=25"),
       ]);
       renderEvidenceReviewStats(evidenceReviewStats);
       renderEvidenceReviewQueue(evidenceReviewQueue);
       renderOutcomeSuggestionStats(outcomeSuggestionStats);
       renderOutcomeReviewQueue(outcomeReviewQueue);
+      renderStrongRejectionStats(strongRejectionStats);
+      renderStrongRejectionQueue(strongRejectionQueue);
       if (selectedEvidenceId != null) {
         await loadEvidenceDetail(selectedEvidenceId);
       }
       if (selectedOutcomePredictionId != null) {
         await loadOutcomeReviewDetail(selectedOutcomePredictionId);
+      }
+      if (selectedStrongRejectionId != null) {
+        await loadStrongRejectionDetail(selectedStrongRejectionId);
       }
     }
 

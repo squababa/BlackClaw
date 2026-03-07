@@ -3432,10 +3432,22 @@ def save_strong_rejection(
 def list_strong_rejections(
     limit: int = 20,
     status: str | None = None,
+    open_first: bool = False,
 ) -> list[dict]:
     """List stored strong rejections newest-first, optionally filtered by status."""
     conn = _connect()
     safe_limit = max(1, int(limit))
+    order_by = "ORDER BY timestamp DESC, id DESC"
+    if status is None and open_first:
+        order_by = """ORDER BY
+                CASE LOWER(COALESCE(status, ''))
+                    WHEN 'open' THEN 0
+                    WHEN 'salvaged' THEN 1
+                    WHEN 'dismissed' THEN 2
+                    ELSE 3
+                END ASC,
+                timestamp DESC,
+                id DESC"""
     if status is None:
         rows = conn.execute(
             """SELECT
@@ -3461,7 +3473,9 @@ def list_strong_rejections(
                 status,
                 notes
             FROM strong_rejections
-            ORDER BY timestamp DESC, id DESC
+            """
+            + order_by
+            + """
             LIMIT ?""",
             (safe_limit,),
         ).fetchall()
@@ -3498,6 +3512,38 @@ def list_strong_rejections(
         ).fetchall()
     conn.close()
     return [_strong_rejection_row_to_dict(row) for row in rows]
+
+
+def get_strong_rejection_stats() -> dict:
+    """Summarize strong rejection review status totals and average score."""
+    conn = _connect()
+    by_status = {label: 0 for label in STRONG_REJECTION_STATUSES}
+    for row in conn.execute(
+        """SELECT status, COUNT(*) AS count
+        FROM strong_rejections
+        GROUP BY status"""
+    ).fetchall():
+        status = _normalize_strong_rejection_status(row["status"])
+        by_status[status] += int(row["count"] or 0)
+
+    average_total_score = _coerce_optional_float(
+        conn.execute(
+            """SELECT AVG(total_score) AS average_total_score
+            FROM strong_rejections"""
+        ).fetchone()["average_total_score"]
+    )
+    conn.close()
+    return {
+        "total": sum(int(count or 0) for count in by_status.values()),
+        "open": int(by_status.get("open", 0) or 0),
+        "salvaged": int(by_status.get("salvaged", 0) or 0),
+        "dismissed": int(by_status.get("dismissed", 0) or 0),
+        "average_total_score": (
+            round(average_total_score, 3)
+            if average_total_score is not None
+            else None
+        ),
+    }
 
 
 def get_strong_rejection(id: int) -> dict | None:
