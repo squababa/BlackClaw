@@ -14,6 +14,7 @@ from prediction_enforcement import (
     evaluate_prediction_quality,
     prediction_quality_label,
     prediction_summary_text,
+    prediction_test_text,
 )
 from hypothesis_validation import (
     mechanism_typing_summary_text,
@@ -41,6 +42,7 @@ from store import (
     increment_llm_calls,
     list_predictions,
     list_prediction_outcomes,
+    get_prediction_outcome_review,
     list_prediction_outcome_review_queue,
     get_prediction_outcome_stats,
     list_near_misses,
@@ -130,6 +132,12 @@ def _parse_report_only_args():
     parser.add_argument(
         "--outcome-review-queue",
         action="store_true",
+    )
+    parser.add_argument(
+        "--outcome-review",
+        type=int,
+        default=None,
+        metavar="ID",
     )
     parser.add_argument(
         "--evidence-review-queue",
@@ -798,6 +806,117 @@ def _print_prediction_outcome_review_queue(limit: int = 20):
             f"{_truncate_text(mechanism_type, 24)}\t"
             f"{summary}"
         )
+
+
+def _print_outcome_review_hits_section(
+    title: str,
+    rows: list[dict],
+    total_count: int,
+):
+    """Render one evidence-hit subsection for a manual outcome review page."""
+    print(f"[PredictionOutcomeReview] {title} ({len(rows)} shown of {int(total_count or 0)})")
+    if not rows:
+        print("none")
+        return
+    for row in rows:
+        score_text = (
+            f"{float(row.get('score')):.3f}" if row.get("score") is not None else "—"
+        )
+        print(
+            f"{row.get('id')}\t{row.get('classification')}\t{row.get('review_status')}\t"
+            f"score={score_text}\t{_short_timestamp(row.get('scan_timestamp'))}"
+        )
+        print(f"title\t{_truncate_text(row.get('title'), 120)}")
+        print(f"url\t{row.get('url') or '—'}")
+        print(f"snippet\t{_truncate_text(row.get('snippet'), 180)}")
+        print(f"query\t{_truncate_text(row.get('query_used'), 140)}")
+
+
+def _print_prediction_outcome_review(prediction_id: int) -> bool:
+    """Render one prediction with local evidence detail for manual outcome review."""
+    row = get_prediction_outcome_review(prediction_id)
+    if row is None:
+        print(f"  [!] Prediction #{prediction_id} not found.")
+        return False
+
+    print(f"[PredictionOutcomeReview] Prediction #{prediction_id}")
+    print(f"prediction_id\t{row.get('id')}")
+    print(f"transmission_number\t{row.get('transmission_number')}")
+    print(f"status\t{row.get('status') or 'unknown'}")
+    print(f"outcome_status\t{row.get('outcome_status') or 'open'}")
+    print(f"created_at\t{row.get('created_at') or '—'}")
+    print(f"validated_at\t{row.get('validated_at') or '—'}")
+    utility_text = row.get("utility_class") or "unknown"
+    print(f"utility_class\t{utility_text if utility_text != 'unknown' else '—'}")
+    print(f"mechanism_type\t{row.get('mechanism_type') or '—'}")
+    print(f"source_domain\t{row.get('source_domain') or '—'}")
+    print(f"target_domain\t{row.get('target_domain') or '—'}")
+    quality_score = row.get("prediction_quality_score")
+    print(
+        "prediction_quality_score\t"
+        + (f"{float(quality_score):.3f}" if quality_score is not None else "—")
+    )
+    depth_score = row.get("depth_score")
+    print("depth_score\t" + (f"{float(depth_score):.3f}" if depth_score is not None else "—"))
+    adversarial_score = row.get("adversarial_survival_score")
+    print(
+        "adversarial_survival_score\t"
+        + (f"{float(adversarial_score):.3f}" if adversarial_score is not None else "—")
+    )
+
+    print("[PredictionOutcomeReview] Prediction content")
+    print(f"summary\t{row.get('prediction_summary') or '—'}")
+    statement = row.get("prediction_statement")
+    if statement and statement != row.get("prediction_summary"):
+        print(f"statement\t{statement}")
+    test_summary = row.get("test_summary")
+    if test_summary is None:
+        prediction_payload = row.get("prediction_json") or {}
+        test_summary = prediction_test_text(row.get("test"), prediction_payload)
+    print(
+        "test_summary\t"
+        + (
+            _truncate_text(str(test_summary).replace("\n", " | "), 200)
+            if test_summary
+            else "—"
+        )
+    )
+    print(f"falsification_condition\t{row.get('falsification_condition') or '—'}")
+
+    print("[PredictionOutcomeReview] Evidence counts")
+    print(f"accepted_support_hits\t{int(row.get('accepted_support_hits', 0) or 0)}")
+    print(
+        f"accepted_contradiction_hits\t{int(row.get('accepted_contradiction_hits', 0) or 0)}"
+    )
+    print(
+        f"unreviewed_reviewable_hits\t{int(row.get('unreviewed_reviewable_hits', 0) or 0)}"
+    )
+    print(
+        f"dismissed_reviewable_hits\t{int(row.get('dismissed_reviewable_hits', 0) or 0)}"
+    )
+    print(f"accepted_unclear_hits\t{int(row.get('accepted_unclear_hits', 0) or 0)}")
+    print(f"total_hits\t{int(row.get('total_hits', 0) or 0)}")
+
+    _print_outcome_review_hits_section(
+        "Accepted support hits",
+        row.get("accepted_support_examples") or [],
+        row.get("accepted_support_hits", 0),
+    )
+    _print_outcome_review_hits_section(
+        "Accepted contradiction hits",
+        row.get("accepted_contradiction_examples") or [],
+        row.get("accepted_contradiction_hits", 0),
+    )
+    _print_outcome_review_hits_section(
+        "Unreviewed reviewable hits",
+        row.get("unreviewed_reviewable_examples") or [],
+        row.get("unreviewed_reviewable_hits", 0),
+    )
+
+    print("[PredictionOutcomeReview] Recommendation")
+    print(f"label\t{row.get('recommendation') or 'insufficient_evidence'}")
+    print(f"rationale\t{row.get('recommendation_rationale') or '—'}")
+    return True
 
 
 def _print_credibility_stats(report: dict, window_requested: int):
@@ -1478,6 +1597,7 @@ if __name__ == "__main__":
             _early_report_args.prediction_evidence,
             _early_report_args.prediction_evidence_stats,
             _early_report_args.outcome_review_queue,
+            _early_report_args.outcome_review is not None,
             _early_report_args.evidence_review_queue,
             _early_report_args.evidence_review_stats,
             _early_report_args.review_evidence is not None,
@@ -1546,7 +1666,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_prediction_action_count > 1:
         print(
-            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
+            "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --outcome-review, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
         )
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
@@ -1622,6 +1742,7 @@ if __name__ == "__main__":
         sys.exit(1)
     for flag_name, prediction_id in (
         ("--prediction", _early_report_args.prediction),
+        ("--outcome-review", _early_report_args.outcome_review),
         ("--evidence-prediction", _early_report_args.evidence_prediction),
         ("--review-evidence", _early_report_args.review_evidence),
         ("--accept-evidence", _early_report_args.accept_evidence),
@@ -1654,6 +1775,7 @@ if __name__ == "__main__":
         or _early_report_args.prediction_evidence
         or _early_report_args.prediction_evidence_stats
         or _early_report_args.outcome_review_queue
+        or _early_report_args.outcome_review is not None
         or _early_report_args.evidence_review_queue
         or _early_report_args.evidence_review_stats
         or _early_report_args.review_evidence is not None
@@ -1723,6 +1845,13 @@ if __name__ == "__main__":
             _print_prediction_outcome_review_queue(
                 limit=_early_report_args.limit or 20
             )
+        if (
+            _early_report_args.outcome_review is not None
+            and not _print_prediction_outcome_review(
+                _early_report_args.outcome_review
+            )
+        ):
+            sys.exit(1)
         if _early_report_args.evidence_review_queue:
             _print_prediction_evidence_review_queue(
                 limit=_early_report_args.limit or 20
@@ -2139,6 +2268,13 @@ def parse_args():
         "--outcome-review-queue",
         action="store_true",
         help="List predictions ready for manual outcome review and exit",
+    )
+    parser.add_argument(
+        "--outcome-review",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Show local manual-review detail for one prediction id and exit",
     )
     parser.add_argument(
         "--evidence-review-queue",
@@ -3763,6 +3899,7 @@ def main():
             args.prediction_evidence,
             args.prediction_evidence_stats,
             args.outcome_review_queue,
+            args.outcome_review is not None,
             args.evidence_review_queue,
             args.evidence_review_stats,
             args.review_evidence is not None,
@@ -3819,7 +3956,7 @@ def main():
         sys.exit(1)
     if prediction_action_count > 1:
         print(
-            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
+            "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --outcome-review-queue, --outcome-review, --evidence-review-queue, --evidence-review-stats, --review-evidence, --accept-evidence, --dismiss-evidence, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
     if strong_rejection_action_count > 1:
@@ -3908,6 +4045,7 @@ def main():
         ("--dismiss", args.dismiss),
         ("--dive", args.dive),
         ("--prediction", args.prediction),
+        ("--outcome-review", args.outcome_review),
         ("--evidence-prediction", args.evidence_prediction),
         ("--review-evidence", args.review_evidence),
         ("--accept-evidence", args.accept_evidence),
@@ -3981,6 +4119,11 @@ def main():
 
     if args.outcome_review_queue:
         _print_prediction_outcome_review_queue(limit=args.limit or 20)
+        return
+
+    if args.outcome_review is not None:
+        if not _print_prediction_outcome_review(args.outcome_review):
+            sys.exit(1)
         return
 
     if args.evidence_review_queue:

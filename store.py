@@ -1786,7 +1786,7 @@ def _prediction_outcome_review_recommendation(
     accepted_support_hits: object,
     accepted_contradiction_hits: object,
     unreviewed_reviewable_hits: object,
-) -> str | None:
+) -> str:
     """Label one prediction for the manual outcome-review queue."""
     support = max(0, int(accepted_support_hits or 0))
     contradiction = max(0, int(accepted_contradiction_hits or 0))
@@ -1799,7 +1799,26 @@ def _prediction_outcome_review_recommendation(
         return "conflicting_evidence"
     if unreviewed > 0:
         return "waiting_on_review"
-    return None
+    return "insufficient_evidence"
+
+
+def _prediction_outcome_review_rationale(recommendation: object) -> str:
+    """Explain one manual outcome-review recommendation in plain text."""
+    label = _clean_optional_text(recommendation) or "insufficient_evidence"
+    if label == "review_for_support":
+        return "Accepted support hits exist and no accepted contradiction hits are present."
+    if label == "review_for_contradiction":
+        return (
+            "Accepted contradiction hits exist and no accepted support hits are present."
+        )
+    if label == "conflicting_evidence":
+        return (
+            "Both accepted support and accepted contradiction hits exist; "
+            "manual resolution should likely be mixed or deferred."
+        )
+    if label == "waiting_on_review":
+        return "No accepted evidence yet, but unreviewed reviewable hits remain."
+    return "No accepted or unreviewed reviewable evidence exists."
 
 
 def _prediction_outcome_review_row_to_dict(row: sqlite3.Row | dict) -> dict:
@@ -1915,6 +1934,163 @@ def list_prediction_outcome_review_queue(limit: int | None = 20) -> list[dict]:
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return [_prediction_outcome_review_row_to_dict(row) for row in rows]
+
+
+def get_prediction_outcome_review(
+    id: int,
+    max_hits_per_group: int = 3,
+) -> dict | None:
+    """Fetch one prediction with local evidence detail for manual outcome review."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            p.id,
+            p.transmission_number,
+            p.prediction,
+            p.test,
+            p.metric,
+            p.prediction_json,
+            p.prediction_quality_json,
+            p.prediction_quality_score,
+            p.status,
+            p.outcome_status,
+            p.validation_source,
+            p.validation_note,
+            p.validated_at,
+            p.utility_class,
+            p.last_scanned_at,
+            p.needs_review,
+            p.notes,
+            p.created_at,
+            p.updated_at,
+            t.mechanism_typing_json,
+            e.seed_domain AS source_domain,
+            e.jump_target_domain AS target_domain,
+            e.depth_score,
+            e.adversarial_rubric_json
+        FROM predictions p
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        LEFT JOIN explorations e
+            ON e.id = t.exploration_id
+        WHERE p.id = ?
+        LIMIT 1""",
+        (id,),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return None
+
+    evidence_rows = conn.execute(
+        """SELECT
+            id,
+            prediction_id,
+            scan_timestamp,
+            source_type,
+            title,
+            url,
+            snippet,
+            classification,
+            score,
+            query_used,
+            review_status,
+            notes,
+            created_at,
+            updated_at
+        FROM prediction_evidence_hits
+        WHERE prediction_id = ?
+        ORDER BY
+            COALESCE(NULLIF(scan_timestamp, ''), created_at) DESC,
+            id DESC""",
+        (id,),
+    ).fetchall()
+    conn.close()
+
+    payload = _prediction_context_row_to_dict(row)
+    normalized_prediction = (
+        payload.get("prediction_json")
+        if isinstance(payload.get("prediction_json"), dict)
+        else {}
+    )
+    payload["prediction_summary"] = (
+        prediction_summary_text(normalized_prediction)
+        or _clean_optional_text(payload.get("prediction"))
+        or "—"
+    )
+    payload["prediction_statement"] = (
+        _clean_optional_text(normalized_prediction.get("statement"))
+        or _clean_optional_text(payload.get("prediction"))
+        or None
+    )
+    payload["test_summary"] = prediction_test_text(
+        payload.get("test"),
+        normalized_prediction,
+    )
+    payload["falsification_condition"] = _clean_optional_text(
+        normalized_prediction.get("falsification_condition")
+    )
+
+    safe_max = max(1, int(max_hits_per_group))
+    accepted_support_examples: list[dict] = []
+    accepted_contradiction_examples: list[dict] = []
+    unreviewed_reviewable_examples: list[dict] = []
+    total_hits = 0
+    accepted_support_hits = 0
+    accepted_contradiction_hits = 0
+    unreviewed_reviewable_hits = 0
+    dismissed_reviewable_hits = 0
+    accepted_unclear_hits = 0
+    all_hits = [_prediction_evidence_row_to_dict(item) for item in evidence_rows]
+    for hit in all_hits:
+        total_hits += 1
+        classification = hit["classification"]
+        review_status = hit["review_status"]
+        if classification == "possible_support" and review_status == "accepted":
+            accepted_support_hits += 1
+            if len(accepted_support_examples) < safe_max:
+                accepted_support_examples.append(hit)
+        if classification == "possible_contradiction" and review_status == "accepted":
+            accepted_contradiction_hits += 1
+            if len(accepted_contradiction_examples) < safe_max:
+                accepted_contradiction_examples.append(hit)
+        if (
+            classification in PREDICTION_EVIDENCE_REVIEWABLE_CLASSIFICATIONS
+            and review_status == "unreviewed"
+        ):
+            unreviewed_reviewable_hits += 1
+            if len(unreviewed_reviewable_examples) < safe_max:
+                unreviewed_reviewable_examples.append(hit)
+        if (
+            classification in PREDICTION_EVIDENCE_REVIEWABLE_CLASSIFICATIONS
+            and review_status == "dismissed"
+        ):
+            dismissed_reviewable_hits += 1
+        if classification == "unclear" and review_status == "accepted":
+            accepted_unclear_hits += 1
+
+    recommendation = _prediction_outcome_review_recommendation(
+        accepted_support_hits,
+        accepted_contradiction_hits,
+        unreviewed_reviewable_hits,
+    )
+    payload.update(
+        {
+            "accepted_support_hits": accepted_support_hits,
+            "accepted_contradiction_hits": accepted_contradiction_hits,
+            "unreviewed_reviewable_hits": unreviewed_reviewable_hits,
+            "dismissed_reviewable_hits": dismissed_reviewable_hits,
+            "accepted_unclear_hits": accepted_unclear_hits,
+            "total_hits": total_hits,
+            "accepted_support_examples": accepted_support_examples,
+            "accepted_contradiction_examples": accepted_contradiction_examples,
+            "unreviewed_reviewable_examples": unreviewed_reviewable_examples,
+            "recommendation": recommendation,
+            "recommendation_rationale": _prediction_outcome_review_rationale(
+                recommendation
+            ),
+        }
+    )
+    return payload
 
 
 def _empty_outcome_bucket() -> dict:
