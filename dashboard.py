@@ -20,17 +20,32 @@ API_USAGE_INPUT_COLUMNS = ("input_tokens", "prompt_tokens")
 API_USAGE_OUTPUT_COLUMNS = ("output_tokens", "completion_tokens")
 API_USAGE_MODEL_COLUMNS = ("model", "model_name")
 API_USAGE_TIME_COLUMNS = ("timestamp", "created_at", "recorded_at", "date")
-DB_PATH = (
-    os.getenv("DB_PATH")
-    or os.getenv("BLACKCLAW_DB_PATH")
-    or "blackclaw.db"
+DB_PATH = str(
+    Path(
+        os.getenv("DB_PATH")
+        or os.getenv("BLACKCLAW_DB_PATH")
+        or "blackclaw.db"
+    ).expanduser().resolve()
+)
+os.environ["BLACKCLAW_DB_PATH"] = DB_PATH
+
+from store import (
+    get_prediction_evidence_hit,
+    get_prediction_evidence_review_stats,
+    get_prediction_outcome_review,
+    get_prediction_outcome_suggestion_stats,
+    init_db,
+    list_prediction_evidence_review_queue,
+    list_prediction_outcome_review_queue,
+    update_prediction_evidence_review_status,
 )
 
 app = Flask(__name__)
+init_db()
 
 
 def _db_uri(mode: str = "ro") -> str:
-    return f"{Path(DB_PATH).resolve().as_uri()}?mode={mode}"
+    return f"{Path(DB_PATH).as_uri()}?mode={mode}"
 
 
 def _connect() -> sqlite3.Connection:
@@ -59,6 +74,53 @@ def _parse_positive_int(raw_value: str | None, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _clean_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_optional_json_object() -> dict:
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError("expected JSON object payload")
+    return payload
+
+
+def _parse_optional_note_payload(payload: dict) -> str | None:
+    raw_note = payload.get("note")
+    if raw_note is None:
+        raw_note = payload.get("notes")
+    return _clean_optional_text(raw_note)
+
+
+def _update_evidence_review_status_response(
+    evidence_id: int,
+    review_status: str,
+):
+    try:
+        payload = _parse_optional_json_object()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    updated = update_prediction_evidence_review_status(
+        evidence_id,
+        review_status,
+        notes=_parse_optional_note_payload(payload),
+    )
+    if not updated:
+        return jsonify({"error": "evidence hit not found", "id": evidence_id}), 404
+    return jsonify(
+        {
+            "ok": True,
+            "evidence": get_prediction_evidence_hit(evidence_id),
+        }
+    )
 
 
 def _pick_existing_column(
@@ -735,6 +797,54 @@ def api_top_killed():
     return jsonify(_get_top_killed())
 
 
+@app.get("/api/evidence-review-queue")
+def api_evidence_review_queue():
+    limit = _parse_positive_int(request.args.get("limit"), 20)
+    return jsonify(list_prediction_evidence_review_queue(limit=limit))
+
+
+@app.get("/api/evidence-review-stats")
+def api_evidence_review_stats():
+    return jsonify(get_prediction_evidence_review_stats())
+
+
+@app.get("/api/evidence/<int:evidence_id>")
+def api_evidence_detail(evidence_id: int):
+    row = get_prediction_evidence_hit(evidence_id)
+    if row is None:
+        return jsonify({"error": "evidence hit not found", "id": evidence_id}), 404
+    return jsonify(row)
+
+
+@app.post("/api/evidence/<int:evidence_id>/accept")
+def api_accept_evidence(evidence_id: int):
+    return _update_evidence_review_status_response(evidence_id, "accepted")
+
+
+@app.post("/api/evidence/<int:evidence_id>/dismiss")
+def api_dismiss_evidence(evidence_id: int):
+    return _update_evidence_review_status_response(evidence_id, "dismissed")
+
+
+@app.get("/api/outcome-review-queue")
+def api_outcome_review_queue():
+    limit = _parse_positive_int(request.args.get("limit"), 20)
+    return jsonify(list_prediction_outcome_review_queue(limit=limit))
+
+
+@app.get("/api/outcome-review/<int:prediction_id>")
+def api_outcome_review_detail(prediction_id: int):
+    row = get_prediction_outcome_review(prediction_id)
+    if row is None:
+        return jsonify({"error": "prediction not found", "id": prediction_id}), 404
+    return jsonify(row)
+
+
+@app.get("/api/outcome-suggestion-stats")
+def api_outcome_suggestion_stats():
+    return jsonify(get_prediction_outcome_suggestion_stats())
+
+
 @app.get("/")
 def index():
     return """<!doctype html>
@@ -788,10 +898,15 @@ def index():
     .stat,
     details,
     .transmission-item,
+    .detail-panel,
+    .detail-card,
+    .detail-item,
     .theme-toggle,
     .grade-controls select,
     .grade-controls input,
     .grade-controls button,
+    .review-actions input,
+    .review-actions button,
     .adversarial-detail,
     .adversarial-detail pre,
     table,
@@ -987,12 +1102,91 @@ def index():
       padding: 8px;
       border: 1px solid var(--border-color);
     }
+    .table-shell {
+      overflow-x: auto;
+    }
+    .review-table-row {
+      cursor: pointer;
+    }
+    .review-table-row:hover,
+    .review-table-row.is-selected {
+      background: var(--row-hover);
+    }
+    .detail-panel {
+      margin-top: 12px;
+      border: 1px solid var(--border-color);
+      padding: 12px;
+      background: var(--panel-alt);
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .detail-item {
+      border: 1px solid var(--border-color);
+      padding: 10px;
+      background: var(--panel-bg);
+    }
+    .detail-label {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .detail-panel p {
+      margin: 0 0 10px;
+    }
+    .detail-stack {
+      display: grid;
+      gap: 10px;
+    }
+    .detail-card {
+      border: 1px solid var(--border-color);
+      padding: 10px;
+      background: var(--panel-bg);
+    }
+    .detail-card p {
+      margin: 0 0 8px;
+    }
+    .status-pill {
+      display: inline-block;
+      border: 1px solid var(--border-color);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: var(--panel-bg);
+      font-size: 12px;
+    }
+    .review-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin-top: 12px;
+    }
+    .review-actions input,
+    .review-actions button {
+      font: inherit;
+      padding: 6px 8px;
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--border-color);
+    }
+    .review-actions input {
+      min-width: 240px;
+    }
+    .review-status {
+      color: var(--muted);
+      font-size: 13px;
+      min-width: 56px;
+    }
   </style>
 </head>
 <body>
   <button id="theme-toggle" class="theme-toggle" type="button">Light Mode</button>
   <h1>BlackClaw Dashboard</h1>
-  <p class="muted">Read-only view over transmissions, explorations, and kill stats.</p>
+  <p class="muted">Local dashboard over transmissions, evidence review, outcome review, and kill stats.</p>
   <p><a href="/domains">Browse domains</a></p>
 
   <section>
@@ -1016,6 +1210,29 @@ def index():
   </section>
 
   <section>
+    <h2>Evidence Review</h2>
+    <p class="muted">SQLite-only review queue for evidence hits. Click a row to inspect one hit and optionally mark it accepted or dismissed.</p>
+    <div id="evidence-review-stats" class="grid"><p class="muted">Loading…</p></div>
+    <div id="evidence-review-breakdown"></div>
+    <div id="evidence-review-queue"></div>
+    <div id="evidence-detail" class="detail-panel"><p class="muted">Select an evidence hit to inspect details.</p></div>
+  </section>
+
+  <section>
+    <h2>Outcome Suggestion Stats</h2>
+    <p class="muted">Open-prediction suggestion buckets computed from accepted and unreviewed local evidence only.</p>
+    <div id="outcome-suggestion-buckets" class="grid"><p class="muted">Loading…</p></div>
+    <div id="outcome-review-backlog" class="grid"></div>
+  </section>
+
+  <section>
+    <h2>Outcome Review</h2>
+    <p class="muted">Manual outcome-review queue driven by local evidence counts. Click a row to inspect the current recommendation and example hits.</p>
+    <div id="outcome-review-queue"></div>
+    <div id="outcome-review-detail" class="detail-panel"><p class="muted">Select a prediction to inspect outcome review detail.</p></div>
+  </section>
+
+  <section>
     <h2>Transmissions</h2>
     <div id="grade-summary" class="grade-summary muted" hidden></div>
     <p id="transmission-count" class="muted">Loading…</p>
@@ -1024,8 +1241,26 @@ def index():
 
   <script>
     const GRADE_OPTIONS = ["A", "B+", "B", "B-", "C+", "C", "D", "F"];
+    const OUTCOME_SUGGESTION_BUCKETS = [
+      "review_for_support",
+      "review_for_contradiction",
+      "conflicting_evidence",
+      "waiting_on_review",
+      "insufficient_evidence",
+    ];
+    const OUTCOME_SUGGESTION_LABELS = {
+      review_for_support: "Review for support",
+      review_for_contradiction: "Review for contradiction",
+      conflicting_evidence: "Conflicting evidence",
+      waiting_on_review: "Waiting on review",
+      insufficient_evidence: "Insufficient evidence",
+    };
     let isDarkMode = true;
     let transmissionRows = [];
+    let evidenceQueueRows = [];
+    let outcomeQueueRows = [];
+    let selectedEvidenceId = null;
+    let selectedOutcomePredictionId = null;
 
     function applyTheme() {
       document.documentElement.dataset.theme = isDarkMode ? "dark" : "light";
@@ -1048,6 +1283,19 @@ def index():
         throw new Error(payload || "Request failed");
       }
       return payload;
+    }
+
+    async function postJson(url, payload = {}) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Request failed");
+      }
+      return data;
     }
 
     function formatScore(value) {
@@ -1086,6 +1334,67 @@ def index():
 
     function inputValue(value) {
       return escapeHtml(String(value ?? "").replaceAll("\\n", " "));
+    }
+
+    function formatTimestamp(value) {
+      if (!value) {
+        return "n/a";
+      }
+      const time = Date.parse(value);
+      if (!Number.isFinite(time)) {
+        return String(value);
+      }
+      return formatTimelineDate(new Date(time), true);
+    }
+
+    function truncateText(value, maxLength = 120) {
+      const text = String(value ?? "").trim();
+      if (!text) {
+        return "—";
+      }
+      return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+    }
+
+    function predictionSummary(row) {
+      const predictionJson = row && typeof row.prediction_json === "object" ? row.prediction_json : null;
+      const statement = predictionJson && typeof predictionJson.statement === "string"
+        ? predictionJson.statement
+        : null;
+      return statement || row.prediction_summary || row.prediction || "—";
+    }
+
+    function safeHttpUrl(value) {
+      const text = String(value ?? "").trim();
+      return /^https?:\\/\\//i.test(text) ? text : "";
+    }
+
+    function renderExternalLink(value) {
+      const text = String(value ?? "").trim();
+      if (!text) {
+        return "—";
+      }
+      const safeUrl = safeHttpUrl(text);
+      if (!safeUrl) {
+        return escapeHtml(text);
+      }
+      return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noreferrer">${escapeHtml(text)}</a>`;
+    }
+
+    function renderStatusPill(value) {
+      return `<span class="status-pill">${escapeHtml(value || "unknown")}</span>`;
+    }
+
+    function renderDetailGrid(items) {
+      return `
+        <div class="detail-grid">
+          ${items.map((item) => `
+            <div class="detail-item">
+              <span class="detail-label">${escapeHtml(item.label)}</span>
+              <div>${item.valueHtml || escapeHtml(item.value ?? "—")}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
     }
 
     function killRateClass(count, total) {
@@ -1272,18 +1581,20 @@ def index():
         </tr>
       `).join("");
       document.getElementById("top-killed").innerHTML = `
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Total Score</th>
-              <th>Seed</th>
-              <th>Target</th>
-              <th>Description</th>
-            </tr>
-          </thead>
-          <tbody>${body}</tbody>
-        </table>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Total Score</th>
+                <th>Seed</th>
+                <th>Target</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
       `;
       attachTopKilledHandlers();
     }
@@ -1352,6 +1663,360 @@ def index():
           }
         });
       });
+    }
+
+    function renderEvidenceReviewStats(stats) {
+      const byReviewStatus = stats.by_review_status || {};
+      const summaryItems = [
+        { label: "Total hits", value: stats.total_hits || 0, valueClass: "score-accent" },
+        { label: "Unreviewed", value: byReviewStatus.unreviewed || 0 },
+        { label: "Accepted", value: byReviewStatus.accepted || 0, valueClass: "score-accent" },
+        { label: "Dismissed", value: byReviewStatus.dismissed || 0 },
+        { label: "Predictions needing review", value: stats.predictions_needing_review || 0 },
+      ];
+      document.getElementById("evidence-review-stats").innerHTML = summaryItems.map((item) => `
+        <div class="stat">
+          <div class="muted">${escapeHtml(item.label)}</div>
+          <div class="stat-value ${item.valueClass || ""}">${escapeHtml(formatInteger(item.value))}</div>
+        </div>
+      `).join("");
+
+      const byClassification = stats.by_classification || {};
+      const rows = ["possible_support", "possible_contradiction", "unclear"].map((label) => {
+        const row = byClassification[label] || {};
+        return `
+          <tr>
+            <td>${escapeHtml(label)}</td>
+            <td>${escapeHtml(formatInteger(row.unreviewed || 0))}</td>
+            <td>${escapeHtml(formatInteger(row.accepted || 0))}</td>
+            <td>${escapeHtml(formatInteger(row.dismissed || 0))}</td>
+            <td>${escapeHtml(formatInteger(row.total || 0))}</td>
+          </tr>
+        `;
+      }).join("");
+      document.getElementById("evidence-review-breakdown").innerHTML = `
+        <p class="muted">Classification breakdown across all stored evidence hits.</p>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Classification</th>
+                <th>Unreviewed</th>
+                <th>Accepted</th>
+                <th>Dismissed</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderEvidenceReviewQueue(rows) {
+      evidenceQueueRows = rows;
+      const container = document.getElementById("evidence-review-queue");
+      if (!rows.length) {
+        container.innerHTML = "<p class=\\"muted\\">No unreviewed evidence hits found.</p>";
+        return;
+      }
+      const body = rows.map((row) => `
+        <tr
+          class="review-table-row ${Number(row.id) === selectedEvidenceId ? "is-selected" : ""}"
+          data-evidence-id="${escapeHtml(row.id)}"
+        >
+          <td>${escapeHtml(row.id)}</td>
+          <td>${escapeHtml(row.prediction_id)}</td>
+          <td>${renderStatusPill(row.classification)}</td>
+          <td>${renderStatusPill(row.review_status)}</td>
+          <td class="score-accent">${escapeHtml(formatScore(row.score))}</td>
+          <td>${escapeHtml(truncateText(row.title, 96))}</td>
+          <td>${escapeHtml(formatTimestamp(row.scan_timestamp))}</td>
+        </tr>
+      `).join("");
+      container.innerHTML = `
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Evidence ID</th>
+                <th>Prediction ID</th>
+                <th>Classification</th>
+                <th>Review status</th>
+                <th>Score</th>
+                <th>Title</th>
+                <th>Scan timestamp</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+      attachEvidenceQueueHandlers();
+    }
+
+    function attachEvidenceQueueHandlers() {
+      document.querySelectorAll("#evidence-review-queue [data-evidence-id]").forEach((row) => {
+        row.addEventListener("click", () => {
+          loadEvidenceDetail(Number(row.dataset.evidenceId));
+        });
+      });
+    }
+
+    function renderEvidenceDetail(payload) {
+      return `
+        ${renderDetailGrid([
+          { label: "Evidence ID", value: payload.id },
+          { label: "Prediction ID", value: payload.prediction_id },
+          { label: "Classification", valueHtml: renderStatusPill(payload.classification) },
+          { label: "Review status", valueHtml: renderStatusPill(payload.review_status) },
+          { label: "Score", value: formatScore(payload.score) },
+          { label: "Source type", value: payload.source_type || "unknown" },
+          { label: "Scan timestamp", value: formatTimestamp(payload.scan_timestamp) },
+          { label: "Updated", value: formatTimestamp(payload.updated_at) },
+        ])}
+        <p><strong>Title:</strong> ${escapeHtml(payload.title || "Untitled result")}</p>
+        <p><strong>URL:</strong> ${renderExternalLink(payload.url)}</p>
+        <p><strong>Snippet:</strong> ${escapeHtml(payload.snippet || "—")}</p>
+        <p><strong>Query:</strong> ${escapeHtml(payload.query_used || "—")}</p>
+        <p><strong>Notes:</strong> ${escapeHtml(payload.notes || "—")}</p>
+        <div class="review-actions">
+          <input
+            type="text"
+            class="evidence-note-input"
+            placeholder="Optional note"
+            value="${inputValue(payload.notes)}"
+          >
+          <button type="button" class="evidence-action" data-action="accept" data-evidence-id="${escapeHtml(payload.id)}">Accept</button>
+          <button type="button" class="evidence-action" data-action="dismiss" data-evidence-id="${escapeHtml(payload.id)}">Dismiss</button>
+          <span class="review-status"></span>
+        </div>
+      `;
+    }
+
+    async function loadEvidenceDetail(evidenceId) {
+      selectedEvidenceId = evidenceId;
+      renderEvidenceReviewQueue(evidenceQueueRows);
+      const panel = document.getElementById("evidence-detail");
+      panel.innerHTML = "<p class=\\"muted\\">Loading evidence detail…</p>";
+      try {
+        const payload = await fetchJson(`/api/evidence/${evidenceId}`);
+        panel.innerHTML = renderEvidenceDetail(payload);
+        attachEvidenceActionHandlers();
+      } catch (error) {
+        panel.innerHTML = `<div class="error">${escapeHtml(
+          error instanceof Error ? error.message : "Failed to load evidence detail"
+        )}</div>`;
+      }
+    }
+
+    function attachEvidenceActionHandlers() {
+      document.querySelectorAll(".evidence-action").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const panel = button.closest(".detail-panel");
+          const noteInput = panel.querySelector(".evidence-note-input");
+          const status = panel.querySelector(".review-status");
+          const buttons = panel.querySelectorAll(".evidence-action");
+          const evidenceId = Number(button.dataset.evidenceId);
+          const action = button.dataset.action;
+
+          status.textContent = "Saving...";
+          buttons.forEach((item) => {
+            item.disabled = true;
+          });
+          noteInput.disabled = true;
+
+          try {
+            await postJson(`/api/evidence/${evidenceId}/${action}`, {
+              note: noteInput.value,
+            });
+            status.textContent = action === "accept" ? "Accepted" : "Dismissed";
+            await loadReviewData();
+          } catch (error) {
+            status.textContent = error instanceof Error ? error.message : "Save failed";
+          } finally {
+            buttons.forEach((item) => {
+              item.disabled = false;
+            });
+            noteInput.disabled = false;
+          }
+        });
+      });
+    }
+
+    function renderOutcomeSuggestionStats(stats) {
+      const suggestionBuckets = stats.suggestion_buckets || {};
+      document.getElementById("outcome-suggestion-buckets").innerHTML = OUTCOME_SUGGESTION_BUCKETS.map((label) => `
+        <div class="stat">
+          <div class="muted">${escapeHtml(OUTCOME_SUGGESTION_LABELS[label])}</div>
+          <div class="stat-value score-accent">${escapeHtml(formatInteger(suggestionBuckets[label] || 0))}</div>
+        </div>
+      `).join("");
+
+      const overall = stats.overall || {};
+      const backlog = stats.review_backlog || {};
+      const backlogItems = [
+        { label: "Open predictions", value: overall.open || 0 },
+        { label: "Resolved predictions", value: overall.resolved_total || 0 },
+        { label: "Predictions needing review", value: backlog.open_predictions_needing_review || 0 },
+        { label: "Unreviewed reviewable hits", value: backlog.total_unreviewed_reviewable_evidence_hits || 0 },
+        { label: "Accepted support only", value: backlog.open_predictions_with_accepted_support_only || 0 },
+        { label: "Accepted contradiction only", value: backlog.open_predictions_with_accepted_contradiction_only || 0 },
+        { label: "Accepted conflicting evidence", value: backlog.open_predictions_with_accepted_conflicting_evidence || 0 },
+      ];
+      document.getElementById("outcome-review-backlog").innerHTML = backlogItems.map((item) => `
+        <div class="stat">
+          <div class="muted">${escapeHtml(item.label)}</div>
+          <div class="stat-value">${escapeHtml(formatInteger(item.value))}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderOutcomeReviewQueue(rows) {
+      outcomeQueueRows = rows;
+      const container = document.getElementById("outcome-review-queue");
+      if (!rows.length) {
+        container.innerHTML = "<p class=\\"muted\\">No review-ready predictions found.</p>";
+        return;
+      }
+      const body = rows.map((row) => `
+        <tr
+          class="review-table-row ${Number(row.id) === selectedOutcomePredictionId ? "is-selected" : ""}"
+          data-prediction-id="${escapeHtml(row.id)}"
+        >
+          <td>${escapeHtml(row.id)}</td>
+          <td>${escapeHtml(row.transmission_number)}</td>
+          <td>${renderStatusPill(row.outcome_status || "open")}</td>
+          <td>${escapeHtml(formatInteger(row.accepted_support_hits || 0))}</td>
+          <td>${escapeHtml(formatInteger(row.accepted_contradiction_hits || 0))}</td>
+          <td>${escapeHtml(formatInteger(row.unreviewed_reviewable_hits || 0))}</td>
+          <td>${renderStatusPill(row.recommendation || "insufficient_evidence")}</td>
+          <td>${escapeHtml(row.mechanism_type || "unknown")}</td>
+          <td>${escapeHtml(truncateText(predictionSummary(row), 110))}</td>
+        </tr>
+      `).join("");
+      container.innerHTML = `
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Prediction ID</th>
+                <th>Transmission #</th>
+                <th>Current outcome</th>
+                <th>Support hits</th>
+                <th>Contradiction hits</th>
+                <th>Unreviewed reviewable hits</th>
+                <th>Recommendation</th>
+                <th>Mechanism type</th>
+                <th>Short prediction</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+      attachOutcomeQueueHandlers();
+    }
+
+    function attachOutcomeQueueHandlers() {
+      document.querySelectorAll("#outcome-review-queue [data-prediction-id]").forEach((row) => {
+        row.addEventListener("click", () => {
+          loadOutcomeReviewDetail(Number(row.dataset.predictionId));
+        });
+      });
+    }
+
+    function renderOutcomeHitGroup(title, rows, totalCount) {
+      if (!rows.length) {
+        return `
+          <details open>
+            <summary>${escapeHtml(title)} (0 shown of ${totalCount || 0})</summary>
+            <p class="muted">None.</p>
+          </details>
+        `;
+      }
+      return `
+        <details open>
+          <summary>${escapeHtml(title)} (${rows.length} shown of ${totalCount || 0})</summary>
+          <div class="detail-stack">
+            ${rows.map((row) => `
+              <div class="detail-card">
+                <p><strong>Evidence #${escapeHtml(row.id)}</strong> ${renderStatusPill(row.classification)} ${renderStatusPill(row.review_status)}</p>
+                <p><strong>Score:</strong> ${escapeHtml(formatScore(row.score))} | <strong>Scanned:</strong> ${escapeHtml(formatTimestamp(row.scan_timestamp))}</p>
+                <p><strong>Title:</strong> ${escapeHtml(row.title || "Untitled result")}</p>
+                <p><strong>URL:</strong> ${renderExternalLink(row.url)}</p>
+                <p><strong>Snippet:</strong> ${escapeHtml(row.snippet || "—")}</p>
+                <p><strong>Query:</strong> ${escapeHtml(row.query_used || "—")}</p>
+              </div>
+            `).join("")}
+          </div>
+        </details>
+      `;
+    }
+
+    function renderOutcomeReviewDetail(payload) {
+      const statement = payload.prediction_statement && payload.prediction_statement !== payload.prediction_summary
+        ? `<p><strong>Statement:</strong> ${escapeHtml(payload.prediction_statement)}</p>`
+        : "";
+      return `
+        ${renderDetailGrid([
+          { label: "Prediction ID", value: payload.id },
+          { label: "Transmission #", value: payload.transmission_number },
+          { label: "Status", valueHtml: renderStatusPill(payload.status || "unknown") },
+          { label: "Outcome", valueHtml: renderStatusPill(payload.outcome_status || "open") },
+          { label: "Utility", value: payload.utility_class || "unknown" },
+          { label: "Mechanism type", value: payload.mechanism_type || "unknown" },
+          { label: "Source domain", value: payload.source_domain || "—" },
+          { label: "Target domain", value: payload.target_domain || "—" },
+          { label: "Prediction quality", value: formatScore(payload.prediction_quality_score) },
+          { label: "Depth score", value: formatScore(payload.depth_score) },
+          { label: "Adversarial survival", value: formatScore(payload.adversarial_survival_score) },
+          { label: "Recommendation", valueHtml: renderStatusPill(payload.recommendation || "insufficient_evidence") },
+        ])}
+        <p><strong>Summary:</strong> ${escapeHtml(payload.prediction_summary || "—")}</p>
+        ${statement}
+        <p><strong>Test summary:</strong> ${escapeHtml(payload.test_summary || "—")}</p>
+        <p><strong>Falsification condition:</strong> ${escapeHtml(payload.falsification_condition || "—")}</p>
+        <p><strong>Recommendation rationale:</strong> ${escapeHtml(payload.recommendation_rationale || "—")}</p>
+        ${renderDetailGrid([
+          { label: "Accepted support hits", value: formatInteger(payload.accepted_support_hits || 0) },
+          { label: "Accepted contradiction hits", value: formatInteger(payload.accepted_contradiction_hits || 0) },
+          { label: "Unreviewed reviewable hits", value: formatInteger(payload.unreviewed_reviewable_hits || 0) },
+          { label: "Dismissed reviewable hits", value: formatInteger(payload.dismissed_reviewable_hits || 0) },
+          { label: "Accepted unclear hits", value: formatInteger(payload.accepted_unclear_hits || 0) },
+          { label: "Total hits", value: formatInteger(payload.total_hits || 0) },
+        ])}
+        ${renderOutcomeHitGroup(
+          "Accepted support hits",
+          payload.accepted_support_examples || [],
+          payload.accepted_support_hits || 0
+        )}
+        ${renderOutcomeHitGroup(
+          "Accepted contradiction hits",
+          payload.accepted_contradiction_examples || [],
+          payload.accepted_contradiction_hits || 0
+        )}
+        ${renderOutcomeHitGroup(
+          "Unreviewed reviewable hits",
+          payload.unreviewed_reviewable_examples || [],
+          payload.unreviewed_reviewable_hits || 0
+        )}
+      `;
+    }
+
+    async function loadOutcomeReviewDetail(predictionId) {
+      selectedOutcomePredictionId = predictionId;
+      renderOutcomeReviewQueue(outcomeQueueRows);
+      const panel = document.getElementById("outcome-review-detail");
+      panel.innerHTML = "<p class=\\"muted\\">Loading outcome review detail…</p>";
+      try {
+        const payload = await fetchJson(`/api/outcome-review/${predictionId}`);
+        panel.innerHTML = renderOutcomeReviewDetail(payload);
+      } catch (error) {
+        panel.innerHTML = `<div class="error">${escapeHtml(
+          error instanceof Error ? error.message : "Failed to load outcome review detail"
+        )}</div>`;
+      }
     }
 
     function renderGradeSummary(rows) {
@@ -1502,6 +2167,30 @@ def index():
       attachCopyHandlers();
     }
 
+    async function loadReviewData() {
+      const [
+        evidenceReviewStats,
+        evidenceReviewQueue,
+        outcomeReviewQueue,
+        outcomeSuggestionStats,
+      ] = await Promise.all([
+        fetchJson("/api/evidence-review-stats"),
+        fetchJson("/api/evidence-review-queue?limit=25"),
+        fetchJson("/api/outcome-review-queue?limit=25"),
+        fetchJson("/api/outcome-suggestion-stats"),
+      ]);
+      renderEvidenceReviewStats(evidenceReviewStats);
+      renderEvidenceReviewQueue(evidenceReviewQueue);
+      renderOutcomeSuggestionStats(outcomeSuggestionStats);
+      renderOutcomeReviewQueue(outcomeReviewQueue);
+      if (selectedEvidenceId != null) {
+        await loadEvidenceDetail(selectedEvidenceId);
+      }
+      if (selectedOutcomePredictionId != null) {
+        await loadOutcomeReviewDetail(selectedOutcomePredictionId);
+      }
+    }
+
     function renderError(error) {
       const message = error instanceof Error ? error.message : String(error);
       document.body.insertAdjacentHTML("beforeend", `<section><div class="error">${escapeHtml(message)}</div></section>`);
@@ -1513,21 +2202,23 @@ def index():
     });
     applyTheme();
 
-    Promise.all([
-      fetchJson("/api/stats"),
-      fetchJson("/api/costs"),
-      fetchJson("/api/transmission-timeline"),
-      fetchJson("/api/top-killed"),
-      fetchJson("/api/transmissions"),
-    ])
-      .then(([stats, costs, timeline, topKilled, transmissions]) => {
-        renderStats(stats);
-        renderCosts(costs);
-        renderTransmissionTimeline(timeline);
-        renderTopKilled(topKilled);
-        renderTransmissions(transmissions);
-      })
-      .catch(renderError);
+    async function loadDashboard() {
+      const [stats, costs, timeline, topKilled, transmissions] = await Promise.all([
+        fetchJson("/api/stats"),
+        fetchJson("/api/costs"),
+        fetchJson("/api/transmission-timeline"),
+        fetchJson("/api/top-killed"),
+        fetchJson("/api/transmissions"),
+      ]);
+      renderStats(stats);
+      renderCosts(costs);
+      renderTransmissionTimeline(timeline);
+      renderTopKilled(topKilled);
+      renderTransmissions(transmissions);
+      await loadReviewData();
+    }
+
+    loadDashboard().catch(renderError);
   </script>
 </body>
 </html>"""
