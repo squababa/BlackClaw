@@ -2226,6 +2226,9 @@ STRONG_REJECTION_MIN_SCORE = 0.90
 STRONG_REJECTION_REPAIRABLE_PATTERNS = (
     "evidence_map missing support",
     "evidence_map must include at least 1 mechanism_assertions entry",
+    "mechanism must name a specific process",
+    "mechanism lacks domain-specific detail",
+    "mechanism is too universal",
     "mechanism typing must include at least 1 controlled v1 mechanism tag",
     "mechanism_type must use a controlled v1 tag",
     "mechanism_type_confidence must be present and numeric in the 0..1 range",
@@ -2249,9 +2252,6 @@ STRONG_REJECTION_REPAIRABLE_PATTERNS = (
 )
 STRONG_REJECTION_NON_REPAIRABLE_PATTERNS = (
     "mechanism must be present and non-empty",
-    "mechanism must name a specific process",
-    "mechanism lacks domain-specific detail",
-    "mechanism is too universal",
     "hypothesis must be a dictionary",
 )
 
