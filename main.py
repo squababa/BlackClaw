@@ -55,6 +55,10 @@ from store import (
     save_prediction_evidence_scan,
     list_prediction_evidence_hits,
     get_prediction_evidence_stats,
+    list_strong_rejections,
+    get_strong_rejection,
+    update_strong_rejection_status,
+    save_strong_rejection,
 )
 from seed import pick_seed, resolve_seed_choice
 
@@ -112,6 +116,28 @@ def _parse_report_only_args():
     parser.add_argument(
         "--prediction-evidence-stats",
         action="store_true",
+    )
+    parser.add_argument(
+        "--strong-rejections",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--mark-salvaged",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--dismiss-strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
     )
     parser.add_argument(
         "--scan-open-predictions",
@@ -610,6 +636,83 @@ def _print_prediction_evidence_stats(report: dict):
         print(f"{label}\t{int(by_review_status.get(label, 0) or 0)}")
 
 
+def _strong_rejection_reasons_text(row: dict, limit: int = 110) -> str:
+    """Render a compact reason summary for strong rejection list rows."""
+    reasons = []
+    for raw_reason in row.get("rejection_reasons") or []:
+        text = str(raw_reason or "").strip()
+        if not text:
+            continue
+        for prefix in ("validation:", "claim_provenance:", "provenance:"):
+            if text.startswith(prefix):
+                if prefix == "provenance:" and text == "provenance:incomplete":
+                    text = "provenance incomplete"
+                    break
+                text = text.split(":", 1)[1].strip()
+                break
+        if text and text not in reasons:
+            reasons.append(text)
+    if not reasons and row.get("salvage_reason"):
+        reasons.append(str(row.get("salvage_reason")).strip())
+    return _truncate_text("; ".join(reasons[:2]) or "—", limit)
+
+
+def _print_strong_rejections_list(limit: int = 20):
+    """Render recent strong rejected candidates for manual salvage review."""
+    rows = list_strong_rejections(limit=max(1, int(limit)))
+    if not rows:
+        print("[StrongRejections] No strong rejections found.")
+        return
+
+    print(f"[StrongRejections] Recent {len(rows)} strong rejections")
+    print("id\tstatus\ttotal\tmechanism\tdomains\treasons\ttimestamp")
+    for row in rows:
+        total_score = row.get("total_score")
+        total_text = f"{float(total_score):.3f}" if total_score is not None else "—"
+        mechanism_type = row.get("mechanism_type") or "unknown"
+        domains = (
+            f"{row.get('seed_domain') or 'Unknown'} → "
+            f"{row.get('target_domain') or 'Unknown'}"
+        )
+        print(
+            f"{row.get('id')}\t{row.get('status')}\t{total_text}\t"
+            f"{_truncate_text(mechanism_type, 24)}\t"
+            f"{_truncate_text(domains, 44)}\t"
+            f"{_strong_rejection_reasons_text(row)}\t"
+            f"{_short_timestamp(row.get('timestamp'))}"
+        )
+
+
+def _print_strong_rejection_detail(rejection_id: int) -> bool:
+    """Render one stored strong rejection as JSON."""
+    row = get_strong_rejection(rejection_id)
+    if row is None:
+        print(f"  [!] Strong rejection #{rejection_id} not found.")
+        return False
+    print(json.dumps(row, ensure_ascii=False, indent=2))
+    return True
+
+
+def _apply_strong_rejection_status_update(
+    rejection_id: int,
+    status: str,
+    note: str | None = None,
+) -> bool:
+    """Update one strong rejection review status and print a concise status line."""
+    updated = update_strong_rejection_status(rejection_id, status, notes=note)
+    if not updated:
+        print(f"  [!] Strong rejection #{rejection_id} not found.")
+        return False
+
+    print(
+        f"[StrongRejections] Marked strong rejection #{rejection_id} as "
+        f"{_truncate_text(status, 32)}."
+    )
+    if note is not None:
+        print("  [StrongRejections] Note saved.")
+    return True
+
+
 def _apply_prediction_outcome_update(
     prediction_id: int,
     outcome_status: str,
@@ -1095,6 +1198,14 @@ if __name__ == "__main__":
             _early_report_args.mark_unknown is not None,
         ]
     )
+    _early_strong_rejection_action_count = sum(
+        [
+            _early_report_args.strong_rejections,
+            _early_report_args.strong_rejection is not None,
+            _early_report_args.mark_salvaged is not None,
+            _early_report_args.dismiss_strong_rejection is not None,
+        ]
+    )
     _early_other_report_count = sum(
         [
             _early_report_args.kill_stats,
@@ -1119,7 +1230,11 @@ if __name__ == "__main__":
         print("  [!] --window requires a positive integer.")
         sys.exit(1)
     if (
-        (_early_report_args.prediction_evidence or _early_report_args.scan_open_predictions)
+        (
+            _early_report_args.prediction_evidence
+            or _early_report_args.scan_open_predictions
+            or _early_report_args.strong_rejections
+        )
         and _early_report_args.limit is not None
         and _early_report_args.limit <= 0
     ):
@@ -1136,9 +1251,21 @@ if __name__ == "__main__":
             "  [!] Use only one prediction action at a time: --predictions, --prediction-outcomes, --prediction-outcome-stats, --prediction-evidence, --prediction-evidence-stats, --scan-open-predictions, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown."
         )
         sys.exit(1)
+    if _early_strong_rejection_action_count > 1:
+        print(
+            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
+        )
+        sys.exit(1)
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
         print(
             "  [!] Prediction actions cannot be combined with other report-only actions."
+        )
+        sys.exit(1)
+    if _early_strong_rejection_action_count > 0 and (
+        _early_prediction_action_count > 0 or _early_other_report_count > 0
+    ):
+        print(
+            "  [!] Strong-rejection actions cannot be combined with other report-only actions."
         )
         sys.exit(1)
     if (
@@ -1153,9 +1280,10 @@ if __name__ == "__main__":
         _early_report_args.limit is not None
         and not _early_report_args.prediction_evidence
         and not _early_report_args.scan_open_predictions
+        and not _early_report_args.strong_rejections
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence or --scan-open-predictions."
+            "  [!] --limit can only be used with --prediction-evidence, --scan-open-predictions, or --strong-rejections."
         )
         sys.exit(1)
     if (
@@ -1166,8 +1294,12 @@ if __name__ == "__main__":
         and _early_report_args.mark_expired is None
         and _early_report_args.mark_failed is None
         and _early_report_args.mark_unknown is None
+        and _early_report_args.mark_salvaged is None
+        and _early_report_args.dismiss_strong_rejection is None
     ):
-        print("  [!] --note can only be used with prediction outcome update flags.")
+        print(
+            "  [!] --note can only be used with prediction outcome update flags or strong-rejection status updates."
+        )
         sys.exit(1)
     if (
         (
@@ -1195,6 +1327,12 @@ if __name__ == "__main__":
         ("--mark-expired", _early_report_args.mark_expired),
         ("--mark-failed", _early_report_args.mark_failed),
         ("--mark-unknown", _early_report_args.mark_unknown),
+        ("--strong-rejection", _early_report_args.strong_rejection),
+        ("--mark-salvaged", _early_report_args.mark_salvaged),
+        (
+            "--dismiss-strong-rejection",
+            _early_report_args.dismiss_strong_rejection,
+        ),
     ):
         if prediction_id is not None and prediction_id <= 0:
             print(f"  [!] {flag_name} requires a positive integer.")
@@ -1210,12 +1348,16 @@ if __name__ == "__main__":
         or _early_report_args.prediction_evidence
         or _early_report_args.prediction_evidence_stats
         or _early_report_args.prediction is not None
+        or _early_report_args.strong_rejections
+        or _early_report_args.strong_rejection is not None
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
         or _early_report_args.mark_mixed is not None
         or _early_report_args.mark_expired is not None
         or _early_report_args.mark_failed is not None
         or _early_report_args.mark_unknown is not None
+        or _early_report_args.mark_salvaged is not None
+        or _early_report_args.dismiss_strong_rejection is not None
         or _early_report_args.rut_report
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
@@ -1260,6 +1402,31 @@ if __name__ == "__main__":
             )
         if _early_report_args.prediction_evidence_stats:
             _print_prediction_evidence_stats(get_prediction_evidence_stats())
+        if _early_report_args.strong_rejections:
+            _print_strong_rejections_list(limit=_early_report_args.limit or 20)
+        if (
+            _early_report_args.strong_rejection is not None
+            and not _print_strong_rejection_detail(_early_report_args.strong_rejection)
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.mark_salvaged is not None
+            and not _apply_strong_rejection_status_update(
+                _early_report_args.mark_salvaged,
+                "salvaged",
+                note=_early_report_args.note,
+            )
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.dismiss_strong_rejection is not None
+            and not _apply_strong_rejection_status_update(
+                _early_report_args.dismiss_strong_rejection,
+                "dismissed",
+                note=_early_report_args.note,
+            )
+        ):
+            sys.exit(1)
         if _early_report_args.prediction is not None and not _print_prediction_detail(
             _early_report_args.prediction
         ):
@@ -1478,7 +1645,7 @@ def parse_args():
         type=int,
         default=None,
         metavar="N",
-        help="Optional limit for scan or evidence-list commands",
+        help="Optional limit for scan, evidence-list, or strong-rejection list commands",
     )
     parser.add_argument(
         "--star",
@@ -1505,7 +1672,7 @@ def parse_args():
         "--note",
         type=str,
         default=None,
-        help="Optional note to store with feedback or prediction outcome updates",
+        help="Optional note to store with feedback, prediction outcome updates, or strong-rejection status updates",
     )
     parser.add_argument(
         "--source",
@@ -1608,6 +1775,32 @@ def parse_args():
         "--prediction-evidence-stats",
         action="store_true",
         help="Summarize stored prediction evidence hits and review flags",
+    )
+    parser.add_argument(
+        "--strong-rejections",
+        action="store_true",
+        help="List recent strong rejected candidates and exit",
+    )
+    parser.add_argument(
+        "--strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Show full details for a stored strong rejection id and exit",
+    )
+    parser.add_argument(
+        "--mark-salvaged",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a strong rejection as salvaged and exit",
+    )
+    parser.add_argument(
+        "--dismiss-strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Mark a strong rejection as dismissed and exit",
     )
     parser.add_argument(
         "--scan-open-predictions",
@@ -2027,6 +2220,202 @@ def _embed_transmission_text(text: str) -> list[float]:
     if not clean_text:
         raise RuntimeError("Cannot compute embedding for empty transmission text.")
     return get_llm_client().embed_content(clean_text)
+
+
+STRONG_REJECTION_MIN_SCORE = 0.90
+STRONG_REJECTION_REPAIRABLE_PATTERNS = (
+    "evidence_map missing support",
+    "evidence_map must include at least 1 mechanism_assertions entry",
+    "mechanism typing must include at least 1 controlled v1 mechanism tag",
+    "mechanism_type must use a controlled v1 tag",
+    "mechanism_type_confidence must be present and numeric in the 0..1 range",
+    "mechanism_type_confidence must be greater than 0",
+    "variable_mapping must contain at least 3 mappings",
+    "prediction must name an observable",
+    "prediction must name a time_horizon",
+    "prediction should state a direction",
+    "prediction should state an expected magnitude",
+    "prediction should state confidence",
+    "prediction must include a falsification_condition",
+    "prediction should explain utility_rationale",
+    "prediction should identify who_benefits",
+    "prediction must be falsifiable",
+    "prediction must include a measurable outcome or metric",
+    "test must specify data or experiment",
+    "test must specify a metric",
+    "test must state what confirms vs falsifies the hypothesis",
+    "assumptions must list at least 2 assumptions",
+    "boundary_conditions must be present and non-empty",
+)
+STRONG_REJECTION_NON_REPAIRABLE_PATTERNS = (
+    "mechanism must be present and non-empty",
+    "mechanism must name a specific process",
+    "mechanism lacks domain-specific detail",
+    "mechanism is too universal",
+    "hypothesis must be a dictionary",
+)
+
+
+def _strong_rejection_analysis(candidate: dict | None) -> dict:
+    """Classify whether a rejected candidate looks salvageable for v1 review."""
+    payload = candidate if isinstance(candidate, dict) else {}
+    try:
+        total_score = float(payload.get("total_score") or 0.0)
+    except (TypeError, ValueError):
+        total_score = 0.0
+
+    stage_failures = [
+        str(item).strip()
+        for item in (payload.get("stage_failures") or [])
+        if str(item).strip()
+    ]
+    validation_reasons = [
+        str(item).strip()
+        for item in (payload.get("validation_reasons") or [])
+        if str(item).strip()
+    ]
+    validation_reason_lowers = [reason.lower() for reason in validation_reasons]
+    stage_failure_lowers = [failure.lower() for failure in stage_failures]
+    claim_provenance = (
+        payload.get("claim_provenance")
+        if isinstance(payload.get("claim_provenance"), dict)
+        else {}
+    )
+    claim_issues = [
+        str(item).strip()
+        for item in (claim_provenance.get("issues") or [])
+        if str(item).strip()
+    ]
+    mechanism_typing = (
+        payload.get("mechanism_typing")
+        if isinstance(payload.get("mechanism_typing"), dict)
+        else {}
+    )
+    prediction_quality = (
+        payload.get("prediction_quality")
+        if isinstance(payload.get("prediction_quality"), dict)
+        else {}
+    )
+
+    if total_score < STRONG_REJECTION_MIN_SCORE:
+        return {"eligible": False, "categories": [], "rejection_stage": None}
+    if payload.get("should_transmit"):
+        return {"eligible": False, "categories": [], "rejection_stage": None}
+    if payload.get("passes_threshold") is False:
+        return {"eligible": False, "categories": [], "rejection_stage": None}
+    if (
+        payload.get("semantic_duplicate")
+        or payload.get("boring")
+        or payload.get("white_detected")
+        or payload.get("distance_ok") is False
+        or payload.get("adversarial_ok") is False
+        or payload.get("invariance_ok") is False
+    ):
+        return {"eligible": False, "categories": [], "rejection_stage": None}
+    if any(
+        failure.startswith(
+            (
+                "below_threshold:",
+                "dedup:",
+                "rewrite:",
+                "adversarial:",
+                "invariance:",
+                "distance:",
+                "novelty:",
+            )
+        )
+        for failure in stage_failure_lowers
+    ):
+        return {"eligible": False, "categories": [], "rejection_stage": None}
+    if any(
+        pattern in reason
+        for pattern in STRONG_REJECTION_NON_REPAIRABLE_PATTERNS
+        for reason in validation_reason_lowers
+    ):
+        return {"eligible": False, "categories": [], "rejection_stage": None}
+
+    categories: list[str] = []
+    rejection_stage: str | None = None
+
+    if claim_issues or any(
+        failure.startswith("claim_provenance:") for failure in stage_failure_lowers
+    ):
+        categories.append("claim_provenance")
+        rejection_stage = rejection_stage or "claim_provenance"
+    if (
+        "provenance:incomplete" in stage_failure_lowers
+        and "claim_provenance" not in categories
+    ):
+        categories.append("provenance")
+        rejection_stage = rejection_stage or "provenance"
+
+    confidence = mechanism_typing.get("mechanism_type_confidence")
+    confidence_missing = confidence is None
+    if not confidence_missing:
+        try:
+            confidence_missing = float(confidence) <= 0.0
+        except (TypeError, ValueError):
+            confidence_missing = True
+    if (
+        any(
+            ("mechanism_type" in reason) or ("mechanism typing" in reason)
+            for reason in validation_reason_lowers
+        )
+        or not mechanism_typing.get("mechanism_type")
+        or confidence_missing
+    ):
+        categories.append("mechanism_typing")
+        rejection_stage = rejection_stage or "mechanism_typing"
+
+    if payload.get("prediction_quality_ok") is False:
+        categories.append("prediction_quality")
+        rejection_stage = rejection_stage or "prediction_quality"
+
+    if any(
+        pattern in reason
+        for pattern in STRONG_REJECTION_REPAIRABLE_PATTERNS
+        for reason in validation_reason_lowers
+    ):
+        categories.append("validation_packaging")
+        rejection_stage = rejection_stage or "validation"
+
+    if not categories and prediction_quality.get("missing_fields"):
+        categories.append("prediction_quality")
+        rejection_stage = rejection_stage or "prediction_quality"
+
+    deduped_categories = []
+    for category in categories:
+        if category not in deduped_categories:
+            deduped_categories.append(category)
+
+    return {
+        "eligible": bool(deduped_categories),
+        "categories": deduped_categories,
+        "rejection_stage": rejection_stage,
+    }
+
+
+def should_save_strong_rejection(candidate: dict | None) -> bool:
+    """Return True when a rejected candidate should enter the salvage queue."""
+    return bool(_strong_rejection_analysis(candidate).get("eligible"))
+
+
+def summarize_strong_rejection_reason(candidate: dict | None) -> str:
+    """Summarize the repairable rejection reason for CLI and storage."""
+    analysis = _strong_rejection_analysis(candidate)
+    labels = {
+        "claim_provenance": "incomplete evidence_map coverage",
+        "provenance": "missing provenance packaging",
+        "mechanism_typing": "missing mechanism typing",
+        "prediction_quality": "prediction-quality gate failed",
+        "validation_packaging": "missing structured fields",
+    }
+    parts = [
+        labels[key]
+        for key in analysis.get("categories") or []
+        if key in labels
+    ]
+    return "; ".join(parts[:3]) if parts else "repairable validation rejection"
 
 
 def _handle_convergence(
@@ -2702,6 +3091,28 @@ def _score_store_and_transmit(
         mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
         transmitted=candidate["should_transmit"],
     )
+    strong_rejection_analysis = _strong_rejection_analysis(candidate)
+    if should_save_strong_rejection(candidate):
+        save_strong_rejection(
+            exploration_id=exploration_id,
+            seed_domain=source_domain,
+            target_domain=target_domain,
+            path=exploration_path,
+            total_score=candidate["total_score"],
+            novelty_score=candidate["novelty_score"],
+            distance_score=candidate["distance_score"],
+            depth_score=candidate["depth_score"],
+            prediction_quality_score=candidate["prediction_quality_score"],
+            mechanism_type=candidate["prepared_connection"].get("mechanism_type"),
+            rejection_stage=strong_rejection_analysis.get("rejection_stage"),
+            rejection_reasons=candidate.get("stage_failures")
+            or candidate.get("validation_reasons"),
+            salvage_reason=summarize_strong_rejection_reason(candidate),
+            connection_payload=candidate["prepared_connection"],
+            validation=candidate["validation_log"],
+            evidence_map=candidate["prepared_connection"].get("evidence_map"),
+            mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
+        )
 
     transmitted = False
     if _handle_convergence(
@@ -2973,6 +3384,14 @@ def main():
             args.mark_unknown is not None,
         ]
     )
+    strong_rejection_action_count = sum(
+        [
+            args.strong_rejections,
+            args.strong_rejection is not None,
+            args.mark_salvaged is not None,
+            args.dismiss_strong_rejection is not None,
+        ]
+    )
     if args.eval_limit is not None and args.eval_limit <= 0:
         print("  [!] --eval-limit requires a positive integer.")
         sys.exit(1)
@@ -3002,20 +3421,33 @@ def main():
             "  [!] Use only one of --predictions, --prediction-evidence, --prediction-evidence-stats, --scan-open-predictions, --prediction-outcomes, --prediction-outcome-stats, --check-predictions, --check-provenance, --check-mechanisms, --near-misses, --audit-reasoning, --prediction, --mark-supported, --mark-contradicted, --mark-mixed, --mark-expired, --mark-failed, or --mark-unknown at a time."
         )
         sys.exit(1)
-    if feedback_action_count > 0 and prediction_action_count > 0:
+    if strong_rejection_action_count > 1:
         print(
-            "  [!] Prediction/audit actions cannot be combined with --star, --dismiss, or --dive."
+            "  [!] Use only one of --strong-rejections, --strong-rejection, --mark-salvaged, or --dismiss-strong-rejection at a time."
+        )
+        sys.exit(1)
+    if feedback_action_count > 0 and (
+        prediction_action_count > 0 or strong_rejection_action_count > 0
+    ):
+        print(
+            "  [!] Prediction, audit, and strong-rejection actions cannot be combined with --star, --dismiss, or --dive."
+        )
+        sys.exit(1)
+    if prediction_action_count > 0 and strong_rejection_action_count > 0:
+        print(
+            "  [!] Strong-rejection actions cannot be combined with prediction or audit actions."
         )
         sys.exit(1)
     if args.run_eval and (
         feedback_action_count > 0
         or prediction_action_count > 0
+        or strong_rejection_action_count > 0
         or args.export
         or args.seed is not None
         or args.dry_run
     ):
         print(
-            "  [!] --run-eval cannot be combined with feedback, prediction, export, --seed, or --dry-run actions."
+            "  [!] --run-eval cannot be combined with feedback, prediction, strong-rejection, export, --seed, or --dry-run actions."
         )
         sys.exit(1)
     if args.audit_reasoning and args.audit_limit <= 0:
@@ -3030,9 +3462,10 @@ def main():
         args.limit is not None
         and not args.prediction_evidence
         and not args.scan_open_predictions
+        and not args.strong_rejections
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence or --scan-open-predictions."
+            "  [!] --limit can only be used with --prediction-evidence, --scan-open-predictions, or --strong-rejections."
         )
         sys.exit(1)
     if (
@@ -3045,9 +3478,11 @@ def main():
         and args.mark_expired is None
         and args.mark_failed is None
         and args.mark_unknown is None
+        and args.mark_salvaged is None
+        and args.dismiss_strong_rejection is None
     ):
         print(
-            "  [!] --note can only be used with --star, --dismiss, or prediction outcome update flags."
+            "  [!] --note can only be used with --star, --dismiss, prediction outcome update flags, or strong-rejection status updates."
         )
         sys.exit(1)
     if (
@@ -3075,6 +3510,9 @@ def main():
         ("--mark-expired", args.mark_expired),
         ("--mark-failed", args.mark_failed),
         ("--mark-unknown", args.mark_unknown),
+        ("--strong-rejection", args.strong_rejection),
+        ("--mark-salvaged", args.mark_salvaged),
+        ("--dismiss-strong-rejection", args.dismiss_strong_rejection),
     ):
         if tx_num is not None and tx_num <= 0:
             print(f"  [!] {flag_name} requires a positive integer.")
@@ -3131,6 +3569,33 @@ def main():
 
     if args.prediction_evidence_stats:
         _print_prediction_evidence_stats(get_prediction_evidence_stats())
+        return
+
+    if args.strong_rejections:
+        _print_strong_rejections_list(limit=args.limit or 20)
+        return
+
+    if args.strong_rejection is not None:
+        if not _print_strong_rejection_detail(args.strong_rejection):
+            sys.exit(1)
+        return
+
+    if args.mark_salvaged is not None:
+        if not _apply_strong_rejection_status_update(
+            args.mark_salvaged,
+            "salvaged",
+            note=args.note,
+        ):
+            sys.exit(1)
+        return
+
+    if args.dismiss_strong_rejection is not None:
+        if not _apply_strong_rejection_status_update(
+            args.dismiss_strong_rejection,
+            "dismissed",
+            note=args.note,
+        ):
+            sys.exit(1)
         return
 
     if args.scan_open_predictions:

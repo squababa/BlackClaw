@@ -77,6 +77,7 @@ PREDICTION_EVIDENCE_REVIEW_STATUSES = (
     "accepted",
     "dismissed",
 )
+STRONG_REJECTION_STATUSES = ("open", "salvaged", "dismissed")
 PREDICTION_OUTCOME_BY_STATUS = {
     "open": "open",
     "unknown": "open",
@@ -208,6 +209,15 @@ def _normalize_prediction_evidence_review_status(value: object) -> str:
     if clean in PREDICTION_EVIDENCE_REVIEW_STATUSES:
         return clean
     return "unreviewed"
+
+
+def _normalize_strong_rejection_status(value: object) -> str:
+    """Normalize strong rejection review status into the stored v1 set."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return "open"
+    clean = text.lower()
+    return clean if clean in STRONG_REJECTION_STATUSES else "open"
 
 
 def _normalize_bool_flag(value: object) -> int:
@@ -363,6 +373,30 @@ def init_db():
             result_label TEXT NOT NULL,
             notes TEXT
         );
+        CREATE TABLE IF NOT EXISTS strong_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            exploration_id INTEGER,
+            seed_domain TEXT NOT NULL,
+            target_domain TEXT,
+            path TEXT,
+            total_score REAL,
+            novelty_score REAL,
+            distance_score REAL,
+            depth_score REAL,
+            prediction_quality_score REAL,
+            mechanism_type TEXT,
+            rejection_stage TEXT,
+            rejection_reasons_json TEXT,
+            salvage_reason TEXT,
+            connection_payload_json TEXT,
+            validation_json TEXT,
+            evidence_map_json TEXT,
+            mechanism_typing_json TEXT,
+            status TEXT NOT NULL DEFAULT "open",
+            notes TEXT,
+            FOREIGN KEY (exploration_id) REFERENCES explorations(id)
+        );
         CREATE INDEX IF NOT EXISTS idx_explorations_timestamp
             ON explorations(timestamp);
         CREATE INDEX IF NOT EXISTS idx_explorations_seed
@@ -429,6 +463,12 @@ def init_db():
             ON evaluations(eval_version_tag);
         CREATE INDEX IF NOT EXISTS idx_evaluations_pair_id
             ON evaluations(pair_id);
+        CREATE INDEX IF NOT EXISTS idx_strong_rejections_timestamp
+            ON strong_rejections(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_strong_rejections_total_score
+            ON strong_rejections(total_score);
+        CREATE INDEX IF NOT EXISTS idx_strong_rejections_status
+            ON strong_rejections(status);
     """)
     # Migration for older DB files created before chain_path existed.
     existing_columns = {
@@ -776,6 +816,23 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_evaluations_pair_id ON evaluations(pair_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strong_rejections_timestamp ON strong_rejections(timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strong_rejections_total_score ON strong_rejections(total_score)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strong_rejections_status ON strong_rejections(status)"
+    )
+    conn.execute(
+        """UPDATE strong_rejections
+        SET status = CASE LOWER(COALESCE(TRIM(status), ''))
+            WHEN 'salvaged' THEN 'salvaged'
+            WHEN 'dismissed' THEN 'dismissed'
+            ELSE 'open'
+        END"""
+    )
     conn.commit()
     conn.close()
 def _now() -> str:
@@ -1110,6 +1167,22 @@ def _json_object_or_empty(value: object) -> dict:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_array_or_empty(value: object) -> list:
+    """Parse JSON text into a list when possible."""
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str):
+        return []
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def _mechanism_typing_or_none(value: object) -> dict | None:
@@ -2128,6 +2201,320 @@ def update_prediction_status(
         outcome_status=status,
         validation_note=notes,
     )
+
+
+def _strong_rejection_row_to_dict(row: sqlite3.Row | dict) -> dict:
+    """Normalize stored strong rejection rows for CLI detail and listing."""
+    payload = dict(row)
+    for key in (
+        "total_score",
+        "novelty_score",
+        "distance_score",
+        "depth_score",
+        "prediction_quality_score",
+    ):
+        score = _coerce_optional_float(payload.get(key))
+        payload[key] = round(score, 3) if score is not None else None
+
+    payload["timestamp"] = _clean_optional_text(payload.get("timestamp"))
+    payload["seed_domain"] = _clean_optional_text(payload.get("seed_domain"))
+    payload["target_domain"] = _clean_optional_text(payload.get("target_domain"))
+    payload["mechanism_type"] = _clean_optional_text(payload.get("mechanism_type"))
+    payload["rejection_stage"] = _clean_optional_text(payload.get("rejection_stage"))
+    payload["salvage_reason"] = _clean_optional_text(payload.get("salvage_reason"))
+    payload["status"] = _normalize_strong_rejection_status(payload.get("status"))
+    payload["notes"] = _clean_optional_text(payload.get("notes"))
+
+    raw_path = payload.get("path")
+    payload["path"] = [
+        text
+        for text in (_clean_optional_text(item) for item in _json_array_or_empty(raw_path))
+        if text is not None
+    ]
+
+    raw_reasons = payload.get("rejection_reasons_json")
+    parsed_reasons = _json_array_or_empty(raw_reasons)
+    payload["rejection_reasons"] = (
+        _clean_reason_list(parsed_reasons) or _clean_reason_list(raw_reasons)
+    )
+
+    mechanism_typing = _mechanism_typing_or_none(payload.get("mechanism_typing_json"))
+    payload["mechanism_typing"] = mechanism_typing
+    if payload["mechanism_type"] is None and isinstance(mechanism_typing, dict):
+        payload["mechanism_type"] = _clean_optional_text(
+            mechanism_typing.get("mechanism_type")
+        )
+
+    for raw_key, clean_key in (
+        ("connection_payload_json", "connection_payload"),
+        ("validation_json", "validation"),
+        ("evidence_map_json", "evidence_map"),
+    ):
+        raw_value = payload.get(raw_key)
+        parsed = _json_object_or_empty(raw_value)
+        payload[clean_key] = parsed if parsed else _clean_optional_text(raw_value)
+
+    payload.pop("connection_payload_json", None)
+    payload.pop("validation_json", None)
+    payload.pop("evidence_map_json", None)
+    payload.pop("mechanism_typing_json", None)
+    payload.pop("rejection_reasons_json", None)
+    return payload
+
+
+def save_strong_rejection(
+    exploration_id: int | None,
+    seed_domain: str,
+    target_domain: str | None = None,
+    path: list[str] | None = None,
+    total_score: float | None = None,
+    novelty_score: float | None = None,
+    distance_score: float | None = None,
+    depth_score: float | None = None,
+    prediction_quality_score: float | None = None,
+    mechanism_type: str | None = None,
+    rejection_stage: str | None = None,
+    rejection_reasons: list[str] | None = None,
+    salvage_reason: str | None = None,
+    connection_payload: dict | None = None,
+    validation: dict | str | None = None,
+    evidence_map: dict | None = None,
+    mechanism_typing: dict | None = None,
+    status: str = "open",
+    notes: str | None = None,
+) -> int:
+    """Persist one high-scoring rejected candidate for later salvage review."""
+    conn = _connect()
+    stored_evidence_map = (
+        evidence_map
+        if isinstance(evidence_map, dict)
+        else (
+            connection_payload.get("evidence_map")
+            if isinstance(connection_payload, dict)
+            and isinstance(connection_payload.get("evidence_map"), dict)
+            else None
+        )
+    )
+    stored_mechanism_typing = (
+        normalize_mechanism_typing(mechanism_typing)
+        if isinstance(mechanism_typing, dict)
+        else (
+            normalize_mechanism_typing(connection_payload)
+            if isinstance(connection_payload, dict)
+            else None
+        )
+    )
+    clean_mechanism_type = _clean_optional_text(mechanism_type)
+    if clean_mechanism_type is None and isinstance(stored_mechanism_typing, dict):
+        clean_mechanism_type = _clean_optional_text(
+            stored_mechanism_typing.get("mechanism_type")
+        )
+
+    cursor = conn.execute(
+        """INSERT INTO strong_rejections
+        (timestamp, exploration_id, seed_domain, target_domain, path, total_score,
+         novelty_score, distance_score, depth_score, prediction_quality_score,
+         mechanism_type, rejection_stage, rejection_reasons_json, salvage_reason,
+         connection_payload_json, validation_json, evidence_map_json,
+         mechanism_typing_json, status, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            _now(),
+            exploration_id,
+            seed_domain.strip(),
+            target_domain.strip() if isinstance(target_domain, str) else None,
+            (
+                json.dumps(
+                    [item.strip() for item in path if isinstance(item, str) and item.strip()],
+                    ensure_ascii=False,
+                )
+                if isinstance(path, list) and path
+                else None
+            ),
+            total_score,
+            novelty_score,
+            distance_score,
+            depth_score,
+            prediction_quality_score,
+            clean_mechanism_type,
+            _clean_optional_text(rejection_stage),
+            (
+                json.dumps(_clean_reason_list(rejection_reasons), ensure_ascii=False)
+                if rejection_reasons
+                else None
+            ),
+            _clean_optional_text(salvage_reason),
+            (
+                json.dumps(connection_payload, ensure_ascii=False)
+                if isinstance(connection_payload, dict)
+                else None
+            ),
+            (
+                json.dumps(validation, ensure_ascii=False)
+                if isinstance(validation, dict)
+                else (
+                    validation.strip()
+                    if isinstance(validation, str) and validation.strip()
+                    else None
+                )
+            ),
+            (
+                json.dumps(stored_evidence_map, ensure_ascii=False)
+                if isinstance(stored_evidence_map, dict)
+                else None
+            ),
+            (
+                json.dumps(stored_mechanism_typing, ensure_ascii=False)
+                if isinstance(stored_mechanism_typing, dict)
+                else None
+            ),
+            _normalize_strong_rejection_status(status),
+            _clean_optional_text(notes),
+        ),
+    )
+    strong_rejection_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return strong_rejection_id
+
+
+def list_strong_rejections(
+    limit: int = 20,
+    status: str | None = None,
+) -> list[dict]:
+    """List stored strong rejections newest-first, optionally filtered by status."""
+    conn = _connect()
+    safe_limit = max(1, int(limit))
+    if status is None:
+        rows = conn.execute(
+            """SELECT
+                id,
+                timestamp,
+                exploration_id,
+                seed_domain,
+                target_domain,
+                path,
+                total_score,
+                novelty_score,
+                distance_score,
+                depth_score,
+                prediction_quality_score,
+                mechanism_type,
+                rejection_stage,
+                rejection_reasons_json,
+                salvage_reason,
+                connection_payload_json,
+                validation_json,
+                evidence_map_json,
+                mechanism_typing_json,
+                status,
+                notes
+            FROM strong_rejections
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?""",
+            (safe_limit,),
+        ).fetchall()
+    else:
+        clean_status = _normalize_strong_rejection_status(status)
+        rows = conn.execute(
+            """SELECT
+                id,
+                timestamp,
+                exploration_id,
+                seed_domain,
+                target_domain,
+                path,
+                total_score,
+                novelty_score,
+                distance_score,
+                depth_score,
+                prediction_quality_score,
+                mechanism_type,
+                rejection_stage,
+                rejection_reasons_json,
+                salvage_reason,
+                connection_payload_json,
+                validation_json,
+                evidence_map_json,
+                mechanism_typing_json,
+                status,
+                notes
+            FROM strong_rejections
+            WHERE LOWER(COALESCE(status, '')) = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?""",
+            (clean_status, safe_limit),
+        ).fetchall()
+    conn.close()
+    return [_strong_rejection_row_to_dict(row) for row in rows]
+
+
+def get_strong_rejection(id: int) -> dict | None:
+    """Fetch one stored strong rejection by id."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            id,
+            timestamp,
+            exploration_id,
+            seed_domain,
+            target_domain,
+            path,
+            total_score,
+            novelty_score,
+            distance_score,
+            depth_score,
+            prediction_quality_score,
+            mechanism_type,
+            rejection_stage,
+            rejection_reasons_json,
+            salvage_reason,
+            connection_payload_json,
+            validation_json,
+            evidence_map_json,
+            mechanism_typing_json,
+            status,
+            notes
+        FROM strong_rejections
+        WHERE id = ?
+        LIMIT 1""",
+        (id,),
+    ).fetchone()
+    conn.close()
+    return _strong_rejection_row_to_dict(row) if row else None
+
+
+def update_strong_rejection_status(
+    id: int,
+    status: str,
+    notes: str | None = None,
+) -> bool:
+    """Update strong rejection review status and optional notes."""
+    clean_status = _normalize_strong_rejection_status(status)
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT 1 FROM strong_rejections WHERE id = ? LIMIT 1",
+        (id,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+
+    if notes is None:
+        conn.execute(
+            "UPDATE strong_rejections SET status = ? WHERE id = ?",
+            (clean_status, id),
+        )
+    else:
+        conn.execute(
+            """UPDATE strong_rejections
+            SET status = ?, notes = ?
+            WHERE id = ?""",
+            (clean_status, _clean_optional_text(notes), id),
+        )
+    conn.commit()
+    conn.close()
+    return True
 
 
 # --- Transmissions ---
