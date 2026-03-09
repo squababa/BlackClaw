@@ -152,6 +152,130 @@ def _update_strong_rejection_status_response(
     )
 
 
+def _operator_home_outcome_sort_key(row: dict) -> tuple:
+    priority = {
+        "review_for_support": 0,
+        "review_for_contradiction": 1,
+        "conflicting_evidence": 2,
+        "waiting_on_review": 3,
+        "insufficient_evidence": 4,
+    }
+    support_hits = _coerce_int(row.get("accepted_support_hits"))
+    contradiction_hits = _coerce_int(row.get("accepted_contradiction_hits"))
+    unreviewed_hits = _coerce_int(row.get("unreviewed_reviewable_hits"))
+    return (
+        priority.get(str(row.get("recommendation") or ""), 99),
+        -(support_hits + contradiction_hits),
+        -max(support_hits, contradiction_hits),
+        -unreviewed_hits,
+        -_coerce_int(row.get("id")),
+    )
+
+
+def _operator_home_strong_rejection_sort_key(row: dict) -> tuple:
+    score = row.get("total_score")
+    safe_score = float(score) if isinstance(score, (int, float)) else 0.0
+    return (
+        score is None,
+        -safe_score,
+        -_coerce_int(row.get("id")),
+    )
+
+
+def _operator_home_prediction_summary(row: dict) -> str:
+    prediction_json = row.get("prediction_json")
+    if isinstance(prediction_json, dict):
+        statement = _clean_optional_text(prediction_json.get("statement"))
+        if statement is not None:
+            return statement
+    return _clean_optional_text(row.get("prediction")) or "—"
+
+
+def _build_operator_home_snapshot() -> dict:
+    evidence_stats = get_prediction_evidence_review_stats()
+    outcome_stats = get_prediction_outcome_suggestion_stats()
+    strong_rejection_stats = get_strong_rejection_stats()
+
+    evidence_backlog_rows = list_prediction_evidence_review_queue(limit=5)
+
+    outcome_backlog_rows = [
+        row
+        for row in list_prediction_outcome_review_queue(limit=None)
+        if str(row.get("outcome_status") or "open").strip().lower() == "open"
+    ]
+    outcome_backlog_rows.sort(key=_operator_home_outcome_sort_key)
+
+    strong_rejection_backlog_rows = list_strong_rejections(limit=100, status="open")
+    strong_rejection_backlog_rows.sort(key=_operator_home_strong_rejection_sort_key)
+
+    review_backlog = outcome_stats.get("review_backlog") or {}
+    overall = outcome_stats.get("overall") or {}
+
+    counts = {
+        "unreviewed_evidence_hits": _coerce_int(
+            (evidence_stats.get("by_review_status") or {}).get("unreviewed")
+        ),
+        "predictions_needing_review": _coerce_int(
+            evidence_stats.get("predictions_needing_review")
+        ),
+        "open_strong_rejections": _coerce_int(strong_rejection_stats.get("open")),
+        "open_predictions": _coerce_int(overall.get("open")),
+        "review_for_support_candidates": _coerce_int(
+            review_backlog.get("open_predictions_with_accepted_support_only")
+        ),
+        "review_for_contradiction_candidates": _coerce_int(
+            review_backlog.get("open_predictions_with_accepted_contradiction_only")
+        ),
+        "conflicting_evidence_predictions": _coerce_int(
+            review_backlog.get("open_predictions_with_accepted_conflicting_evidence")
+        ),
+    }
+
+    return {
+        "counts": counts,
+        "flags": {
+            "has_unreviewed_evidence": counts["unreviewed_evidence_hits"] > 0,
+            "has_outcome_candidates": bool(outcome_backlog_rows),
+            "has_open_strong_rejections": counts["open_strong_rejections"] > 0,
+        },
+        "evidence_backlog": [
+            {
+                "id": _coerce_int(row.get("id")),
+                "prediction_id": _coerce_int(row.get("prediction_id")),
+                "classification": row.get("classification") or "unclear",
+                "score": row.get("score"),
+                "title": row.get("title") or "Untitled result",
+                "scan_timestamp": row.get("scan_timestamp"),
+            }
+            for row in evidence_backlog_rows[:5]
+        ],
+        "outcome_backlog": [
+            {
+                "id": _coerce_int(row.get("id")),
+                "transmission_number": row.get("transmission_number"),
+                "recommendation": row.get("recommendation")
+                or "insufficient_evidence",
+                "mechanism_type": row.get("mechanism_type") or "unknown",
+                "utility_class": row.get("utility_class") or "unknown",
+                "prediction_summary": _operator_home_prediction_summary(row),
+            }
+            for row in outcome_backlog_rows[:5]
+        ],
+        "strong_rejection_backlog": [
+            {
+                "id": _coerce_int(row.get("id")),
+                "total_score": row.get("total_score"),
+                "mechanism_type": row.get("mechanism_type") or "unknown",
+                "seed_domain": row.get("seed_domain") or "—",
+                "target_domain": row.get("target_domain") or "—",
+                "salvage_reason": row.get("salvage_reason") or "—",
+                "timestamp": row.get("timestamp"),
+            }
+            for row in strong_rejection_backlog_rows[:5]
+        ],
+    }
+
+
 def _pick_existing_column(
     columns: set[str], candidates: tuple[str, ...]
 ) -> str | None:
@@ -924,6 +1048,11 @@ def api_dismiss_strong_rejection(rejection_id: int):
     return _update_strong_rejection_status_response(rejection_id, "dismissed")
 
 
+@app.get("/api/operator-home")
+def api_operator_home():
+    return jsonify(_build_operator_home_snapshot())
+
+
 @app.get("/")
 def index():
     return """<!doctype html>
@@ -1184,6 +1313,23 @@ def index():
     .table-shell {
       overflow-x: auto;
     }
+    .triage-panels {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .triage-panel {
+      border: 1px solid var(--border-color);
+      padding: 12px;
+      background: var(--panel-alt);
+    }
+    .triage-panel h3 {
+      margin: 0 0 10px;
+    }
+    .triage-panel p {
+      margin: 0 0 10px;
+    }
     .review-table-row {
       cursor: pointer;
     }
@@ -1271,6 +1417,29 @@ def index():
   <h1>BlackClaw Dashboard</h1>
   <p class="muted">Local dashboard over transmissions, evidence review, outcome review, and kill stats.</p>
   <p><a href="/domains">Browse domains</a></p>
+
+  <section>
+    <h2>Operator Home</h2>
+    <p class="muted">Local triage snapshot of what needs attention now. Click any row to load the existing detail panel in the relevant review section below.</p>
+    <div id="operator-home-summary" class="grid"><p class="muted">Loading…</p></div>
+    <div class="triage-panels">
+      <div class="triage-panel">
+        <h3>Evidence Backlog</h3>
+        <p class="muted">Unreviewed evidence hits that are ready for manual review.</p>
+        <div id="operator-home-evidence"></div>
+      </div>
+      <div class="triage-panel">
+        <h3>Outcome Backlog</h3>
+        <p class="muted">Open predictions that are closest to outcome adjudication.</p>
+        <div id="operator-home-outcomes"></div>
+      </div>
+      <div class="triage-panel">
+        <h3>Strong Rejection Backlog</h3>
+        <p class="muted">Open salvage candidates sorted by local score strength.</p>
+        <div id="operator-home-strong-rejections"></div>
+      </div>
+    </div>
+  </section>
 
   <section>
     <h2>Kill Stats</h2>
@@ -1530,6 +1699,13 @@ def index():
         return "—";
       }
       return path.join(" -> ");
+    }
+
+    function scrollToPanel(id) {
+      const element = document.getElementById(id);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     }
 
     function killRateClass(count, total) {
@@ -1846,6 +2022,157 @@ def index():
           </table>
         </div>
       `;
+    }
+
+    function renderOperatorHome(snapshot) {
+      const counts = snapshot.counts || {};
+      const summaryItems = [
+        { label: "Unreviewed evidence", value: counts.unreviewed_evidence_hits || 0, valueClass: "score-accent" },
+        { label: "Predictions needing review", value: counts.predictions_needing_review || 0 },
+        { label: "Open strong rejections", value: counts.open_strong_rejections || 0 },
+        { label: "Open predictions", value: counts.open_predictions || 0 },
+        { label: "Review-for-support candidates", value: counts.review_for_support_candidates || 0, valueClass: "score-accent" },
+        { label: "Review-for-contradiction candidates", value: counts.review_for_contradiction_candidates || 0, valueClass: "score-accent" },
+        { label: "Conflicting-evidence predictions", value: counts.conflicting_evidence_predictions || 0, valueClass: "score-accent" },
+      ];
+      document.getElementById("operator-home-summary").innerHTML = summaryItems.map((item) => `
+        <div class="stat">
+          <div class="muted">${escapeHtml(item.label)}</div>
+          <div class="stat-value ${item.valueClass || ""}">${escapeHtml(formatInteger(item.value))}</div>
+        </div>
+      `).join("");
+
+      renderOperatorHomeEvidence(snapshot.evidence_backlog || []);
+      renderOperatorHomeOutcomes(snapshot.outcome_backlog || []);
+      renderOperatorHomeStrongRejections(snapshot.strong_rejection_backlog || []);
+    }
+
+    function renderOperatorHomeEvidence(rows) {
+      const container = document.getElementById("operator-home-evidence");
+      if (!rows.length) {
+        container.innerHTML = "<p class=\\"muted\\">No unreviewed evidence hits.</p>";
+        return;
+      }
+      const body = rows.map((row) => `
+        <tr
+          class="review-table-row ${Number(row.id) === selectedEvidenceId ? "is-selected" : ""}"
+          data-home-evidence-id="${escapeHtml(row.id)}"
+        >
+          <td>${escapeHtml(row.id)}</td>
+          <td>${escapeHtml(row.prediction_id)}</td>
+          <td>${renderStatusPill(row.classification)}</td>
+          <td class="score-accent">${escapeHtml(formatScore(row.score))}</td>
+          <td>${escapeHtml(truncateText(row.title, 72))}</td>
+        </tr>
+      `).join("");
+      container.innerHTML = `
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Evidence ID</th>
+                <th>Prediction ID</th>
+                <th>Classification</th>
+                <th>Score</th>
+                <th>Short title</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+      document.querySelectorAll("#operator-home-evidence [data-home-evidence-id]").forEach((row) => {
+        row.addEventListener("click", async () => {
+          await loadEvidenceDetail(Number(row.dataset.homeEvidenceId));
+          scrollToPanel("evidence-detail");
+        });
+      });
+    }
+
+    function renderOperatorHomeOutcomes(rows) {
+      const container = document.getElementById("operator-home-outcomes");
+      if (!rows.length) {
+        container.innerHTML = "<p class=\\"muted\\">No open outcome candidates right now.</p>";
+        return;
+      }
+      const body = rows.map((row) => `
+        <tr
+          class="review-table-row ${Number(row.id) === selectedOutcomePredictionId ? "is-selected" : ""}"
+          data-home-prediction-id="${escapeHtml(row.id)}"
+        >
+          <td>${escapeHtml(row.id)}</td>
+          <td>${escapeHtml(row.transmission_number)}</td>
+          <td>${renderStatusPill(row.recommendation || "insufficient_evidence")}</td>
+          <td>${escapeHtml(row.mechanism_type || "unknown")}</td>
+          <td>${escapeHtml(row.utility_class || "unknown")}</td>
+          <td>${escapeHtml(truncateText(row.prediction_summary || "—", 78))}</td>
+        </tr>
+      `).join("");
+      container.innerHTML = `
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Prediction ID</th>
+                <th>Tx #</th>
+                <th>Recommendation</th>
+                <th>Mechanism type</th>
+                <th>Utility</th>
+                <th>Short prediction</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+      document.querySelectorAll("#operator-home-outcomes [data-home-prediction-id]").forEach((row) => {
+        row.addEventListener("click", async () => {
+          await loadOutcomeReviewDetail(Number(row.dataset.homePredictionId));
+          scrollToPanel("outcome-review-detail");
+        });
+      });
+    }
+
+    function renderOperatorHomeStrongRejections(rows) {
+      const container = document.getElementById("operator-home-strong-rejections");
+      if (!rows.length) {
+        container.innerHTML = "<p class=\\"muted\\">No open strong rejections.</p>";
+        return;
+      }
+      const body = rows.map((row) => `
+        <tr
+          class="review-table-row ${Number(row.id) === selectedStrongRejectionId ? "is-selected" : ""}"
+          data-home-strong-rejection-id="${escapeHtml(row.id)}"
+        >
+          <td>${escapeHtml(row.id)}</td>
+          <td class="score-accent">${escapeHtml(formatScore(row.total_score))}</td>
+          <td>${escapeHtml(row.mechanism_type || "unknown")}</td>
+          <td>${escapeHtml(`${row.seed_domain || "—"} -> ${row.target_domain || "—"}`)}</td>
+          <td>${escapeHtml(truncateText(row.salvage_reason || "—", 72))}</td>
+        </tr>
+      `).join("");
+      container.innerHTML = `
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Rejection ID</th>
+                <th>Total score</th>
+                <th>Mechanism type</th>
+                <th>Seed -> target</th>
+                <th>Salvage reason</th>
+              </tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+      `;
+      document.querySelectorAll("#operator-home-strong-rejections [data-home-strong-rejection-id]").forEach((row) => {
+        row.addEventListener("click", async () => {
+          await loadStrongRejectionDetail(Number(row.dataset.homeStrongRejectionId));
+          scrollToPanel("strong-rejection-detail");
+        });
+      });
     }
 
     function renderEvidenceReviewQueue(rows) {
@@ -2463,6 +2790,7 @@ def index():
 
     async function loadReviewData() {
       const [
+        operatorHome,
         evidenceReviewStats,
         evidenceReviewQueue,
         outcomeReviewQueue,
@@ -2470,6 +2798,7 @@ def index():
         strongRejectionStats,
         strongRejectionQueue,
       ] = await Promise.all([
+        fetchJson("/api/operator-home"),
         fetchJson("/api/evidence-review-stats"),
         fetchJson("/api/evidence-review-queue?limit=25"),
         fetchJson("/api/outcome-review-queue?limit=25"),
@@ -2477,6 +2806,7 @@ def index():
         fetchJson("/api/strong-rejection-stats"),
         fetchJson("/api/strong-rejections?limit=25"),
       ]);
+      renderOperatorHome(operatorHome);
       renderEvidenceReviewStats(evidenceReviewStats);
       renderEvidenceReviewQueue(evidenceReviewQueue);
       renderOutcomeSuggestionStats(outcomeSuggestionStats);
