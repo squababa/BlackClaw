@@ -444,8 +444,12 @@ def _provenance_quality_failures(score: dict) -> list[str]:
         else:
             failures.append("generic evidence")
     if "generic evidence" in reasons and (
-        float(score.get("snippet_specificity") or 0.0) < 0.7
-        or float(score.get("source_traceability") or 0.0) < 0.6
+        float(score.get("snippet_specificity") or 0.0)
+        < PROVENANCE_SNIPPET_SPECIFICITY_MIN
+        or float(score.get("source_traceability") or 0.0)
+        < PROVENANCE_SOURCE_TRACEABILITY_MIN
+        or float(score.get("overall") or 0.0) < PROVENANCE_OVERALL_MIN
+        or "claim/snippet mismatch" in reasons
     ):
         failures.append("generic evidence")
     if "claim/snippet mismatch" in reasons:
