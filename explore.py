@@ -5,13 +5,13 @@ Searches a seed domain and extracts abstract patterns via LLM.
 import json
 from tavily import TavilyClient
 from config import TAVILY_API_KEY
-from llm_client import get_llm_client
+from llm_router import LLMRouter
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
-from debug_log import log_gemini_output
 
-_llm_client = get_llm_client()
+_llm_router = LLMRouter()
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
+EXPLORE_MODEL = "qwen3:8b"
 EXTRACT_PROMPT = """You are a pattern extraction engine. Your job is to extract 3-5 transferable, mechanism-level patterns from a domain.
 Domain: {domain}
 
@@ -68,8 +68,7 @@ Output schema:
   ]
 }}"""
 JSON_RETRY_PROMPT = (
-    "Your previous response was not valid JSON. Please respond with ONLY valid JSON, "
-    "no markdown, no explanation, no trailing commas, no comments. Here is what I need:"
+    "Your last response was invalid JSON. Return valid JSON only matching the required schema."
 )
 def _search_seed(seed: dict) -> tuple[str, dict]:
     """Run Tavily searches for the seed domain and return combined content + provenance."""
@@ -133,44 +132,41 @@ def _extract_json_substring(text: str) -> str | None:
     except Exception:
         return None
 def _generate_json_with_retry(full_prompt: str, max_output_tokens: int) -> str | None:
-    """Generate JSON with one retry if parsing fails."""
-    try:
-        response = _llm_client.generate_content(
-            full_prompt,
-            generation_config={
-                "max_output_tokens": max_output_tokens,
-                "response_mime_type": "application/json",
-            },
+    """Generate JSON with up to two correction retries if parsing fails."""
+    del max_output_tokens
+    raw_responses = []
+    prompt = full_prompt
+    for attempt in range(3):
+        raw_output = _llm_router.call_local_chat(
+            model=EXPLORE_MODEL,
+            system_prompt=(
+                "You return strict JSON only. No markdown, no explanations, no comments."
+            ),
+            user_prompt=prompt,
+            temperature=0,
         )
-        log_gemini_output("explore", "initial", response)
         increment_llm_calls(1)
-        raw_output = response.text if getattr(response, "text", None) else ""
+        raw_responses.append(raw_output)
         checked = check_llm_output(raw_output)
         if checked is None:
-            print("  [!] LLM output failed safety check — skipping")
-            return None
+            raise RuntimeError("LLM output failed safety check.")
         extracted = _extract_json_substring(checked)
-        if extracted is not None:
+        if extracted is None:
+            if attempt < 2:
+                prompt = f"{JSON_RETRY_PROMPT}\n\n{full_prompt}"
+                continue
+            break
+        try:
+            json.loads(extracted)
             return extracted
-        retry_prompt = f"{JSON_RETRY_PROMPT}\n\n{full_prompt}"
-        retry_response = _llm_client.generate_content(
-            retry_prompt,
-            generation_config={
-                "max_output_tokens": max_output_tokens,
-                "response_mime_type": "application/json",
-            },
-        )
-        log_gemini_output("explore", "retry", retry_response)
-        increment_llm_calls(1)
-        retry_raw = retry_response.text if getattr(retry_response, "text", None) else ""
-        retry_checked = check_llm_output(retry_raw)
-        if retry_checked is None:
-            print("  [!] LLM retry output failed safety check — skipping")
-            return None
-        return _extract_json_substring(retry_checked)
-    except Exception as e:
-        print(f"  [!] LLM call failed: {e}")
-        return None
+        except json.JSONDecodeError:
+            if attempt < 2:
+                prompt = f"{JSON_RETRY_PROMPT}\n\n{full_prompt}"
+                continue
+    raise RuntimeError(
+        "Failed to parse Ollama response as JSON after 3 attempts. "
+        f"Raw response: {raw_responses[-1] if raw_responses else '<empty>'}"
+    )
 def dive(seed: dict) -> list[dict]:
     """
     Dive into a seed domain:
@@ -187,9 +183,10 @@ def dive(seed: dict) -> list[dict]:
     # Step 2: Extract patterns via LLM
     prompt = EXTRACT_PROMPT.format(domain=seed["name"])
     full_prompt = f"{prompt}\n\n--- RESEARCH MATERIAL ---\n\n{research}"
-    extracted_json = _generate_json_with_retry(full_prompt, 4096)
-    if extracted_json is None:
-        print("  [!] Failed to parse LLM response as JSON after retry")
+    try:
+        extracted_json = _generate_json_with_retry(full_prompt, 4096)
+    except Exception as e:
+        print(f"  [!] Failed to extract JSON from local Ollama response: {e}")
         return []
     try:
         data = json.loads(extracted_json)

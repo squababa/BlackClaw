@@ -2,9 +2,27 @@
 BlackClaw LLM Client Selector
 Central provider entrypoint for all LLM calls.
 """
-import anthropic
-import google.generativeai as genai
-from config import ANTHROPIC_API_KEY, LLM_PROVIDER, MODEL, GEMINI_API_KEY
+import hashlib
+import math
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
+
+from config import (
+    ANTHROPIC_API_KEY,
+    GEMINI_API_KEY,
+    LLM_PROVIDER,
+    MODEL,
+    OLLAMA_BASE_URL,
+)
+from llm_router import LLMRouter
 from store import record_llm_usage
 
 EMBEDDING_MODEL = "models/gemini-embedding-001"
@@ -20,6 +38,10 @@ class GeminiClient:
     """Thin wrapper around Google Gemini generate_content."""
 
     def __init__(self, model_name: str):
+        if genai is None:
+            raise RuntimeError(
+                "google-generativeai is not installed. Install dependencies or use LLM_PROVIDER=ollama."
+            )
         genai.configure(api_key=GEMINI_API_KEY)
         self._model = genai.GenerativeModel(model_name)
 
@@ -54,6 +76,14 @@ class ClaudeClient:
             return self._text
 
     def __init__(self, model_name: str):
+        if anthropic is None:
+            raise RuntimeError(
+                "anthropic is not installed. Install dependencies or use LLM_PROVIDER=ollama."
+            )
+        if genai is None:
+            raise RuntimeError(
+                "google-generativeai is not installed. Install dependencies or use LLM_PROVIDER=ollama."
+            )
         self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         self._model = model_name
         genai.configure(api_key=GEMINI_API_KEY)
@@ -104,6 +134,60 @@ class ClaudeClient:
         return [float(value) for value in embedding]
 
 
+class OllamaClient:
+    """Minimal local Ollama client compatible with the existing interface."""
+
+    class _OllamaResponse:
+        def __init__(self, text: str, payload: dict | None = None):
+            self._text = text
+            self._payload = payload or {}
+
+        @property
+        def text(self) -> str:
+            return self._text
+
+        def to_dict(self) -> dict:
+            return dict(self._payload)
+
+    def __init__(self, model_name: str, base_url: str):
+        self._model = model_name
+        self._router = LLMRouter(base_url=base_url)
+
+    def generate_content(self, prompt: str, generation_config: dict | None = None):
+        temperature = 0
+        if isinstance(generation_config, dict):
+            temperature = float(generation_config.get("temperature", 0) or 0)
+        text = self._router.call_local_chat(
+            model=self._model,
+            system_prompt="Respond directly to the user's instructions.",
+            user_prompt=prompt,
+            temperature=temperature,
+        )
+        payload = {"model": self._model, "response": text}
+        try:
+            record_llm_usage(model=self._model)
+        except Exception:
+            pass
+        return self._OllamaResponse(text, payload)
+
+    def embed_content(self, text: str) -> list[float]:
+        """Deterministic local fallback embedding for semantic dedup when using Ollama."""
+        cleaned = (text or "").strip().lower()
+        if not cleaned:
+            raise RuntimeError("Cannot embed empty text.")
+        dims = 128
+        vector = [0.0] * dims
+        for token in cleaned.split():
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            bucket = int.from_bytes(digest[:2], "big") % dims
+            sign = 1.0 if digest[2] % 2 == 0 else -1.0
+            vector[bucket] += sign
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm == 0:
+            return vector
+        return [value / norm for value in vector]
+
+
 _CLIENT = None
 
 
@@ -114,6 +198,8 @@ def get_llm_client():
         return _CLIENT
     if LLM_PROVIDER == "gemini":
         _CLIENT = GeminiClient(MODEL)
-    else:
+    elif LLM_PROVIDER == "claude":
         _CLIENT = ClaudeClient(MODEL)
+    else:
+        _CLIENT = OllamaClient(MODEL, OLLAMA_BASE_URL)
     return _CLIENT
