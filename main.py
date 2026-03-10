@@ -38,6 +38,8 @@ from store import (
     export_transmissions,
     set_transmission_feedback,
     get_transmission_feedback_context,
+    get_transmission_lineage_metadata,
+    get_strong_rejection_lineage_metadata,
     save_transmission_dive,
     increment_llm_calls,
     list_predictions,
@@ -1362,6 +1364,108 @@ def _print_strong_rejection_detail(rejection_id: int) -> bool:
     return True
 
 
+def _lineage_change_summary_text(payload: dict | None) -> str:
+    """Render a compact lineage-change summary from stored JSON."""
+    if not isinstance(payload, dict) or not payload:
+        return "—"
+    summary = str(payload.get("summary") or "").strip()
+    event_types = [
+        str(item).strip()
+        for item in (payload.get("event_types") or [])
+        if str(item).strip()
+    ]
+    if summary and event_types:
+        return f"{summary} ({', '.join(event_types[:3])})"
+    if summary:
+        return summary
+    if event_types:
+        return ", ".join(event_types[:3])
+    return "—"
+
+
+def _scar_summary_text(payload: dict | None) -> str:
+    """Render a compact scar summary from stored JSON."""
+    if not isinstance(payload, dict) or not payload:
+        return "—"
+    summary = str(payload.get("summary") or "").strip()
+    count = payload.get("count")
+    if summary and count is not None:
+        return f"{summary} (count={count})"
+    if summary:
+        return summary
+    if count is not None:
+        return f"count={count}"
+    return "—"
+
+
+def _print_transmission_lineage(transmission_number: int) -> bool:
+    """Render concise lineage metadata for one transmission."""
+    row = get_transmission_lineage_metadata(transmission_number)
+    if row is None:
+        print(f"  [!] Transmission #{transmission_number} not found.")
+        return False
+    if not any(
+        row.get(key) not in (None, "", {})
+        for key in (
+            "lineage_root_id",
+            "parent_transmission_number",
+            "parent_strong_rejection_id",
+            "lineage_change",
+            "scar_summary",
+        )
+    ):
+        print(f"[Lineage] Transmission #{transmission_number}: no lineage data stored.")
+        return True
+    print(f"[Lineage] Transmission #{transmission_number}")
+    print(f"lineage_root_id\t{row.get('lineage_root_id') or '—'}")
+    print(
+        "parent_transmission_number\t"
+        f"{row.get('parent_transmission_number') if row.get('parent_transmission_number') is not None else '—'}"
+    )
+    print(
+        "parent_strong_rejection_id\t"
+        f"{row.get('parent_strong_rejection_id') if row.get('parent_strong_rejection_id') is not None else '—'}"
+    )
+    print(f"lineage_change\t{_lineage_change_summary_text(row.get('lineage_change'))}")
+    print(f"scar_summary\t{_scar_summary_text(row.get('scar_summary'))}")
+    return True
+
+
+def _print_strong_rejection_lineage(rejection_id: int) -> bool:
+    """Render concise lineage metadata for one strong rejection."""
+    row = get_strong_rejection_lineage_metadata(rejection_id)
+    if row is None:
+        print(f"  [!] Strong rejection #{rejection_id} not found.")
+        return False
+    if not any(
+        row.get(key) not in (None, "", {})
+        for key in (
+            "lineage_root_id",
+            "parent_transmission_number",
+            "parent_strong_rejection_id",
+            "lineage_change",
+            "scar_summary",
+        )
+    ):
+        print(
+            f"[Lineage] Strong rejection #{rejection_id}: no lineage data stored."
+        )
+        return True
+    print(f"[Lineage] Strong rejection #{rejection_id}")
+    print(f"lineage_root_id\t{row.get('lineage_root_id') or '—'}")
+    print(
+        "parent_transmission_number\t"
+        f"{row.get('parent_transmission_number') if row.get('parent_transmission_number') is not None else '—'}"
+    )
+    print(
+        "parent_strong_rejection_id\t"
+        f"{row.get('parent_strong_rejection_id') if row.get('parent_strong_rejection_id') is not None else '—'}"
+    )
+    print(f"lineage_change\t{_lineage_change_summary_text(row.get('lineage_change'))}")
+    print(f"scar_summary\t{_scar_summary_text(row.get('scar_summary'))}")
+    return True
+
+
 def _apply_strong_rejection_status_update(
     rejection_id: int,
     status: str,
@@ -2438,6 +2542,13 @@ def parse_args():
         help="Run a deeper one-call LLM analysis for a transmission and exit",
     )
     parser.add_argument(
+        "--transmission-lineage",
+        type=int,
+        default=None,
+        metavar="NUMBER",
+        help="Show concise lineage/scar metadata for a transmission and exit",
+    )
+    parser.add_argument(
         "--note",
         type=str,
         default=None,
@@ -2599,6 +2710,13 @@ def parse_args():
         default=None,
         metavar="ID",
         help="Show full details for a stored strong rejection id and exit",
+    )
+    parser.add_argument(
+        "--strong-rejection-lineage",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Show concise lineage/scar metadata for a stored strong rejection id and exit",
     )
     parser.add_argument(
         "--mark-salvaged",
@@ -4178,6 +4296,7 @@ def main():
             args.star is not None,
             args.dismiss is not None,
             args.dive is not None,
+            args.transmission_lineage is not None,
         ]
     )
     prediction_action_count = sum(
@@ -4214,6 +4333,7 @@ def main():
         [
             args.strong_rejections,
             args.strong_rejection is not None,
+            args.strong_rejection_lineage is not None,
             args.mark_salvaged is not None,
             args.dismiss_strong_rejection is not None,
         ]
@@ -4240,7 +4360,9 @@ def main():
         )
         sys.exit(1)
     if feedback_action_count > 1:
-        print("  [!] Use only one of --star, --dismiss, or --dive at a time.")
+        print(
+            "  [!] Use only one of --star, --dismiss, --dive, or --transmission-lineage at a time."
+        )
         sys.exit(1)
     if prediction_action_count > 1:
         print(
@@ -4249,7 +4371,7 @@ def main():
         sys.exit(1)
     if strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one of --strong-rejections, --strong-rejection, --mark-salvaged, or --dismiss-strong-rejection at a time."
+            "  [!] Use only one of --strong-rejections, --strong-rejection, --strong-rejection-lineage, --mark-salvaged, or --dismiss-strong-rejection at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and (
@@ -4332,6 +4454,7 @@ def main():
         ("--star", args.star),
         ("--dismiss", args.dismiss),
         ("--dive", args.dive),
+        ("--transmission-lineage", args.transmission_lineage),
         ("--prediction", args.prediction),
         ("--outcome-review", args.outcome_review),
         ("--evidence-prediction", args.evidence_prediction),
@@ -4345,6 +4468,7 @@ def main():
         ("--mark-failed", args.mark_failed),
         ("--mark-unknown", args.mark_unknown),
         ("--strong-rejection", args.strong_rejection),
+        ("--strong-rejection-lineage", args.strong_rejection_lineage),
         ("--mark-salvaged", args.mark_salvaged),
         ("--dismiss-strong-rejection", args.dismiss_strong_rejection),
     ):
@@ -4373,6 +4497,11 @@ def main():
     if args.dive is not None:
         if not _run_feedback_dive(args.dive):
             print(f"  [!] Transmission #{args.dive} not found.")
+            sys.exit(1)
+        return
+
+    if args.transmission_lineage is not None:
+        if not _print_transmission_lineage(args.transmission_lineage):
             sys.exit(1)
         return
 
@@ -4453,6 +4582,11 @@ def main():
 
     if args.strong_rejection is not None:
         if not _print_strong_rejection_detail(args.strong_rejection):
+            sys.exit(1)
+        return
+
+    if args.strong_rejection_lineage is not None:
+        if not _print_strong_rejection_lineage(args.strong_rejection_lineage):
             sys.exit(1)
         return
 
