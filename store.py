@@ -90,6 +90,13 @@ PREDICTION_OUTCOME_SUGGESTION_BUCKETS = (
     "insufficient_evidence",
 )
 STRONG_REJECTION_STATUSES = ("open", "salvaged", "dismissed")
+LINEAGE_CHANGE_TYPES = (
+    "mechanism_changed",
+    "provenance_changed",
+    "prediction_changed",
+    "evidence_changed",
+    "adjudication_changed",
+)
 PREDICTION_OUTCOME_BY_STATUS = {
     "open": "open",
     "unknown": "open",
@@ -447,6 +454,11 @@ def init_db():
             dive_timestamp TEXT,
             evidence_map_json TEXT,
             mechanism_typing_json TEXT,
+            parent_transmission_number INTEGER,
+            parent_strong_rejection_id INTEGER,
+            lineage_root_id TEXT,
+            lineage_change_json TEXT,
+            scar_summary_json TEXT,
             FOREIGN KEY (exploration_id) REFERENCES explorations(id)
         );
         CREATE TABLE IF NOT EXISTS domains_visited (
@@ -524,6 +536,11 @@ def init_db():
             validation_json TEXT,
             evidence_map_json TEXT,
             mechanism_typing_json TEXT,
+            parent_transmission_number INTEGER,
+            parent_strong_rejection_id INTEGER,
+            lineage_root_id TEXT,
+            lineage_change_json TEXT,
+            scar_summary_json TEXT,
             status TEXT NOT NULL DEFAULT "open",
             notes TEXT,
             FOREIGN KEY (exploration_id) REFERENCES explorations(id)
@@ -653,6 +670,16 @@ def init_db():
         conn.execute("ALTER TABLE transmissions ADD COLUMN evidence_map_json TEXT")
     if "mechanism_typing_json" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN mechanism_typing_json TEXT")
+    if "parent_transmission_number" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN parent_transmission_number INTEGER")
+    if "parent_strong_rejection_id" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN parent_strong_rejection_id INTEGER")
+    if "lineage_root_id" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN lineage_root_id TEXT")
+    if "lineage_change_json" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN lineage_change_json TEXT")
+    if "scar_summary_json" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN scar_summary_json TEXT")
     prediction_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(predictions)").fetchall()
     }
@@ -768,6 +795,19 @@ def init_db():
             FOREIGN KEY (prediction_id) REFERENCES predictions(id)
         )"""
     )
+    strong_rejection_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(strong_rejections)").fetchall()
+    }
+    if "parent_transmission_number" not in strong_rejection_columns:
+        conn.execute("ALTER TABLE strong_rejections ADD COLUMN parent_transmission_number INTEGER")
+    if "parent_strong_rejection_id" not in strong_rejection_columns:
+        conn.execute("ALTER TABLE strong_rejections ADD COLUMN parent_strong_rejection_id INTEGER")
+    if "lineage_root_id" not in strong_rejection_columns:
+        conn.execute("ALTER TABLE strong_rejections ADD COLUMN lineage_root_id TEXT")
+    if "lineage_change_json" not in strong_rejection_columns:
+        conn.execute("ALTER TABLE strong_rejections ADD COLUMN lineage_change_json TEXT")
+    if "scar_summary_json" not in strong_rejection_columns:
+        conn.execute("ALTER TABLE strong_rejections ADD COLUMN scar_summary_json TEXT")
     evidence_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(prediction_evidence_hits)").fetchall()
@@ -1393,6 +1433,48 @@ def _clean_reason_list(value: object) -> list[str]:
         text = value.strip()
         return [text] if text else []
     return []
+
+
+def _normalize_lineage_change(value: object) -> dict | None:
+    """Normalize optional lineage-change payloads into a small JSON object."""
+    parsed = _json_object_or_empty(value)
+    if not parsed:
+        return None
+    clean_event_types = []
+    for raw_item in _json_array_or_empty(parsed.get("event_types")):
+        text = _clean_optional_text(raw_item)
+        if text in LINEAGE_CHANGE_TYPES and text not in clean_event_types:
+            clean_event_types.append(text)
+    out: dict[str, object] = {}
+    if clean_event_types:
+        out["event_types"] = clean_event_types
+    summary = _clean_optional_text(parsed.get("summary"))
+    if summary is not None:
+        out["summary"] = summary
+    if isinstance(parsed.get("details"), dict) and parsed.get("details"):
+        out["details"] = parsed.get("details")
+    return out or None
+
+
+def _normalize_scar_summary(value: object) -> dict | None:
+    """Normalize optional scar summary payloads into deterministic JSON."""
+    parsed = _json_object_or_empty(value)
+    if not parsed:
+        return None
+    out: dict[str, object] = {}
+    summary = _clean_optional_text(parsed.get("summary"))
+    if summary is not None:
+        out["summary"] = summary
+    count = parsed.get("count")
+    try:
+        clean_count = max(0, int(count))
+    except (TypeError, ValueError):
+        clean_count = None
+    if clean_count is not None:
+        out["count"] = clean_count
+    if isinstance(parsed.get("details"), dict) and parsed.get("details"):
+        out["details"] = parsed.get("details")
+    return out or None
 
 
 def _top_reason_rows(counter: Counter[str], top_n: int = 10) -> list[dict]:
@@ -3505,6 +3587,9 @@ def _strong_rejection_row_to_dict(row: sqlite3.Row | dict) -> dict:
     payload["salvage_reason"] = _clean_optional_text(payload.get("salvage_reason"))
     payload["status"] = _normalize_strong_rejection_status(payload.get("status"))
     payload["notes"] = _clean_optional_text(payload.get("notes"))
+    payload["lineage_root_id"] = _clean_optional_text(payload.get("lineage_root_id"))
+    payload["parent_transmission_number"] = payload.get("parent_transmission_number")
+    payload["parent_strong_rejection_id"] = payload.get("parent_strong_rejection_id")
 
     raw_path = payload.get("path")
     payload["path"] = [
@@ -3534,12 +3619,16 @@ def _strong_rejection_row_to_dict(row: sqlite3.Row | dict) -> dict:
         raw_value = payload.get(raw_key)
         parsed = _json_object_or_empty(raw_value)
         payload[clean_key] = parsed if parsed else _clean_optional_text(raw_value)
+    payload["lineage_change"] = _normalize_lineage_change(payload.get("lineage_change_json"))
+    payload["scar_summary"] = _normalize_scar_summary(payload.get("scar_summary_json"))
 
     payload.pop("connection_payload_json", None)
     payload.pop("validation_json", None)
     payload.pop("evidence_map_json", None)
     payload.pop("mechanism_typing_json", None)
     payload.pop("rejection_reasons_json", None)
+    payload.pop("lineage_change_json", None)
+    payload.pop("scar_summary_json", None)
     return payload
 
 
@@ -3561,6 +3650,11 @@ def save_strong_rejection(
     validation: dict | str | None = None,
     evidence_map: dict | None = None,
     mechanism_typing: dict | None = None,
+    parent_transmission_number: int | None = None,
+    parent_strong_rejection_id: int | None = None,
+    lineage_root_id: str | None = None,
+    lineage_change: dict | None = None,
+    scar_summary: dict | None = None,
     status: str = "open",
     notes: str | None = None,
 ) -> int:
@@ -3590,6 +3684,8 @@ def save_strong_rejection(
         clean_mechanism_type = _clean_optional_text(
             stored_mechanism_typing.get("mechanism_type")
         )
+    normalized_lineage_change = _normalize_lineage_change(lineage_change)
+    normalized_scar_summary = _normalize_scar_summary(scar_summary)
 
     cursor = conn.execute(
         """INSERT INTO strong_rejections
@@ -3597,8 +3693,11 @@ def save_strong_rejection(
          novelty_score, distance_score, depth_score, prediction_quality_score,
          mechanism_type, rejection_stage, rejection_reasons_json, salvage_reason,
          connection_payload_json, validation_json, evidence_map_json,
-         mechanism_typing_json, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         mechanism_typing_json, parent_transmission_number,
+         parent_strong_rejection_id, lineage_root_id,
+         lineage_change_json, scar_summary_json,
+         status, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             exploration_id,
@@ -3647,6 +3746,19 @@ def save_strong_rejection(
             (
                 json.dumps(stored_mechanism_typing, ensure_ascii=False)
                 if isinstance(stored_mechanism_typing, dict)
+                else None
+            ),
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            _clean_optional_text(lineage_root_id),
+            (
+                json.dumps(normalized_lineage_change, ensure_ascii=False, sort_keys=True)
+                if isinstance(normalized_lineage_change, dict)
+                else None
+            ),
+            (
+                json.dumps(normalized_scar_summary, ensure_ascii=False, sort_keys=True)
+                if isinstance(normalized_scar_summary, dict)
                 else None
             ),
             _normalize_strong_rejection_status(status),
@@ -3700,6 +3812,11 @@ def list_strong_rejections(
                 validation_json,
                 evidence_map_json,
                 mechanism_typing_json,
+                parent_transmission_number,
+                parent_strong_rejection_id,
+                lineage_root_id,
+                lineage_change_json,
+                scar_summary_json,
                 status,
                 notes
             FROM strong_rejections
@@ -3732,6 +3849,11 @@ def list_strong_rejections(
                 validation_json,
                 evidence_map_json,
                 mechanism_typing_json,
+                parent_transmission_number,
+                parent_strong_rejection_id,
+                lineage_root_id,
+                lineage_change_json,
+                scar_summary_json,
                 status,
                 notes
             FROM strong_rejections
@@ -3800,6 +3922,11 @@ def get_strong_rejection(id: int) -> dict | None:
             validation_json,
             evidence_map_json,
             mechanism_typing_json,
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            lineage_root_id,
+            lineage_change_json,
+            scar_summary_json,
             status,
             notes
         FROM strong_rejections
@@ -3856,6 +3983,11 @@ def save_transmission(
     prediction_quality: dict | None = None,
     evidence_map: dict | None = None,
     mechanism_typing: dict | None = None,
+    parent_transmission_number: int | None = None,
+    parent_strong_rejection_id: int | None = None,
+    lineage_root_id: str | None = None,
+    lineage_change: dict | None = None,
+    scar_summary: dict | None = None,
 ) -> int:
     """Save a transmission. Returns transmission id."""
     conn = _connect()
@@ -3888,12 +4020,16 @@ def save_transmission(
             else None
         )
     )
+    normalized_lineage_change = _normalize_lineage_change(lineage_change)
+    normalized_scar_summary = _normalize_scar_summary(scar_summary)
     cursor = conn.execute(
         """INSERT INTO transmissions
         (transmission_number, timestamp, exploration_id, formatted_output,
          transmission_embedding, mechanism_signature, signature_cluster_id, exportable,
-         evidence_map_json, mechanism_typing_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         evidence_map_json, mechanism_typing_json, parent_transmission_number,
+         parent_strong_rejection_id, lineage_root_id,
+         lineage_change_json, scar_summary_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             transmission_number,
             _now(),
@@ -3911,6 +4047,19 @@ def save_transmission(
             (
                 json.dumps(stored_mechanism_typing, ensure_ascii=False)
                 if isinstance(stored_mechanism_typing, dict)
+                else None
+            ),
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            _clean_optional_text(lineage_root_id),
+            (
+                json.dumps(normalized_lineage_change, ensure_ascii=False, sort_keys=True)
+                if isinstance(normalized_lineage_change, dict)
+                else None
+            ),
+            (
+                json.dumps(normalized_scar_summary, ensure_ascii=False, sort_keys=True)
+                if isinstance(normalized_scar_summary, dict)
                 else None
             ),
         ),
@@ -3998,6 +4147,11 @@ def get_transmission_feedback_context(transmission_number: int) -> dict | None:
             t.dive_timestamp,
             t.evidence_map_json,
             t.mechanism_typing_json,
+            t.parent_transmission_number,
+            t.parent_strong_rejection_id,
+            t.lineage_root_id,
+            t.lineage_change_json,
+            t.scar_summary_json,
             e.seed_domain,
             e.jump_target_domain,
             e.connection_description,
@@ -4029,7 +4183,178 @@ def get_transmission_feedback_context(transmission_number: int) -> dict | None:
     out["mechanism_typing"] = _mechanism_typing_or_none(
         out.get("mechanism_typing_json")
     )
+    out["lineage_change"] = _normalize_lineage_change(out.get("lineage_change_json"))
+    out["scar_summary"] = _normalize_scar_summary(out.get("scar_summary_json"))
     return out
+
+
+def save_transmission_lineage_metadata(
+    transmission_number: int,
+    *,
+    lineage_root_id: str | None = None,
+    parent_transmission_number: int | None = None,
+    parent_strong_rejection_id: int | None = None,
+    lineage_change: dict | None = None,
+    scar_summary: dict | None = None,
+) -> bool:
+    """Update passive lineage/scar metadata for one stored transmission."""
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT 1 FROM transmissions WHERE transmission_number = ? LIMIT 1",
+        (transmission_number,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+    conn.execute(
+        """UPDATE transmissions
+        SET lineage_root_id = ?,
+            parent_transmission_number = ?,
+            parent_strong_rejection_id = ?,
+            lineage_change_json = ?,
+            scar_summary_json = ?
+        WHERE transmission_number = ?""",
+        (
+            _clean_optional_text(lineage_root_id),
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            (
+                json.dumps(
+                    _normalize_lineage_change(lineage_change),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if _normalize_lineage_change(lineage_change) is not None
+                else None
+            ),
+            (
+                json.dumps(
+                    _normalize_scar_summary(scar_summary),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if _normalize_scar_summary(scar_summary) is not None
+                else None
+            ),
+            transmission_number,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_transmission_lineage_metadata(transmission_number: int) -> dict | None:
+    """Fetch passive lineage/scar metadata for one stored transmission."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            transmission_number,
+            lineage_root_id,
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            lineage_change_json,
+            scar_summary_json
+        FROM transmissions
+        WHERE transmission_number = ?
+        ORDER BY id DESC
+        LIMIT 1""",
+        (transmission_number,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["lineage_root_id"] = _clean_optional_text(payload.get("lineage_root_id"))
+    payload["lineage_change"] = _normalize_lineage_change(payload.get("lineage_change_json"))
+    payload["scar_summary"] = _normalize_scar_summary(payload.get("scar_summary_json"))
+    payload.pop("lineage_change_json", None)
+    payload.pop("scar_summary_json", None)
+    return payload
+
+
+def save_strong_rejection_lineage_metadata(
+    rejection_id: int,
+    *,
+    lineage_root_id: str | None = None,
+    parent_transmission_number: int | None = None,
+    parent_strong_rejection_id: int | None = None,
+    lineage_change: dict | None = None,
+    scar_summary: dict | None = None,
+) -> bool:
+    """Update passive lineage/scar metadata for one stored strong rejection."""
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT 1 FROM strong_rejections WHERE id = ? LIMIT 1",
+        (rejection_id,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+    conn.execute(
+        """UPDATE strong_rejections
+        SET lineage_root_id = ?,
+            parent_transmission_number = ?,
+            parent_strong_rejection_id = ?,
+            lineage_change_json = ?,
+            scar_summary_json = ?
+        WHERE id = ?""",
+        (
+            _clean_optional_text(lineage_root_id),
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            (
+                json.dumps(
+                    _normalize_lineage_change(lineage_change),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if _normalize_lineage_change(lineage_change) is not None
+                else None
+            ),
+            (
+                json.dumps(
+                    _normalize_scar_summary(scar_summary),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if _normalize_scar_summary(scar_summary) is not None
+                else None
+            ),
+            rejection_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_strong_rejection_lineage_metadata(rejection_id: int) -> dict | None:
+    """Fetch passive lineage/scar metadata for one stored strong rejection."""
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            id,
+            lineage_root_id,
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            lineage_change_json,
+            scar_summary_json
+        FROM strong_rejections
+        WHERE id = ?
+        LIMIT 1""",
+        (rejection_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["lineage_root_id"] = _clean_optional_text(payload.get("lineage_root_id"))
+    payload["lineage_change"] = _normalize_lineage_change(payload.get("lineage_change_json"))
+    payload["scar_summary"] = _normalize_scar_summary(payload.get("scar_summary_json"))
+    payload.pop("lineage_change_json", None)
+    payload.pop("scar_summary_json", None)
+    return payload
 
 
 def save_transmission_dive(transmission_number: int, dive_result: str) -> bool:
