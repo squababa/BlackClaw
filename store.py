@@ -3168,7 +3168,10 @@ def get_mechanism_type_credibility_modifier(
     max_abs_modifier: float = 0.05,
 ) -> dict:
     """Compute a small local-only credibility modifier from validated prediction outcomes."""
-    clean_mechanism_type = _clean_optional_text(mechanism_type)
+    normalized_input = normalize_mechanism_typing({"mechanism_type": mechanism_type})
+    clean_mechanism_type = _clean_optional_text(
+        (normalized_input or {}).get("mechanism_type")
+    )
     safe_min_sample_size = max(1, int(min_sample_size))
     safe_cap = max(0.0, float(max_abs_modifier))
     result = {
@@ -3183,47 +3186,54 @@ def get_mechanism_type_credibility_modifier(
         return result
 
     conn = _connect()
-    row = conn.execute(
+    rows = conn.execute(
         """SELECT
-            COUNT(*) AS sample_size,
-            AVG(
-                CASE LOWER(COALESCE(p.outcome_status, 'open'))
-                    WHEN 'supported' THEN 1.0
-                    WHEN 'mixed' THEN 0.5
-                    WHEN 'contradicted' THEN 0.0
-                    WHEN 'expired' THEN 0.0
-                    ELSE NULL
-                END
-            ) AS support_rate
+            p.outcome_status,
+            json_extract(t.mechanism_typing_json, '$.mechanism_type') AS mechanism_type
         FROM predictions p
         LEFT JOIN transmissions t
             ON t.transmission_number = p.transmission_number
         WHERE COALESCE(TRIM(p.validated_at), '') <> ''
           AND LOWER(COALESCE(p.outcome_status, 'open')) IN (
               'supported', 'mixed', 'contradicted', 'expired'
-          )
-          AND LOWER(
-              COALESCE(
-                  json_extract(t.mechanism_typing_json, '$.mechanism_type'),
-                  ''
-              )
-          ) = LOWER(?)""",
-        (clean_mechanism_type,),
-    ).fetchone()
+          )"""
+    ).fetchall()
     conn.close()
 
-    sample_size = int((row["sample_size"] if row is not None else 0) or 0)
-    support_rate = _coerce_optional_float(row["support_rate"] if row is not None else None)
+    support_values: list[float] = []
+    for row in rows:
+        normalized_row = normalize_mechanism_typing(
+            {"mechanism_type": row["mechanism_type"]}
+        )
+        row_mechanism_type = _clean_optional_text(
+            (normalized_row or {}).get("mechanism_type")
+        )
+        if row_mechanism_type != clean_mechanism_type:
+            continue
+        outcome_status = _normalize_prediction_outcome_status(row["outcome_status"])
+        if outcome_status == "supported":
+            support_values.append(1.0)
+        elif outcome_status == "mixed":
+            support_values.append(0.5)
+        elif outcome_status in {"contradicted", "expired"}:
+            support_values.append(0.0)
+
+    sample_size = len(support_values)
+    support_rate = (
+        sum(support_values) / sample_size
+        if sample_size > 0
+        else None
+    )
     result["credibility_sample_size"] = sample_size
     result["credibility_support_rate"] = (
         round(support_rate, 3) if support_rate is not None else None
     )
 
-    if sample_size < safe_min_sample_size:
-        result["credibility_modifier_reason"] = "insufficient_validated_outcomes"
-        return result
     if support_rate is None:
         result["credibility_modifier_reason"] = "no_validated_outcomes"
+        return result
+    if sample_size < safe_min_sample_size:
+        result["credibility_modifier_reason"] = "insufficient_validated_outcomes"
         return result
 
     modifier = max(-safe_cap, min(safe_cap, (support_rate - 0.5) * 0.2))

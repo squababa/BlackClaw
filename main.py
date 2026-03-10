@@ -106,16 +106,23 @@ def _print_credibility_weighting_summary(score_label: str, scores: dict):
 
     modifier_text = f"{modifier:+.3f}"
     applied_text = "yes" if applied else "no"
+    reason_text = ""
+    if not applied and isinstance(reason, str) and reason.strip():
+        reason_label = {
+            "missing_mechanism_type": "missing mechanism_type",
+            "insufficient_validated_outcomes": "insufficient validated outcomes",
+            "no_validated_outcomes": "no validated outcomes",
+        }.get(reason.strip(), reason.strip())
+        reason_text = f" | reason={reason_label}"
     detail = (
         f"  [{score_label}] Credibility: "
-        f"base={float(base_total):.3f} "
-        f"modifier={modifier_text} "
-        f"sample={sample_size} "
-        f"applied={applied_text} "
-        f"final={float(final_total):.3f}"
+        f"base_total={float(base_total):.3f} | "
+        f"modifier={modifier_text} | "
+        f"n={sample_size} | "
+        f"applied={applied_text} | "
+        f"final_total={float(final_total):.3f}"
     )
-    if not applied and isinstance(reason, str) and reason.strip():
-        detail += f" ({reason.strip()})"
+    detail += reason_text
     print(detail)
 
 
