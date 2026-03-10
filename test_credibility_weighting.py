@@ -54,7 +54,11 @@ def _insert_prediction_outcomes(
                 index,
                 f"prediction-{index}",
                 "test condition",
-                "supported" if outcome == "supported" else "failed",
+                (
+                    "supported"
+                    if outcome == "supported"
+                    else ("mixed" if outcome == "mixed" else "failed")
+                ),
                 outcome,
                 f"{validated_prefix}-{index:02d}",
                 now,
@@ -81,6 +85,46 @@ def test_credibility_modifier_skips_below_minimum_sample(temp_db) -> None:
     assert result["credibility_sample_size"] == 3
     assert result["credibility_modifier_applied"] is False
     assert result["credibility_modifier_reason"] == "insufficient_validated_outcomes"
+
+
+def test_credibility_modifier_skips_when_mechanism_type_missing() -> None:
+    result = store.get_mechanism_type_credibility_modifier(
+        None,
+        min_sample_size=8,
+    )
+
+    assert result["mechanism_type"] is None
+    assert result["credibility_modifier"] == 0.0
+    assert result["credibility_sample_size"] == 0
+    assert result["credibility_support_rate"] is None
+    assert result["credibility_modifier_applied"] is False
+    assert result["credibility_modifier_reason"] == "missing_mechanism_type"
+
+
+def test_credibility_modifier_skips_when_support_rate_unavailable(monkeypatch) -> None:
+    class _FakeCursor:
+        def fetchall(self):
+            return []
+
+    class _FakeConnection:
+        def execute(self, *_args, **_kwargs):
+            return _FakeCursor()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(store, "_connect", lambda: _FakeConnection())
+
+    result = store.get_mechanism_type_credibility_modifier(
+        "feedback_loop",
+        min_sample_size=8,
+    )
+
+    assert result["credibility_modifier"] == 0.0
+    assert result["credibility_sample_size"] == 0
+    assert result["credibility_support_rate"] is None
+    assert result["credibility_modifier_applied"] is False
+    assert result["credibility_modifier_reason"] == "no_validated_outcomes"
 
 
 def test_credibility_modifier_is_positive_small_and_capped(temp_db) -> None:
@@ -119,6 +163,24 @@ def test_credibility_modifier_is_negative_small_and_capped(temp_db) -> None:
     assert result["credibility_modifier"] == -0.05
 
 
+def test_credibility_modifier_is_near_zero_for_balanced_mixed_outcomes(temp_db) -> None:
+    _insert_prediction_outcomes(
+        temp_db,
+        "feedback_loop",
+        ["supported"] * 4 + ["mixed"] * 8 + ["contradicted"] * 4,
+    )
+
+    result = store.get_mechanism_type_credibility_modifier(
+        "feedback_loop",
+        min_sample_size=8,
+    )
+
+    assert result["credibility_modifier_applied"] is True
+    assert result["credibility_support_rate"] == 0.5
+    assert abs(result["credibility_modifier"]) <= 0.001
+    assert result["credibility_modifier_reason"] == "applied"
+
+
 def test_score_connection_preserves_base_structure_and_adds_credibility_fields(
     monkeypatch,
 ) -> None:
@@ -155,5 +217,7 @@ def test_score_connection_preserves_base_structure_and_adds_credibility_fields(
     assert result["credibility_sample_size"] == 12
     assert result["credibility_support_rate"] == 0.65
     assert result["credibility_modifier_applied"] is True
+    assert result["credibility_modifier_reason"] == "applied"
+    assert result["total"] == 0.794
     assert result["final_total"] == 0.794
     assert result["total"] == result["final_total"]

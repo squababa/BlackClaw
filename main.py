@@ -54,6 +54,7 @@ from store import (
     save_evaluation,
     list_evaluation_run_summaries,
     get_credibility_stats,
+    get_credibility_diagnostics,
     list_recent_transmission_mechanisms,
     list_recent_transmission_provenance,
     list_open_predictions_for_evidence_scan,
@@ -91,6 +92,7 @@ def _print_credibility_weighting_summary(score_label: str, scores: dict):
     base_total = scores.get("base_total")
     modifier = float(scores.get("credibility_modifier") or 0.0)
     sample_size = int(scores.get("credibility_sample_size", 0) or 0)
+    support_rate = scores.get("credibility_support_rate")
     final_total = scores.get("final_total", scores.get("total"))
     applied = bool(scores.get("credibility_modifier_applied"))
     reason = scores.get("credibility_modifier_reason")
@@ -99,24 +101,41 @@ def _print_credibility_weighting_summary(score_label: str, scores: dict):
         base_total is None
         and final_total is None
         and sample_size <= 0
+        and support_rate is None
         and not applied
         and abs(modifier) < 0.0005
     ):
         return
 
-    modifier_text = f"{modifier:+.3f}"
-    applied_text = "yes" if applied else "no"
-    detail = (
-        f"  [{score_label}] Credibility: "
-        f"base={float(base_total):.3f} "
-        f"modifier={modifier_text} "
-        f"sample={sample_size} "
-        f"applied={applied_text} "
-        f"final={float(final_total):.3f}"
+    parts = []
+    if base_total is not None:
+        parts.append(f"base_total={float(base_total):.3f}")
+    parts.append(f"credibility_modifier={modifier:+.3f}")
+    parts.append(f"credibility_sample_size={sample_size}")
+    parts.append(
+        "credibility_support_rate="
+        + (
+            f"{float(support_rate):.3f}"
+            if support_rate is not None
+            else "—"
+        )
+    )
+    parts.append(
+        "credibility_modifier_applied=" + ("yes" if applied else "no")
     )
     if not applied and isinstance(reason, str) and reason.strip():
-        detail += f" ({reason.strip()})"
-    print(detail)
+        reason_label = {
+            "missing_mechanism_type": "missing mechanism_type",
+            "insufficient_validated_outcomes": "insufficient validated outcomes",
+            "no_validated_outcomes": "no validated outcomes",
+        }.get(reason.strip(), reason.strip())
+        parts.append(f"credibility_modifier_reason={reason_label}")
+    elif applied and isinstance(reason, str) and reason.strip() and reason.strip() != "applied":
+        parts.append(f"credibility_modifier_reason={reason.strip()}")
+    if final_total is not None:
+        parts.append(f"final_total={float(final_total):.3f}")
+
+    print(f"  [{score_label}] Credibility: " + " | ".join(parts))
 
 
 def _parse_report_only_args():
@@ -128,6 +147,10 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--credibility-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--credibility-diagnostics",
         action="store_true",
     )
     parser.add_argument(
@@ -966,10 +989,15 @@ def _print_prediction_outcome_review_queue(limit: int = 20):
         print("[PredictionOutcomeReviewQueue] No review-ready predictions found.")
         return
 
+    unresolved_count = sum(1 for row in rows if row.get("is_unresolved"))
+    thin_count = sum(1 for row in rows if row.get("needs_more_evidence"))
     print(f"[PredictionOutcomeReviewQueue] Recent {len(rows)} review-ready predictions")
     print(
-        "pred\ttx\tstatus\toutcome\tsupport\tcontradict\tunreviewed\tutility\t"
-        "recommendation\tmechanism\tprediction"
+        f"unresolved={unresolved_count} | oldest_first=yes | strongest_evidence_first=yes | thin_evidence={thin_count}"
+    )
+    print(
+        "pred\tpriority\tage_d\ttx\tstatus\toutcome\tmechanism\tevidence\t"
+        "recommendation\tutility\tprediction"
     )
     for row in rows:
         utility_text = row.get("utility_class") or "unknown"
@@ -977,16 +1005,25 @@ def _print_prediction_outcome_review_queue(limit: int = 20):
             utility_text = "—"
         mechanism_type = row.get("mechanism_type") or "—"
         summary = _truncate_text(_prediction_summary_from_row(row), 96)
+        evidence_text = (
+            f"a:{int(row.get('accepted_reviewable_hits', 0) or 0)}"
+            f"/s:{int(row.get('accepted_support_hits', 0) or 0)}"
+            f"/c:{int(row.get('accepted_contradiction_hits', 0) or 0)}"
+            f"/u:{int(row.get('unreviewed_reviewable_hits', 0) or 0)}"
+        )
+        recommendation = row.get("recommendation") or "insufficient_evidence"
+        if row.get("needs_more_evidence"):
+            recommendation = "insufficient_evidence"
         print(
-            f"{row.get('id')}\t{row.get('transmission_number')}\t"
+            f"{row.get('id')}\t{row.get('review_priority') or 'low'}\t"
+            f"{(row.get('age_days') if row.get('age_days') is not None else '—')}\t"
+            f"{row.get('transmission_number')}\t"
             f"{row.get('status') or 'unknown'}\t"
             f"{row.get('outcome_status') or 'open'}\t"
-            f"{int(row.get('accepted_support_hits', 0) or 0)}\t"
-            f"{int(row.get('accepted_contradiction_hits', 0) or 0)}\t"
-            f"{int(row.get('unreviewed_reviewable_hits', 0) or 0)}\t"
-            f"{_truncate_text(utility_text, 12)}\t"
-            f"{_truncate_text(row.get('recommendation'), 26)}\t"
             f"{_truncate_text(mechanism_type, 24)}\t"
+            f"{evidence_text}\t"
+            f"{_truncate_text(recommendation, 26)}\t"
+            f"{_truncate_text(utility_text, 12)}\t"
             f"{summary}"
         )
 
@@ -1046,6 +1083,7 @@ def _print_prediction_outcome_review(prediction_id: int) -> bool:
         "adversarial_survival_score\t"
         + (f"{float(adversarial_score):.3f}" if adversarial_score is not None else "—")
     )
+    _print_credibility_weighting_summary("PredictionOutcomeReview", row)
 
     print("[PredictionOutcomeReview] Prediction content")
     print(f"summary\t{row.get('prediction_summary') or '—'}")
@@ -1224,6 +1262,47 @@ def _print_credibility_stats(report: dict, window_requested: int):
         f"{int(evidence_review.get('accepted', 0) or 0)}\t"
         f"{int(evidence_review.get('dismissed', 0) or 0)}"
     )
+
+
+def _print_credibility_diagnostics(report: dict, window_requested: int):
+    """Render credibility-weighting health by mechanism type."""
+    summary = report.get("summary") or {}
+    buckets = report.get("buckets") or []
+    applied_window = report.get("window_requested", window_requested)
+    window_display = applied_window if applied_window is not None else "all"
+
+    print("[CredibilityDiagnostics]")
+    print(f"Window requested: {window_display}")
+    print("Local SQLite only. Credibility-weighting health by mechanism_type.")
+    min_sample_size = int(report.get("minimum_sample_size", 8) or 8)
+    max_abs_modifier = float(report.get("max_abs_modifier", 0.05) or 0.05)
+    print(
+        f"Rule: min_sample_size={min_sample_size}"
+        f" | max_abs_modifier={max_abs_modifier:.3f}"
+    )
+    print("[CredibilityDiagnostics] Summary")
+    print("total_buckets\tbuckets_with_enough_data\tbuckets_too_thin_to_trust\tvalidated_rows_considered")
+    print(
+        f"{int(summary.get('total_buckets', 0) or 0)}\t"
+        f"{int(summary.get('buckets_with_enough_data', 0) or 0)}\t"
+        f"{int(summary.get('buckets_too_thin_to_trust', 0) or 0)}\t"
+        f"{int(summary.get('validated_rows_considered', 0) or 0)}"
+    )
+
+    print("[CredibilityDiagnostics] By mechanism type")
+    print(
+        "mechanism_type\tvalidated_count\tsupport_rate\tmin_sample_met\tcurrent_capped_modifier\tmodifier_would_apply"
+    )
+    for row in buckets:
+        support_rate = row.get("support_rate")
+        print(
+            f"{row.get('mechanism_type') or 'unknown'}\t"
+            f"{int(row.get('validated_count', 0) or 0)}\t"
+            f"{(f'{float(support_rate):.3f}' if support_rate is not None else '—')}\t"
+            f"{'yes' if row.get('minimum_sample_threshold_met') else 'no'}\t"
+            f"{float(row.get('current_capped_modifier', 0.0) or 0.0):+.3f}\t"
+            f"{'yes' if row.get('modifier_would_apply') else 'no'}"
+        )
 
 
 def _strong_rejection_reasons_text(row: dict, limit: int = 110) -> str:
@@ -1808,6 +1887,7 @@ if __name__ == "__main__":
         [
             _early_report_args.kill_stats,
             _early_report_args.credibility_stats,
+            _early_report_args.credibility_diagnostics,
             _early_report_args.check_predictions,
             _early_report_args.check_provenance,
             _early_report_args.check_mechanisms,
@@ -1820,6 +1900,7 @@ if __name__ == "__main__":
         (
             _early_report_args.kill_stats
             or _early_report_args.credibility_stats
+            or _early_report_args.credibility_diagnostics
             or _early_report_args.check_predictions
             or _early_report_args.check_provenance
             or _early_report_args.check_mechanisms
@@ -1950,6 +2031,7 @@ if __name__ == "__main__":
     _early_report_action_requested = (
         _early_report_args.kill_stats
         or _early_report_args.credibility_stats
+        or _early_report_args.credibility_diagnostics
         or _early_report_args.predictions
         or _early_report_args.check_predictions
         or _early_report_args.check_provenance
@@ -2005,6 +2087,11 @@ if __name__ == "__main__":
         if _early_report_args.credibility_stats:
             _print_credibility_stats(
                 get_credibility_stats(window=_early_report_args.window),
+                _early_report_args.window,
+            )
+        if _early_report_args.credibility_diagnostics:
+            _print_credibility_diagnostics(
+                get_credibility_diagnostics(window=_early_report_args.window),
                 _early_report_args.window,
             )
         if _early_report_args.check_predictions:
@@ -2311,11 +2398,16 @@ def parse_args():
         help="Summarize local prediction credibility and problem-finding quality stats and exit",
     )
     parser.add_argument(
+        "--credibility-diagnostics",
+        action="store_true",
+        help="Summarize credibility-weighting health by mechanism type and exit",
+    )
+    parser.add_argument(
         "--window",
         type=int,
         default=200,
         metavar="N",
-        help="How many recent rows to inspect for kill stats, credibility stats, or prediction checks (default: 200)",
+        help="How many recent rows to inspect for kill stats, credibility stats, credibility diagnostics, or prediction checks (default: 200)",
     )
     parser.add_argument(
         "--limit",
