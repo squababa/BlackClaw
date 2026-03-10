@@ -3162,6 +3162,77 @@ def get_credibility_stats(window: int | None = 200) -> dict:
     }
 
 
+def get_mechanism_type_credibility_modifier(
+    mechanism_type: str | None,
+    min_sample_size: int = 8,
+    max_abs_modifier: float = 0.05,
+) -> dict:
+    """Compute a small local-only credibility modifier from validated prediction outcomes."""
+    clean_mechanism_type = _clean_optional_text(mechanism_type)
+    safe_min_sample_size = max(1, int(min_sample_size))
+    safe_cap = max(0.0, float(max_abs_modifier))
+    result = {
+        "mechanism_type": clean_mechanism_type,
+        "credibility_modifier": 0.0,
+        "credibility_sample_size": 0,
+        "credibility_support_rate": None,
+        "credibility_modifier_applied": False,
+        "credibility_modifier_reason": "missing_mechanism_type",
+    }
+    if clean_mechanism_type is None:
+        return result
+
+    conn = _connect()
+    row = conn.execute(
+        """SELECT
+            COUNT(*) AS sample_size,
+            AVG(
+                CASE LOWER(COALESCE(p.outcome_status, 'open'))
+                    WHEN 'supported' THEN 1.0
+                    WHEN 'mixed' THEN 0.5
+                    WHEN 'contradicted' THEN 0.0
+                    WHEN 'expired' THEN 0.0
+                    ELSE NULL
+                END
+            ) AS support_rate
+        FROM predictions p
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        WHERE COALESCE(TRIM(p.validated_at), '') <> ''
+          AND LOWER(COALESCE(p.outcome_status, 'open')) IN (
+              'supported', 'mixed', 'contradicted', 'expired'
+          )
+          AND LOWER(
+              COALESCE(
+                  json_extract(t.mechanism_typing_json, '$.mechanism_type'),
+                  ''
+              )
+          ) = LOWER(?)""",
+        (clean_mechanism_type,),
+    ).fetchone()
+    conn.close()
+
+    sample_size = int((row["sample_size"] if row is not None else 0) or 0)
+    support_rate = _coerce_optional_float(row["support_rate"] if row is not None else None)
+    result["credibility_sample_size"] = sample_size
+    result["credibility_support_rate"] = (
+        round(support_rate, 3) if support_rate is not None else None
+    )
+
+    if sample_size < safe_min_sample_size:
+        result["credibility_modifier_reason"] = "insufficient_validated_outcomes"
+        return result
+    if support_rate is None:
+        result["credibility_modifier_reason"] = "no_validated_outcomes"
+        return result
+
+    modifier = max(-safe_cap, min(safe_cap, (support_rate - 0.5) * 0.2))
+    result["credibility_modifier"] = round(modifier, 3)
+    result["credibility_modifier_applied"] = True
+    result["credibility_modifier_reason"] = "applied"
+    return result
+
+
 def update_prediction_outcome(
     id: int,
     outcome_status: str,

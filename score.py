@@ -14,7 +14,11 @@ from config import TAVILY_API_KEY, INVARIANCE_KILL_THRESHOLD, SCHOLAR_NOVELTY_EN
 from llm_client import get_llm_client
 from prediction_enforcement import evaluate_prediction_quality
 from sanitize import sanitize, check_llm_output
-from store import increment_tavily_calls, increment_llm_calls
+from store import (
+    get_mechanism_type_credibility_modifier,
+    increment_tavily_calls,
+    increment_llm_calls,
+)
 from debug_log import log_gemini_output
 
 _llm_client = get_llm_client()
@@ -25,6 +29,8 @@ SCHOLAR_HTTP_TIMEOUT_SECONDS = 8
 SCHOLAR_WORKS_PER_QUERY = 5
 SCHOLAR_MAX_WORKS_TO_JUDGE = 10
 PREDICTION_QUALITY_WEIGHT = 0.2
+CREDIBILITY_MIN_SAMPLE_SIZE = 8
+CREDIBILITY_MAX_ABS_MODIFIER = 0.05
 
 DISTANCE_PROMPT = """Rate the semantic distance between these two domains on a scale from 0.0 to 1.0.
 Domain A: {domain_a}
@@ -805,18 +811,39 @@ def score_connection(
                 scholarly_summary = scholarly.get("summary")
     prediction_quality = evaluate_prediction_quality(connection)
     base_total = (0.35 * novelty) + (0.30 * distance) + (0.35 * depth)
-    total = (
+    credibility = get_mechanism_type_credibility_modifier(
+        connection.get("mechanism_type"),
+        min_sample_size=CREDIBILITY_MIN_SAMPLE_SIZE,
+        max_abs_modifier=CREDIBILITY_MAX_ABS_MODIFIER,
+    )
+    total_before_modifier = (
         ((1.0 - PREDICTION_QUALITY_WEIGHT) * base_total)
         + (PREDICTION_QUALITY_WEIGHT * prediction_quality["score"])
+    )
+    total = max(
+        0.0,
+        min(1.0, total_before_modifier + float(credibility["credibility_modifier"] or 0.0)),
     )
     result = {
         "novelty": round(novelty, 3),
         "distance": round(distance, 3),
         "depth": round(depth, 3),
         "base_total": round(base_total, 3),
+        "credibility_modifier": round(
+            float(credibility.get("credibility_modifier") or 0.0), 3
+        ),
+        "credibility_sample_size": int(
+            credibility.get("credibility_sample_size", 0) or 0
+        ),
+        "credibility_support_rate": credibility.get("credibility_support_rate"),
+        "credibility_modifier_applied": bool(
+            credibility.get("credibility_modifier_applied")
+        ),
+        "credibility_modifier_reason": credibility.get("credibility_modifier_reason"),
         "prediction_quality_score": round(prediction_quality["score"], 3),
         "prediction_quality": prediction_quality,
         "total": round(total, 3),
+        "final_total": round(total, 3),
     }
     if isinstance(scholarly_summary, str) and scholarly_summary.strip():
         result["scholarly_prior_art_summary"] = scholarly_summary.strip()

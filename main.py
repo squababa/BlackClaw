@@ -81,6 +81,44 @@ API_USAGE_TIME_COLUMNS = ("timestamp", "created_at", "recorded_at", "date")
 GOLDEN_EVALS_PATH = Path(__file__).with_name("golden_eval_pairs.json")
 
 
+def _print_credibility_weighting_summary(score_label: str, scores: dict):
+    """Render compact credibility-weighting details when scoring exposes them."""
+    if not isinstance(scores, dict):
+        return
+    if "credibility_modifier" not in scores:
+        return
+
+    base_total = scores.get("base_total")
+    modifier = float(scores.get("credibility_modifier") or 0.0)
+    sample_size = int(scores.get("credibility_sample_size", 0) or 0)
+    final_total = scores.get("final_total", scores.get("total"))
+    applied = bool(scores.get("credibility_modifier_applied"))
+    reason = scores.get("credibility_modifier_reason")
+
+    if (
+        base_total is None
+        and final_total is None
+        and sample_size <= 0
+        and not applied
+        and abs(modifier) < 0.0005
+    ):
+        return
+
+    modifier_text = f"{modifier:+.3f}"
+    applied_text = "yes" if applied else "no"
+    detail = (
+        f"  [{score_label}] Credibility: "
+        f"base={float(base_total):.3f} "
+        f"modifier={modifier_text} "
+        f"sample={sample_size} "
+        f"applied={applied_text} "
+        f"final={float(final_total):.3f}"
+    )
+    if not applied and isinstance(reason, str) and reason.strip():
+        detail += f" ({reason.strip()})"
+    print(detail)
+
+
 def _parse_report_only_args():
     """Parse report-only and seed preflight flags before config-dependent imports."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -3183,6 +3221,7 @@ def _evaluate_connection_candidate(
     print(f"  [{score_label}] Evaluating...")
     scores = score_connection(connection, source_domain, target_domain)
     print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
+    _print_credibility_weighting_summary(score_label, scores)
     prediction_quality = (
         scores.get("prediction_quality")
         if isinstance(scores.get("prediction_quality"), dict)
