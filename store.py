@@ -1995,6 +1995,52 @@ def _prediction_outcome_review_row_to_dict(row: sqlite3.Row | dict) -> dict:
         payload["accepted_contradiction_hits"],
         payload["unreviewed_reviewable_hits"],
     )
+    accepted_total_hits = (
+        payload["accepted_support_hits"] + payload["accepted_contradiction_hits"]
+    )
+    payload["accepted_reviewable_hits"] = accepted_total_hits
+    payload["total_reviewable_hits"] = accepted_total_hits + payload["unreviewed_reviewable_hits"]
+    outcome_status = _normalize_prediction_outcome_status(
+        payload.get("outcome_status"),
+        payload.get("status"),
+    )
+    payload["is_unresolved"] = outcome_status in {"open", "unknown"}
+    payload["needs_more_evidence"] = accepted_total_hits == 0
+    age_reference = (
+        _clean_optional_text(payload.get("created_at"))
+        or _clean_optional_text(payload.get("updated_at"))
+        or _clean_optional_text(payload.get("validated_at"))
+    )
+    age_days = None
+    if age_reference is not None:
+        candidate = age_reference[:-1] + "+00:00" if age_reference.endswith("Z") else age_reference
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_days = max(
+                0,
+                int(
+                    (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+                    // 86400
+                ),
+            )
+        except ValueError:
+            age_days = None
+    payload["age_days"] = age_days
+    payload["review_priority"] = (
+        "conflict"
+        if payload["recommendation"] == "conflicting_evidence"
+        else (
+            "high"
+            if payload["is_unresolved"] and accepted_total_hits > 0
+            else (
+                "medium"
+                if payload["is_unresolved"] and payload["unreviewed_reviewable_hits"] > 0
+                else "low"
+            )
+        )
+    )
     return payload
 
 
@@ -2068,6 +2114,11 @@ def list_prediction_outcome_review_queue(limit: int | None = 20) -> list[dict]:
            OR COALESCE(ec.unreviewed_reviewable_hits, 0) > 0
         ORDER BY
             CASE
+                WHEN LOWER(COALESCE(p.outcome_status, p.status, 'open')) IN ('open', 'unknown')
+                THEN 0
+                ELSE 1
+            END ASC,
+            CASE
                 WHEN COALESCE(ec.accepted_support_hits, 0) > 0
                      AND COALESCE(ec.accepted_contradiction_hits, 0) > 0
                 THEN 0
@@ -2077,12 +2128,15 @@ def list_prediction_outcome_review_queue(limit: int | None = 20) -> list[dict]:
                 THEN 2
                 ELSE 3
             END ASC,
+            (COALESCE(ec.accepted_support_hits, 0) + COALESCE(ec.accepted_contradiction_hits, 0)) DESC,
+            COALESCE(ec.unreviewed_reviewable_hits, 0) DESC,
             COALESCE(
-                NULLIF(p.validated_at, ''),
+                NULLIF(p.created_at, ''),
                 NULLIF(p.updated_at, ''),
+                NULLIF(p.validated_at, ''),
                 p.created_at
-            ) DESC,
-            p.id DESC"""
+            ) ASC,
+            p.id ASC"""
     params: tuple[object, ...] = ()
     if limit is not None:
         safe_limit = max(1, int(limit))
@@ -2185,6 +2239,9 @@ def get_prediction_outcome_review(
     )
     payload["falsification_condition"] = _clean_optional_text(
         normalized_prediction.get("falsification_condition")
+    )
+    payload.update(
+        get_mechanism_type_credibility_modifier(payload.get("mechanism_type"))
     )
 
     safe_max = max(1, int(max_hits_per_group))
@@ -3159,6 +3216,98 @@ def get_credibility_stats(window: int | None = 200) -> dict:
             "accepted": int(evidence_review_status_counts.get("accepted", 0) or 0),
             "dismissed": int(evidence_review_status_counts.get("dismissed", 0) or 0),
         },
+    }
+
+
+def get_credibility_diagnostics(
+    window: int | None = 200,
+    min_sample_size: int = 8,
+    max_abs_modifier: float = 0.05,
+) -> dict:
+    """Summarize credibility-weighting health by mechanism type from local SQLite data."""
+    safe_window = max(1, int(window)) if window is not None else None
+    safe_min_sample_size = max(1, int(min_sample_size))
+    safe_cap = max(0.0, float(max_abs_modifier))
+
+    conn = _connect()
+    query = """SELECT
+            p.outcome_status,
+            json_extract(t.mechanism_typing_json, '$.mechanism_type') AS mechanism_type
+        FROM predictions p
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        WHERE COALESCE(TRIM(p.validated_at), '') <> ''
+          AND LOWER(COALESCE(p.outcome_status, 'open')) IN (
+              'supported', 'mixed', 'contradicted', 'expired'
+          )
+        ORDER BY p.id DESC"""
+    params: tuple[object, ...] = ()
+    if safe_window is not None:
+        query += "\n        LIMIT ?"
+        params = (safe_window,)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+
+    support_values_by_mechanism: dict[str, list[float]] = {}
+    for row in rows:
+        normalized_row = normalize_mechanism_typing(
+            {"mechanism_type": row["mechanism_type"]}
+        )
+        mechanism_type = _clean_optional_text(
+            (normalized_row or {}).get("mechanism_type")
+        ) or "unknown"
+        outcome_status = _normalize_prediction_outcome_status(row["outcome_status"])
+        if outcome_status == "supported":
+            support_value = 1.0
+        elif outcome_status == "mixed":
+            support_value = 0.5
+        else:
+            support_value = 0.0
+        support_values_by_mechanism.setdefault(mechanism_type, []).append(support_value)
+
+    buckets = []
+    enough_data = 0
+    too_thin = 0
+    for mechanism_type in sorted(support_values_by_mechanism):
+        support_values = support_values_by_mechanism[mechanism_type]
+        validated_count = len(support_values)
+        support_rate = (
+            sum(support_values) / validated_count
+            if validated_count > 0
+            else None
+        )
+        current_capped_modifier = (
+            max(-safe_cap, min(safe_cap, (support_rate - 0.5) * 0.2))
+            if support_rate is not None
+            else 0.0
+        )
+        threshold_met = validated_count >= safe_min_sample_size
+        if threshold_met:
+            enough_data += 1
+        else:
+            too_thin += 1
+        buckets.append(
+            {
+                "mechanism_type": mechanism_type,
+                "validated_count": validated_count,
+                "support_rate": round(support_rate, 3) if support_rate is not None else None,
+                "minimum_sample_threshold_met": threshold_met,
+                "current_capped_modifier": round(current_capped_modifier, 3),
+                "modifier_would_apply": bool(threshold_met and support_rate is not None),
+            }
+        )
+
+    return {
+        "window_requested": safe_window,
+        "minimum_sample_size": safe_min_sample_size,
+        "max_abs_modifier": round(safe_cap, 3),
+        "summary": {
+            "total_buckets": len(buckets),
+            "buckets_with_enough_data": enough_data,
+            "buckets_too_thin_to_trust": too_thin,
+            "validated_rows_considered": len(rows),
+        },
+        "buckets": buckets,
     }
 
 
