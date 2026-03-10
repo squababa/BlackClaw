@@ -167,6 +167,72 @@ MECHANISM_TYPE_CONFIDENCE_LABELS = {
     "very_high": 0.9,
 }
 
+PROVENANCE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "via",
+    "with",
+}
+
+PROVENANCE_GENERIC_PHRASES = (
+    "the article discusses",
+    "the source discusses",
+    "the paper discusses",
+    "research suggests",
+    "research shows",
+    "the evidence suggests",
+    "the evidence shows",
+    "supports the idea",
+    "is related to",
+    "is associated with",
+    "is linked to",
+    "there is a connection",
+    "there is a relationship",
+    "in conclusion",
+    "overall",
+)
+
+PROVENANCE_GENERIC_REFERENCES = {
+    "article",
+    "paper",
+    "study",
+    "source",
+    "web",
+    "website",
+    "search result",
+    "search results",
+    "result",
+    "results",
+    "unknown",
+}
+
+PROVENANCE_CLAIM_SPECIFICITY_MIN = 0.35
+PROVENANCE_SNIPPET_SPECIFICITY_MIN = 0.45
+PROVENANCE_SOURCE_TRACEABILITY_MIN = 0.4
+PROVENANCE_OVERALL_MIN = 0.55
+
 
 def _word_tokens(text: str) -> list[str]:
     return re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_/\-]*", text.lower())
@@ -193,6 +259,384 @@ def _normalized_text_key(value: object) -> str:
     """Stable lowercase key for matching mappings across payload sections."""
     text = _clean_optional_text(value)
     return text.lower() if text is not None else ""
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        if value and value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _meaningful_terms(text: object) -> set[str]:
+    cleaned = _clean_optional_text(text) or ""
+    return {
+        token
+        for token in _word_tokens(cleaned)
+        if len(token) >= 4
+        and token not in PROVENANCE_STOPWORDS
+        and not token.isdigit()
+    }
+
+
+def _contains_generic_phrase(text: object) -> bool:
+    cleaned = (_clean_optional_text(text) or "").lower()
+    return any(phrase in cleaned for phrase in PROVENANCE_GENERIC_PHRASES)
+
+
+def _score_claim_specificity(claim: object) -> tuple[float, list[str]]:
+    text = _clean_optional_text(claim) or ""
+    if not text:
+        return 0.0, ["vague claim"]
+
+    tokens = _word_tokens(text)
+    meaningful_terms = _meaningful_terms(text)
+    score = 0.0
+
+    if len(tokens) >= 5:
+        score += 0.2
+    if len(tokens) >= 9:
+        score += 0.15
+    if len(meaningful_terms) >= 2:
+        score += 0.25
+    if len(meaningful_terms) >= 4:
+        score += 0.2
+    if any(connector in tokens for connector in PROCESS_CONNECTORS):
+        score += 0.1
+    if _has_metric_text(text):
+        score += 0.1
+
+    reasons: list[str] = []
+    if len(tokens) < 5 or len(meaningful_terms) < 2 or _contains_generic_phrase(text):
+        reasons.append("vague claim")
+
+    return round(min(1.0, score), 3), reasons
+
+
+def _score_snippet_specificity(
+    claim: object,
+    evidence_snippet: object,
+    required_terms: set[str] | None = None,
+) -> tuple[float, list[str]]:
+    text = _clean_optional_text(evidence_snippet) or ""
+    if not text:
+        return 0.0, ["vague snippet"]
+
+    tokens = _word_tokens(text)
+    meaningful_terms = _meaningful_terms(text)
+    expected_terms = set(required_terms or ())
+    if not expected_terms:
+        expected_terms = _meaningful_terms(claim)
+
+    overlap_count = len(expected_terms & meaningful_terms) if expected_terms else 0
+    score = 0.0
+
+    if len(tokens) >= 8:
+        score += 0.25
+    if len(tokens) >= 14:
+        score += 0.2
+    if len(meaningful_terms) >= 4:
+        score += 0.2
+    if len(meaningful_terms) >= 7:
+        score += 0.1
+    if _has_metric_text(text):
+        score += 0.1
+    if overlap_count >= 1:
+        score += 0.1
+    if overlap_count >= 2:
+        score += 0.1
+
+    reasons: list[str] = []
+    if len(tokens) < 8 or len(meaningful_terms) < 4:
+        reasons.append("vague snippet")
+    if expected_terms and overlap_count == 0:
+        reasons.append("claim/snippet mismatch")
+    if _contains_generic_phrase(text):
+        reasons.append("generic evidence")
+        score -= 0.25
+
+    return round(max(0.0, min(1.0, score)), 3), _dedupe_preserve_order(reasons)
+
+
+def _score_source_traceability(source_reference: object) -> tuple[float, list[str]]:
+    text = _clean_optional_text(source_reference) or ""
+    if not text:
+        return 0.0, ["missing source reference"]
+
+    lowered = text.lower()
+    tokens = _word_tokens(text)
+    score = 0.15
+
+    if re.search(r"https?://|doi\.org|arxiv\.org|pmid|10\.\d{4,9}/", lowered):
+        score += 0.55
+    elif len(tokens) >= 4:
+        score += 0.35
+
+    if any(marker in text for marker in ("/", ".", ":")):
+        score += 0.15
+    if len(text) >= 16:
+        score += 0.15
+
+    reasons: list[str] = []
+    if lowered in PROVENANCE_GENERIC_REFERENCES:
+        reasons.append("generic evidence")
+        score = min(score, 0.3)
+
+    return round(min(1.0, score), 3), reasons
+
+
+def _score_provenance_evidence_item(
+    claim: object,
+    evidence_snippet: object,
+    source_reference: object,
+    required_terms: set[str] | None = None,
+) -> dict:
+    claim_specificity, claim_reasons = _score_claim_specificity(claim)
+    snippet_specificity, snippet_reasons = _score_snippet_specificity(
+        claim,
+        evidence_snippet,
+        required_terms=required_terms,
+    )
+    source_traceability, source_reasons = _score_source_traceability(source_reference)
+    reasons = _dedupe_preserve_order(
+        claim_reasons + snippet_reasons + source_reasons
+    )
+
+    overall = round(
+        min(
+            1.0,
+            (
+                (claim_specificity * 0.3)
+                + (snippet_specificity * 0.45)
+                + (source_traceability * 0.25)
+            ),
+        ),
+        3,
+    )
+
+    return {
+        "claim_specificity": claim_specificity,
+        "snippet_specificity": snippet_specificity,
+        "source_traceability": source_traceability,
+        "overall": overall,
+        "reasons": reasons,
+    }
+
+
+def _provenance_quality_failures(score: dict) -> list[str]:
+    reasons = score.get("reasons") or []
+    failures: list[str] = []
+
+    if float(score.get("claim_specificity") or 0.0) < PROVENANCE_CLAIM_SPECIFICITY_MIN:
+        failures.append("vague claim")
+    if (
+        float(score.get("snippet_specificity") or 0.0)
+        < PROVENANCE_SNIPPET_SPECIFICITY_MIN
+    ):
+        failures.append("vague snippet")
+    if (
+        float(score.get("source_traceability") or 0.0)
+        < PROVENANCE_SOURCE_TRACEABILITY_MIN
+    ):
+        if "missing source reference" in reasons:
+            failures.append("missing source reference")
+        else:
+            failures.append("generic evidence")
+    if "generic evidence" in reasons and (
+        float(score.get("snippet_specificity") or 0.0)
+        < PROVENANCE_SNIPPET_SPECIFICITY_MIN
+        or float(score.get("source_traceability") or 0.0)
+        < PROVENANCE_SOURCE_TRACEABILITY_MIN
+        or float(score.get("overall") or 0.0) < PROVENANCE_OVERALL_MIN
+        or "claim/snippet mismatch" in reasons
+    ):
+        failures.append("generic evidence")
+    if "claim/snippet mismatch" in reasons:
+        failures.append("claim/snippet mismatch")
+    if float(score.get("overall") or 0.0) < PROVENANCE_OVERALL_MIN and not failures:
+        failures.append("generic evidence")
+
+    return _dedupe_preserve_order(failures)
+
+
+def _make_provenance_failure_reason(
+    code: str,
+    message: str,
+    *,
+    score: object = None,
+    threshold: object = None,
+    details: object = None,
+) -> dict:
+    reason = {
+        "code": code,
+        "message": message,
+    }
+    if score is not None:
+        try:
+            reason["score"] = round(max(0.0, min(1.0, float(score))), 3)
+        except Exception:
+            pass
+    if threshold is not None:
+        try:
+            reason["threshold"] = round(max(0.0, min(1.0, float(threshold))), 3)
+        except Exception:
+            pass
+    if isinstance(details, list):
+        cleaned_details = [
+            str(detail).strip() for detail in details if str(detail).strip()
+        ]
+        if cleaned_details:
+            reason["details"] = cleaned_details
+    return reason
+
+
+def _collect_provenance_failure_reasons(
+    score_payload: object,
+    *,
+    source_reference: object = None,
+) -> list[dict]:
+    if not isinstance(score_payload, dict):
+        return [
+            _make_provenance_failure_reason(
+                "low_overall_provenance_quality",
+                "overall provenance quality is below threshold",
+            )
+        ]
+
+    claim_score = float(score_payload.get("claim_specificity") or 0.0)
+    snippet_score = float(score_payload.get("snippet_specificity") or 0.0)
+    source_score = float(score_payload.get("source_traceability") or 0.0)
+    overall_score = float(score_payload.get("overall") or 0.0)
+    score_reasons = [
+        str(reason).strip().lower()
+        for reason in (score_payload.get("reasons") or [])
+        if str(reason).strip()
+    ]
+    source_text = _clean_optional_text(source_reference)
+    reasons: list[dict] = []
+
+    if claim_score < PROVENANCE_CLAIM_SPECIFICITY_MIN:
+        reasons.append(
+            _make_provenance_failure_reason(
+                "vague_claim",
+                "claim is too vague",
+                score=claim_score,
+                threshold=PROVENANCE_CLAIM_SPECIFICITY_MIN,
+                details=score_payload.get("reasons"),
+            )
+        )
+    if snippet_score < PROVENANCE_SNIPPET_SPECIFICITY_MIN:
+        reasons.append(
+            _make_provenance_failure_reason(
+                "vague_snippet",
+                "evidence snippet is too generic or too short",
+                score=snippet_score,
+                threshold=PROVENANCE_SNIPPET_SPECIFICITY_MIN,
+                details=score_payload.get("reasons"),
+            )
+        )
+    if not source_text:
+        reasons.append(
+            _make_provenance_failure_reason(
+                "missing_source_reference",
+                "source reference is missing",
+                score=source_score,
+                threshold=PROVENANCE_SOURCE_TRACEABILITY_MIN,
+                details=score_payload.get("reasons"),
+            )
+        )
+    if "generic evidence" in score_reasons:
+        reasons.append(
+            _make_provenance_failure_reason(
+                "generic_evidence",
+                "evidence is too generic to support the claim",
+                score=min(snippet_score, source_score)
+                if source_text
+                else snippet_score,
+                details=score_payload.get("reasons"),
+            )
+        )
+    if "claim/snippet mismatch" in score_reasons:
+        reasons.append(
+            _make_provenance_failure_reason(
+                "claim_snippet_mismatch",
+                "evidence snippet does not clearly support claim terms",
+                score=snippet_score,
+                details=score_payload.get("reasons"),
+            )
+        )
+    if overall_score < PROVENANCE_OVERALL_MIN or not reasons:
+        reasons.append(
+            _make_provenance_failure_reason(
+                "low_overall_provenance_quality",
+                "overall provenance quality is below threshold",
+                score=overall_score,
+                threshold=PROVENANCE_OVERALL_MIN,
+                details=score_payload.get("reasons"),
+            )
+        )
+
+    return reasons
+
+
+def _format_provenance_failure_reasons(reasons: object) -> str:
+    if not isinstance(reasons, list):
+        return "insufficient provenance detail"
+    formatted = []
+    for item in reasons:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if code and message:
+            formatted.append(f"{code}: {message}")
+        elif code:
+            formatted.append(code)
+        elif message:
+            formatted.append(message)
+    return "; ".join(formatted) if formatted else "insufficient provenance detail"
+
+
+def _build_provenance_failure(
+    *,
+    entry_type: str,
+    entry: object,
+    provenance_score: object,
+    claim_key: str,
+) -> dict:
+    payload = entry if isinstance(entry, dict) else {}
+    reasons = _collect_provenance_failure_reasons(
+        provenance_score,
+        source_reference=payload.get("source_reference"),
+    )
+    failure = {
+        "entry_type": entry_type,
+        "claim_key": claim_key,
+        "claim_text": _clean_optional_text(payload.get(claim_key)),
+        "reasons": reasons,
+        "reason_codes": [reason["code"] for reason in reasons if reason.get("code")],
+        "overall_score": (provenance_score or {}).get("overall"),
+    }
+    if entry_type == "variable_mapping":
+        failure["source_variable"] = _clean_optional_text(payload.get("source_variable"))
+        failure["target_variable"] = _clean_optional_text(payload.get("target_variable"))
+    return failure
+
+
+def _format_provenance_failure_issue(failure: object) -> str:
+    if not isinstance(failure, dict):
+        return "insufficient provenance detail"
+    entry_type = str(failure.get("entry_type") or "").strip()
+    reasons_text = _format_provenance_failure_reasons(failure.get("reasons"))
+    if entry_type == "variable_mapping":
+        source_variable = failure.get("source_variable") or "?"
+        target_variable = failure.get("target_variable") or "?"
+        return (
+            "evidence_map provenance for variable mapping "
+            f"'{source_variable}' -> '{target_variable}' failed: {reasons_text}"
+        )
+    return f"evidence_map mechanism_assertions provenance failed: {reasons_text}"
 
 
 def _extract_mechanism_typing_payload(payload: object) -> dict:
@@ -596,9 +1040,27 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
     variable_pairs = _extract_variable_mapping_pairs(payload.get("variable_mapping"))
     critical_pairs = variable_pairs[: min(3, len(variable_pairs))]
     issues: list[str] = []
+    failure_details: list[dict] = []
+    provenance_failures: list[dict] = []
 
     complete_variable_entries = []
+    scored_variable_mappings = []
+    variable_entries_by_key: dict[tuple[str, str], list[dict]] = {}
     for entry in evidence_map["variable_mappings"]:
+        score = _score_provenance_evidence_item(
+            entry.get("claim"),
+            entry.get("evidence_snippet"),
+            entry.get("source_reference"),
+            required_terms=(
+                _meaningful_terms(entry.get("source_variable"))
+                | _meaningful_terms(entry.get("target_variable"))
+                | _meaningful_terms(entry.get("claim"))
+            ),
+        )
+        scored_entry = dict(entry)
+        scored_entry["provenance_score"] = score
+        scored_variable_mappings.append(scored_entry)
+
         if (
             _is_non_empty(entry.get("source_variable"))
             and _is_non_empty(entry.get("target_variable"))
@@ -608,21 +1070,22 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
         ):
             complete_variable_entries.append(entry)
 
-    supported_variable_keys = {
-        (
+        key = (
             _normalized_text_key(entry.get("source_variable")),
             _normalized_text_key(entry.get("target_variable")),
         )
-        for entry in complete_variable_entries
-    }
+        if key != ("", ""):
+            variable_entries_by_key.setdefault(key, []).append(scored_entry)
 
     missing_critical_mappings = []
+    supported_critical_mapping_count = 0
     for source_variable, target_variable in critical_pairs:
         key = (
             _normalized_text_key(source_variable),
             _normalized_text_key(target_variable),
         )
-        if key not in supported_variable_keys:
+        matching_entries = variable_entries_by_key.get(key, [])
+        if not matching_entries:
             missing_critical_mappings.append(
                 {
                     "source_variable": source_variable,
@@ -633,37 +1096,140 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
                 "evidence_map missing support for variable mapping "
                 f"'{source_variable}' -> '{target_variable}'"
             )
+            failure_details.append(
+                {
+                    "kind": "variable_mapping",
+                    "source_variable": source_variable,
+                    "target_variable": target_variable,
+                    "message": issues[-1],
+                    "reasons": ["missing evidence"],
+                    "score": None,
+                }
+            )
+            continue
 
-    complete_mechanism_entries = [
-        entry
-        for entry in evidence_map["mechanism_assertions"]
+        best_entry = max(
+            matching_entries,
+            key=lambda item: float(
+                ((item.get("provenance_score") or {}).get("overall")) or 0.0
+            ),
+        )
+        score = best_entry.get("provenance_score") or {}
+        quality_failures = _provenance_quality_failures(score)
+        if quality_failures:
+            failure = _build_provenance_failure(
+                entry_type="variable_mapping",
+                entry=best_entry,
+                provenance_score=score,
+                claim_key="claim",
+            )
+            message = _format_provenance_failure_issue(failure)
+            issues.append(message)
+            provenance_failures.append(failure)
+            failure_details.append(
+                {
+                    "kind": "variable_mapping",
+                    "source_variable": source_variable,
+                    "target_variable": target_variable,
+                    "message": message,
+                    "reasons": quality_failures,
+                    "reason_codes": failure.get("reason_codes") or [],
+                    "score": score,
+                }
+            )
+            continue
+
+        supported_critical_mapping_count += 1
+
+    scored_mechanism_assertions = []
+    complete_mechanism_entries = []
+    supported_mechanism_assertions = []
+    mechanism_required_terms = (
+        _meaningful_terms(payload.get("mechanism"))
+        | _meaningful_terms(payload.get("connection"))
+    )
+    for entry in evidence_map["mechanism_assertions"]:
+        score = _score_provenance_evidence_item(
+            entry.get("mechanism_claim"),
+            entry.get("evidence_snippet"),
+            entry.get("source_reference"),
+            required_terms=(
+                mechanism_required_terms | _meaningful_terms(entry.get("mechanism_claim"))
+            ),
+        )
+        scored_entry = dict(entry)
+        scored_entry["provenance_score"] = score
+        scored_mechanism_assertions.append(scored_entry)
+
         if (
             _is_non_empty(entry.get("mechanism_claim"))
             and _is_non_empty(entry.get("evidence_snippet"))
             and _is_non_empty(entry.get("source_reference"))
-        )
-    ]
+        ):
+            complete_mechanism_entries.append(entry)
+        if not _provenance_quality_failures(score):
+            supported_mechanism_assertions.append(scored_entry)
 
     mechanism_required_count = 1 if _is_non_empty(payload.get("mechanism")) else 0
-    if mechanism_required_count and not complete_mechanism_entries:
-        issues.append(
-            "evidence_map must include at least 1 mechanism_assertions entry "
-            "with mechanism_claim, evidence_snippet, and source_reference"
-        )
+    if mechanism_required_count:
+        if not scored_mechanism_assertions:
+            message = (
+                "evidence_map must include at least 1 mechanism_assertions entry "
+                "with mechanism_claim, evidence_snippet, and source_reference"
+            )
+            issues.append(message)
+            failure_details.append(
+                {
+                    "kind": "mechanism_assertion",
+                    "message": message,
+                    "reasons": ["missing evidence"],
+                    "score": None,
+                }
+            )
+        elif not supported_mechanism_assertions:
+            best_entry = max(
+                scored_mechanism_assertions,
+                key=lambda item: float(
+                    ((item.get("provenance_score") or {}).get("overall")) or 0.0
+                ),
+            )
+            score = best_entry.get("provenance_score") or {}
+            quality_failures = _provenance_quality_failures(score)
+            failure = _build_provenance_failure(
+                entry_type="mechanism_assertion",
+                entry=best_entry,
+                provenance_score=score,
+                claim_key="mechanism_claim",
+            )
+            message = _format_provenance_failure_issue(failure)
+            issues.append(message)
+            provenance_failures.append(failure)
+            failure_details.append(
+                {
+                    "kind": "mechanism_assertion",
+                    "mechanism_claim": best_entry.get("mechanism_claim"),
+                    "message": message,
+                    "reasons": quality_failures,
+                    "reason_codes": failure.get("reason_codes") or [],
+                    "score": score,
+                }
+            )
 
     return {
         "passes": not issues,
         "evidence_map": evidence_map,
         "critical_mapping_count": len(critical_pairs),
-        "supported_critical_mapping_count": (
-            len(critical_pairs) - len(missing_critical_mappings)
-        ),
+        "supported_critical_mapping_count": supported_critical_mapping_count,
         "variable_mapping_entry_count": len(evidence_map["variable_mappings"]),
         "complete_variable_mapping_entry_count": len(complete_variable_entries),
         "missing_critical_mappings": missing_critical_mappings,
         "required_mechanism_assertion_count": mechanism_required_count,
         "mechanism_assertion_entry_count": len(evidence_map["mechanism_assertions"]),
-        "supported_mechanism_assertion_count": len(complete_mechanism_entries),
+        "supported_mechanism_assertion_count": len(supported_mechanism_assertions),
+        "scored_variable_mappings": scored_variable_mappings,
+        "scored_mechanism_assertions": scored_mechanism_assertions,
+        "provenance_failures": provenance_failures,
+        "failure_details": failure_details,
         "issues": issues,
     }
 

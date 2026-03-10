@@ -45,22 +45,42 @@ def _optional(var: str, default):
 # Load .env on import
 _load_env()
 # --- Required ---
-LLM_PROVIDER: str = _optional("LLM_PROVIDER", "gemini").strip().lower()
-if LLM_PROVIDER not in {"gemini", "claude"}:
+LOCAL_LLM_ONLY: bool = str(_optional("LOCAL_LLM_ONLY", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_provider_override = _optional("LLM_PROVIDER", "").strip().lower()
+if LOCAL_LLM_ONLY:
+    LLM_PROVIDER = "ollama"
+elif _provider_override:
+    LLM_PROVIDER: str = _provider_override
+else:
+    LLM_PROVIDER = "gemini"
+
+if LLM_PROVIDER not in {"gemini", "claude", "ollama"}:
     print(f"\n[BlackClaw] FATAL: Invalid LLM_PROVIDER value: {LLM_PROVIDER}")
-    print("  → Allowed values: gemini | claude\n")
+    print("  → Allowed values: gemini | claude | ollama\n")
     sys.exit(1)
 
 if LLM_PROVIDER == "gemini":
     GEMINI_API_KEY: str = _require("GEMINI_API_KEY")
     ANTHROPIC_API_KEY: str = _optional("ANTHROPIC_API_KEY", "")
-else:
+elif LLM_PROVIDER == "claude":
     ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
     GEMINI_API_KEY: str = _optional("GEMINI_API_KEY", "")
+else:
+    ANTHROPIC_API_KEY = _optional("ANTHROPIC_API_KEY", "")
+    GEMINI_API_KEY = _optional("GEMINI_API_KEY", "")
 
 TAVILY_API_KEY: str = _require("TAVILY_API_KEY")
 # --- Optional with defaults ---
-MODEL: str = _optional("BLACKCLAW_MODEL", "gemini-2.5-flash")
+if LLM_PROVIDER == "ollama":
+    MODEL: str = _optional("BLACKCLAW_MODEL", "qwen3:8b")
+else:
+    MODEL = _optional("BLACKCLAW_MODEL", "gemini-2.5-flash")
+OLLAMA_BASE_URL: str = _optional("OLLAMA_BASE_URL", "http://localhost:11434")
 TRANSMIT_THRESHOLD: float = _optional("BLACKCLAW_THRESHOLD", 0.6)
 EMBEDDING_DUP_THRESHOLD: float = _optional(
     "BLACKCLAW_EMBEDDING_DUP_THRESHOLD",
