@@ -86,6 +86,14 @@ API_USAGE_OUTPUT_COLUMNS = ("output_tokens", "completion_tokens")
 API_USAGE_MODEL_COLUMNS = ("model", "model_name")
 API_USAGE_TIME_COLUMNS = ("timestamp", "created_at", "recorded_at", "date")
 GOLDEN_EVALS_PATH = Path(__file__).with_name("golden_eval_pairs.json")
+LATE_STAGE_TIMING_LABELS = {
+    "score": "Score",
+    "validation": "Validation",
+    "adversarial": "Adversarial",
+    "invariance": "Invariance",
+    "rewrite": "Rewrite",
+    "semantic_dedup": "Semantic dedup",
+}
 
 
 def _print_credibility_weighting_summary(score_label: str, scores: dict):
@@ -142,6 +150,68 @@ def _print_credibility_weighting_summary(score_label: str, scores: dict):
         parts.append(f"final_total={float(final_total):.3f}")
 
     print(f"  [{score_label}] Credibility: " + " | ".join(parts))
+
+
+def _record_late_stage_timing(
+    timing_payload: dict,
+    stage_key: str,
+    started_at: float,
+):
+    """Store and print one completed late-stage timing measurement."""
+    elapsed = max(0.0, time.monotonic() - started_at)
+    stages = timing_payload.setdefault("stages", {})
+    stages[stage_key] = {"elapsed_s": round(elapsed, 3)}
+    timing_payload["latest_completed_stage"] = stage_key
+    timing_payload["latest_completed_stage_elapsed_s"] = round(elapsed, 3)
+    label = LATE_STAGE_TIMING_LABELS.get(stage_key, stage_key.replace("_", " ").title())
+    print(f"  [Timing] {label}: {elapsed:.1f}s")
+
+
+def _finalize_late_stage_timing(timing_payload: dict) -> dict | None:
+    """Finalize one timing payload for persistence and print total time."""
+    stages = timing_payload.get("stages") if isinstance(timing_payload, dict) else None
+    if not isinstance(stages, dict) or not stages:
+        return None
+    stage_order = [key for key in LATE_STAGE_TIMING_LABELS if key in stages]
+    total_elapsed = sum(
+        float((stages.get(key) or {}).get("elapsed_s") or 0.0) for key in stage_order
+    )
+    timing_payload["completed_stage_order"] = stage_order
+    timing_payload["total_late_stage_path_s"] = round(total_elapsed, 3)
+    print(f"  [Timing] Total late-stage path: {total_elapsed:.1f}s")
+    return timing_payload
+
+
+def _late_stage_timing_text(payload: dict | None) -> str:
+    """Render compact late-stage timing metadata for review surfaces."""
+    if not isinstance(payload, dict) or not payload:
+        return "—"
+    stages = payload.get("stages")
+    if not isinstance(stages, dict) or not stages:
+        return "—"
+    ordered_parts = []
+    for stage_key in payload.get("completed_stage_order") or LATE_STAGE_TIMING_LABELS:
+        stage_payload = stages.get(stage_key)
+        if not isinstance(stage_payload, dict):
+            continue
+        elapsed = stage_payload.get("elapsed_s")
+        if elapsed is None:
+            continue
+        label = LATE_STAGE_TIMING_LABELS.get(stage_key, stage_key)
+        ordered_parts.append(f"{label}={float(elapsed):.1f}s")
+    total_elapsed = payload.get("total_late_stage_path_s")
+    latest_stage = payload.get("latest_completed_stage")
+    if total_elapsed is not None:
+        ordered_parts.append(f"Total={float(total_elapsed):.1f}s")
+    if latest_stage:
+        ordered_parts.append(
+            "latest="
+            + LATE_STAGE_TIMING_LABELS.get(
+                latest_stage,
+                str(latest_stage).replace("_", " ").title(),
+            )
+        )
+    return " | ".join(ordered_parts) if ordered_parts else "—"
 
 
 def _parse_report_only_args():
@@ -686,6 +756,9 @@ def _print_recent_review_items(limit: int = 20):
             f"  rejection_stage={row.get('rejection_stage') or '—'} | "
             f"reasons={reason_text}"
         )
+        late_stage_timing = row.get("late_stage_timing")
+        if late_stage_timing:
+            print(f"  late_stage_timing={_late_stage_timing_text(late_stage_timing)}")
         print(
             f"  manual_grade={row.get('manual_grade') or '—'} | "
             f"note={_truncate_text(row.get('manual_grade_note'), 96)}"
@@ -3775,10 +3848,12 @@ def _evaluate_connection_candidate(
         "secondary_mechanism_types", []
     )
     connection["evidence_map"] = normalize_evidence_map(connection.get("evidence_map"))
-    claim_provenance = summarize_evidence_map_provenance(connection)
+    late_stage_timing: dict[str, object] = {"stages": {}}
 
     print(f"  [{score_label}] Evaluating...")
+    score_started = time.monotonic()
     scores = score_connection(connection, source_domain, target_domain)
+    _record_late_stage_timing(late_stage_timing, "score", score_started)
     print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
     _print_credibility_weighting_summary(score_label, scores)
     prediction_quality = (
@@ -3786,6 +3861,7 @@ def _evaluate_connection_candidate(
         if isinstance(scores.get("prediction_quality"), dict)
         else evaluate_prediction_quality(connection)
     )
+    claim_provenance = summarize_evidence_map_provenance(connection)
 
     passes_threshold = scores["total"] >= threshold
     rewritten_description = connection.get("connection", "")
@@ -3803,6 +3879,7 @@ def _evaluate_connection_candidate(
     transmission_embedding = None
 
     if passes_threshold:
+        validation_started = time.monotonic()
         validation_ok, validation_reasons = validate_hypothesis(connection)
         prediction_quality_ok = bool(prediction_quality.get("passes"))
         if not prediction_quality_ok:
@@ -3817,6 +3894,7 @@ def _evaluate_connection_candidate(
                 if isinstance(reason, str) and reason not in validation_reasons
             )
             validation_ok = False
+        _record_late_stage_timing(late_stage_timing, "validation", validation_started)
         validation_log = {
             "passed": validation_ok,
             "rejection_reasons": validation_reasons if not validation_ok else [],
@@ -3830,10 +3908,14 @@ def _evaluate_connection_candidate(
                 print(f"  [Validation] - {reason}")
 
     if passes_threshold and validation_ok:
+        adversarial_started = time.monotonic()
         adversarial_ok, adversarial_rubric = run_adversarial_rubric(
             connection,
             source_domain,
             target_domain,
+        )
+        _record_late_stage_timing(
+            late_stage_timing, "adversarial", adversarial_started
         )
         if not adversarial_ok:
             print("  [Adversarial] Killed hypothesis - skipping transmission")
@@ -3841,11 +3923,13 @@ def _evaluate_connection_candidate(
                 print(f"  [Adversarial] - {reason}")
 
     if passes_threshold and validation_ok and adversarial_ok:
+        invariance_started = time.monotonic()
         invariance_ok, invariance_result = run_invariance_check(
             connection,
             source_domain,
             target_domain,
         )
+        _record_late_stage_timing(late_stage_timing, "invariance", invariance_started)
         if not invariance_ok:
             print("  [Invariance] Killed hypothesis - skipping transmission")
             print(
@@ -3855,11 +3939,13 @@ def _evaluate_connection_candidate(
             )
 
     if passes_threshold and validation_ok and adversarial_ok and invariance_ok:
+        rewrite_started = time.monotonic()
         rewrite = rewrite_transmission(
             source_domain=source_domain,
             target_domain=target_domain,
             raw_description=rewritten_description,
         )
+        _record_late_stage_timing(late_stage_timing, "rewrite", rewrite_started)
         if rewrite.get("boring", False):
             boring = True
             print("  [Rewrite] Marked boring - skipping transmission")
@@ -3876,10 +3962,14 @@ def _evaluate_connection_candidate(
         and not boring
         and dedup_enabled
     ):
+        dedup_started = time.monotonic()
         transmission_embedding = _embed_transmission_text(rewritten_description)
         semantic_duplicate, similarity_score = is_semantic_duplicate(
             transmission_embedding,
             threshold=EMBEDDING_DUP_THRESHOLD,
+        )
+        _record_late_stage_timing(
+            late_stage_timing, "semantic_dedup", dedup_started
         )
         if semantic_duplicate:
             print(
@@ -4006,6 +4096,8 @@ def _evaluate_connection_candidate(
     if white_detected:
         stage_failures.append("novelty:white_detected")
 
+    finalized_late_stage_timing = _finalize_late_stage_timing(late_stage_timing)
+
     return {
         "scores": scores,
         "total_score": scores.get("total"),
@@ -4039,6 +4131,7 @@ def _evaluate_connection_candidate(
         "scholarly_prior_art_summary": scholarly_prior_art_summary,
         "prepared_connection": prepared_connection,
         "stage_failures": stage_failures,
+        "late_stage_timing": finalized_late_stage_timing,
         "actual_target": target_domain,
     }
 
@@ -4374,6 +4467,7 @@ def _score_store_and_transmit(
         invariance_json=candidate["invariance_result"],
         evidence_map=candidate["prepared_connection"].get("evidence_map"),
         mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
+        late_stage_timing=candidate.get("late_stage_timing"),
         rewrite_boring=candidate["boring"],
         semantic_duplicate=candidate["semantic_duplicate"],
         transmitted=candidate["should_transmit"],
