@@ -452,6 +452,8 @@ def init_db():
             invariance_json TEXT,
             evidence_map_json TEXT,
             mechanism_typing_json TEXT,
+            rewrite_boring INTEGER,
+            semantic_duplicate INTEGER,
             transmitted INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS transmissions (
@@ -663,6 +665,10 @@ def init_db():
         conn.execute("ALTER TABLE explorations ADD COLUMN evidence_map_json TEXT")
     if "mechanism_typing_json" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN mechanism_typing_json TEXT")
+    if "rewrite_boring" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN rewrite_boring INTEGER")
+    if "semantic_duplicate" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN semantic_duplicate INTEGER")
     transmission_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(transmissions)").fetchall()
     }
@@ -1118,6 +1124,8 @@ def save_exploration(
     invariance_json: dict | str | None = None,
     evidence_map: dict | None = None,
     mechanism_typing: dict | None = None,
+    rewrite_boring: bool | None = None,
+    semantic_duplicate: bool | None = None,
     transmitted: bool = False,
 ) -> int:
     """Save an exploration attempt. Returns the exploration id."""
@@ -1128,8 +1136,9 @@ def save_exploration(
          connection_description, scholarly_prior_art_summary, chain_path, seed_url,
          seed_excerpt, target_url, target_excerpt, novelty_score, distance_score,
          depth_score, total_score, validation_json, adversarial_rubric_json,
-         invariance_json, evidence_map_json, mechanism_typing_json, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         invariance_json, evidence_map_json, mechanism_typing_json,
+         rewrite_boring, semantic_duplicate, transmitted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
@@ -1177,6 +1186,16 @@ def save_exploration(
                 json.dumps(normalize_mechanism_typing(mechanism_typing), ensure_ascii=False)
                 if isinstance(mechanism_typing, dict)
                 else None
+            ),
+            (
+                1
+                if rewrite_boring is True
+                else (0 if rewrite_boring is False else None)
+            ),
+            (
+                1
+                if semantic_duplicate is True
+                else (0 if semantic_duplicate is False else None)
             ),
             1 if transmitted else 0,
         ),
@@ -1597,6 +1616,240 @@ def get_reasoning_failure_audit(limit: int = 200) -> dict:
             "total": invariance_total,
             "reason_instances_total": int(sum(invariance_reasons.values())),
             "top_reasons": _top_reason_rows(invariance_reasons, top_n=10),
+        },
+    }
+
+
+def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict:
+    """Classify recent exploration rows into one deterministic terminal bucket."""
+    safe_limit = max(1, int(limit))
+    try:
+        threshold_value = float(threshold)
+    except (TypeError, ValueError):
+        threshold_value = 0.6
+
+    conn = _connect()
+    total_explorations = conn.execute(
+        "SELECT COUNT(*) AS c FROM explorations"
+    ).fetchone()["c"]
+    rows = conn.execute(
+        """SELECT
+            id,
+            timestamp,
+            patterns_found,
+            jump_target_domain,
+            connection_description,
+            total_score,
+            distance_score,
+            scholarly_prior_art_summary,
+            validation_json,
+            adversarial_rubric_json,
+            invariance_json,
+            mechanism_typing_json,
+            seed_url,
+            seed_excerpt,
+            target_url,
+            target_excerpt,
+            rewrite_boring,
+            semantic_duplicate,
+            transmitted
+        FROM explorations
+        ORDER BY id DESC
+        LIMIT ?""",
+        (safe_limit,),
+    ).fetchall()
+    conn.close()
+
+    counts: Counter[str] = Counter()
+    validation_reasons: Counter[str] = Counter()
+    provenance_reasons: Counter[str] = Counter()
+    surviving_mechanism_types: Counter[str] = Counter()
+    rewrite_marker_known = 0
+    dedup_marker_known = 0
+    evidence_linked_validation_failures = 0
+
+    for row in rows:
+        patterns = _json_array_or_empty(row["patterns_found"])
+        has_patterns = bool(patterns)
+        target_domain = _clean_optional_text(row["jump_target_domain"])
+        connection_description = _clean_optional_text(row["connection_description"])
+        total_score = _coerce_optional_float(row["total_score"])
+        validation = _json_object_or_empty(row["validation_json"])
+        adversarial = _json_object_or_empty(row["adversarial_rubric_json"])
+        invariance = _json_object_or_empty(row["invariance_json"])
+        mechanism_typing = _mechanism_typing_or_none(row["mechanism_typing_json"]) or {}
+
+        validation_reason_list = _clean_reason_list(
+            validation.get("rejection_reasons")
+        ) or _clean_reason_list(validation.get("reasons"))
+        validation_failed = bool(validation_reason_list) or validation.get("passed") is False
+        claim_provenance = (
+            validation.get("claim_provenance")
+            if isinstance(validation.get("claim_provenance"), dict)
+            else {}
+        )
+        claim_issues = _clean_reason_list(claim_provenance.get("issues"))
+        validation_provenance_reasons = list(claim_issues)
+        for reason in validation_reason_list:
+            reason_text = str(reason).strip()
+            reason_lower = reason_text.lower()
+            if (
+                "provenance" in reason_lower
+                or "evidence_map" in reason_lower
+                or "source_reference" in reason_lower
+            ) and reason_text not in validation_provenance_reasons:
+                validation_provenance_reasons.append(reason_text)
+
+        adversarial_reasons = _clean_reason_list(adversarial.get("kill_reasons"))
+        adversarial_failed = bool(adversarial_reasons)
+
+        invariance_score = _coerce_optional_float(invariance.get("invariance_score"))
+        invariance_failed = (
+            invariance_score is not None
+            and invariance_score < INVARIANCE_KILL_THRESHOLD
+        )
+
+        connection_found = bool(
+            target_domain
+            or connection_description
+            or total_score is not None
+            or validation
+            or adversarial
+            or invariance
+            or mechanism_typing
+        )
+
+        rewrite_boring_raw = row["rewrite_boring"]
+        semantic_duplicate_raw = row["semantic_duplicate"]
+        if rewrite_boring_raw is not None:
+            rewrite_marker_known += 1
+        if semantic_duplicate_raw is not None:
+            dedup_marker_known += 1
+        rewrite_boring = bool(_normalize_bool_flag(rewrite_boring_raw))
+        semantic_duplicate = bool(_normalize_bool_flag(semantic_duplicate_raw))
+        transmitted = bool(_normalize_bool_flag(row["transmitted"]))
+
+        claim_provenance_passes = bool(claim_provenance.get("passes"))
+        source_target_missing: list[str] = []
+        for label, raw_value in (
+            ("missing seed_url", row["seed_url"]),
+            ("missing seed_excerpt", row["seed_excerpt"]),
+            ("missing target_url", row["target_url"]),
+            ("missing target_excerpt", row["target_excerpt"]),
+        ):
+            if _clean_optional_text(raw_value) is None:
+                source_target_missing.append(label)
+        provenance_failed = (
+            connection_found
+            and total_score is not None
+            and total_score >= threshold_value
+            and not validation_failed
+            and not adversarial_failed
+            and not invariance_failed
+            and not rewrite_boring
+            and not semantic_duplicate
+            and (source_target_missing or not claim_provenance_passes)
+        )
+
+        survived_quality_gates = (
+            connection_found
+            and total_score is not None
+            and total_score >= threshold_value
+            and not validation_failed
+            and not adversarial_failed
+            and not invariance_failed
+        )
+        if survived_quality_gates:
+            surviving_mechanism_types.update(
+                [
+                    _clean_optional_text(mechanism_typing.get("mechanism_type"))
+                    or "unknown"
+                ]
+            )
+
+        if not has_patterns:
+            counts["no_patterns_extracted"] += 1
+            continue
+        if not connection_found:
+            counts["patterns_found_but_no_connection"] += 1
+            continue
+        if total_score is None:
+            counts["uncategorized"] += 1
+            continue
+        if total_score < threshold_value:
+            counts["connection_found_but_below_threshold"] += 1
+            continue
+        if validation_failed:
+            counts["threshold_passed_but_validation_failed"] += 1
+            validation_reasons.update(
+                validation_reason_list or ["unspecified validation rejection"]
+            )
+            if validation_provenance_reasons:
+                evidence_linked_validation_failures += 1
+                provenance_reasons.update(validation_provenance_reasons)
+            continue
+        if adversarial_failed:
+            counts["validation_passed_but_adversarial_failed"] += 1
+            continue
+        if invariance_failed:
+            counts["adversarial_passed_but_invariance_failed"] += 1
+            continue
+        if rewrite_boring:
+            counts["killed_as_boring"] += 1
+            continue
+        if semantic_duplicate:
+            counts["killed_as_semantic_duplicate"] += 1
+            continue
+        if provenance_failed:
+            counts["quality_passed_but_provenance_failed"] += 1
+            if claim_issues:
+                provenance_reasons.update(claim_issues)
+            if source_target_missing:
+                provenance_reasons.update(source_target_missing)
+            if not claim_issues and not source_target_missing:
+                provenance_reasons.update(["provenance incomplete"])
+            continue
+        if transmitted:
+            counts["transmitted"] += 1
+            continue
+
+        distance_score = _coerce_optional_float(row["distance_score"])
+        prior_art_text = _clean_optional_text(row["scholarly_prior_art_summary"])
+        prior_art_lower = prior_art_text.lower() if prior_art_text is not None else None
+        white_detected = distance_score is not None and distance_score < 0.4 and (
+            prior_art_text is None
+            or (
+                prior_art_lower is not None
+                and "no" in prior_art_lower
+                and "match" in prior_art_lower
+            )
+        )
+        if white_detected:
+            counts["killed_as_common_knowledge"] += 1
+        elif distance_score is not None and distance_score < 0.5:
+            counts["distance_floor_failed"] += 1
+        else:
+            counts["uncategorized"] += 1
+
+    return {
+        "total_explorations": int(total_explorations),
+        "sample_size": len(rows),
+        "window_requested": safe_limit,
+        "threshold_used": threshold_value,
+        "counts": {
+            key: int(value)
+            for key, value in sorted(counts.items(), key=lambda item: item[0])
+        },
+        "top_validation_reasons": _top_reason_rows(validation_reasons, top_n=10),
+        "top_provenance_reasons": _top_reason_rows(provenance_reasons, top_n=10),
+        "surviving_mechanism_types": _top_reason_rows(
+            surviving_mechanism_types,
+            top_n=10,
+        ),
+        "evidence_linked_validation_failures": int(evidence_linked_validation_failures),
+        "marker_coverage": {
+            "rewrite_boring_known": int(rewrite_marker_known),
+            "semantic_duplicate_known": int(dedup_marker_known),
         },
     }
 
