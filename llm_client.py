@@ -34,6 +34,24 @@ def _response_field(payload, field: str):
     return getattr(payload, field, None)
 
 
+def _local_dedup_embedding(text: str) -> list[float]:
+    """Deterministic local embedding for semantic dedup fallback paths."""
+    cleaned = (text or "").strip().lower()
+    if not cleaned:
+        raise RuntimeError("Cannot embed empty text.")
+    dims = 128
+    vector = [0.0] * dims
+    for token in cleaned.split():
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        bucket = int.from_bytes(digest[:2], "big") % dims
+        sign = 1.0 if digest[2] % 2 == 0 else -1.0
+        vector[bucket] += sign
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0:
+        return vector
+    return [value / norm for value in vector]
+
+
 class GeminiClient:
     """Thin wrapper around Google Gemini generate_content."""
 
@@ -80,13 +98,8 @@ class ClaudeClient:
             raise RuntimeError(
                 "anthropic is not installed. Install dependencies or use LLM_PROVIDER=ollama."
             )
-        if genai is None:
-            raise RuntimeError(
-                "google-generativeai is not installed. Install dependencies or use LLM_PROVIDER=ollama."
-            )
         self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         self._model = model_name
-        genai.configure(api_key=GEMINI_API_KEY)
 
     def generate_content(self, prompt: str, generation_config: dict | None = None):
         kwargs = {
@@ -119,19 +132,8 @@ class ClaudeClient:
         return self._ClaudeResponse(text)
 
     def embed_content(self, text: str) -> list[float]:
-        """Return a deterministic embedding vector for semantic dedup checks."""
-        response = genai.embed_content(
-            model=EMBEDDING_MODEL,
-            content=text,
-            task_type="semantic_similarity",
-        )
-        if isinstance(response, dict):
-            embedding = response.get("embedding")
-        else:
-            embedding = getattr(response, "embedding", None)
-        if not isinstance(embedding, list) or not embedding:
-            raise RuntimeError("Gemini embedding response missing embedding vector.")
-        return [float(value) for value in embedding]
+        """Return a deterministic local embedding vector for semantic dedup checks."""
+        return _local_dedup_embedding(text)
 
 
 class OllamaClient:
@@ -172,20 +174,7 @@ class OllamaClient:
 
     def embed_content(self, text: str) -> list[float]:
         """Deterministic local fallback embedding for semantic dedup when using Ollama."""
-        cleaned = (text or "").strip().lower()
-        if not cleaned:
-            raise RuntimeError("Cannot embed empty text.")
-        dims = 128
-        vector = [0.0] * dims
-        for token in cleaned.split():
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            bucket = int.from_bytes(digest[:2], "big") % dims
-            sign = 1.0 if digest[2] % 2 == 0 else -1.0
-            vector[bucket] += sign
-        norm = math.sqrt(sum(value * value for value in vector))
-        if norm == 0:
-            return vector
-        return [value / norm for value in vector]
+        return _local_dedup_embedding(text)
 
 
 _CLIENT = None
@@ -197,6 +186,10 @@ def get_provider_status() -> dict[str, object]:
         embedding_provider = "local"
         embedding_model = None
         embedding_path = "OllamaClient.embed_content (deterministic hashed fallback)"
+    elif LLM_PROVIDER == "claude":
+        embedding_provider = "local"
+        embedding_model = None
+        embedding_path = "ClaudeClient.embed_content (deterministic hashed fallback)"
     else:
         embedding_provider = "gemini"
         embedding_model = EMBEDDING_MODEL
