@@ -759,6 +759,17 @@ def _print_recent_review_items(limit: int = 20):
         late_stage_timing = row.get("late_stage_timing")
         if late_stage_timing:
             print(f"  late_stage_timing={_late_stage_timing_text(late_stage_timing)}")
+        suggested_confidence = row.get("suggested_confidence")
+        suggested_confidence_text = (
+            f"{float(suggested_confidence):.2f}"
+            if suggested_confidence is not None
+            else "—"
+        )
+        print(
+            f"  suggested_grade={row.get('suggested_grade') or '—'} | "
+            f"suggested_confidence={suggested_confidence_text} | "
+            f"suggested_reason={_truncate_text(row.get('suggested_reason'), 120)}"
+        )
         print(
             f"  manual_grade={row.get('manual_grade') or '—'} | "
             f"note={_truncate_text(row.get('manual_grade_note'), 96)}"
