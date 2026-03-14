@@ -4,14 +4,13 @@ Searches a seed domain and extracts abstract patterns via LLM.
 """
 import json
 from tavily import TavilyClient
-from config import TAVILY_API_KEY
-from llm_router import LLMRouter
+from config import MODEL, TAVILY_API_KEY
+from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
 from store import increment_tavily_calls, increment_llm_calls
 
-_llm_router = LLMRouter()
 _tavily = TavilyClient(api_key=TAVILY_API_KEY)
-EXPLORE_MODEL = "qwen3:8b"
+EXPLORE_MODEL = MODEL
 EXTRACT_PROMPT = """You are a pattern extraction engine. Your job is to extract 3-5 transferable, mechanism-level patterns from a domain.
 Domain: {domain}
 
@@ -133,18 +132,18 @@ def _extract_json_substring(text: str) -> str | None:
         return None
 def _generate_json_with_retry(full_prompt: str, max_output_tokens: int) -> str | None:
     """Generate JSON with up to two correction retries if parsing fails."""
-    del max_output_tokens
     raw_responses = []
     prompt = full_prompt
     for attempt in range(3):
-        raw_output = _llm_router.call_local_chat(
-            model=EXPLORE_MODEL,
-            system_prompt=(
-                "You return strict JSON only. No markdown, no explanations, no comments."
-            ),
-            user_prompt=prompt,
-            temperature=0,
+        response = get_llm_client().generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0,
+                "max_output_tokens": max_output_tokens,
+                "response_mime_type": "application/json",
+            },
         )
+        raw_output = getattr(response, "text", "") or ""
         increment_llm_calls(1)
         raw_responses.append(raw_output)
         checked = check_llm_output(raw_output)
@@ -186,7 +185,7 @@ def dive(seed: dict) -> list[dict]:
     try:
         extracted_json = _generate_json_with_retry(full_prompt, 4096)
     except Exception as e:
-        print(f"  [!] Failed to extract JSON from local Ollama response: {e}")
+        print(f"  [!] Failed to extract JSON from LLM response: {e}")
         return []
     try:
         data = json.loads(extracted_json)
