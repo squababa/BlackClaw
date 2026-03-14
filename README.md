@@ -38,6 +38,38 @@ BlackClaw runs a loop that:
 * Golden-pair evaluation framework with stored eval runs
 * Token/cost tracking for LLM usage
 
+## Model Providers
+
+BlackClaw supports multiple LLM providers through `llm_client.py`:
+
+* `gemini`
+* `claude`
+* `ollama`
+
+The active provider is selected with `LLM_PROVIDER`, and the active model is selected
+with `BLACKCLAW_MODEL`.
+
+If `LLM_PROVIDER` is unset, `config.py` currently falls back to `gemini`. In practice,
+Claude and Ollama are also active runtime paths, so it is best to set both variables
+explicitly for the provider you want to run.
+
+Typical current configurations:
+
+* Claude:
+  * `LLM_PROVIDER=claude`
+  * `BLACKCLAW_MODEL=claude-sonnet-4-6`
+* Gemini:
+  * `LLM_PROVIDER=gemini`
+  * `BLACKCLAW_MODEL=gemini-2.5-flash`
+* Ollama:
+  * `LLM_PROVIDER=ollama`
+  * `BLACKCLAW_MODEL=qwen3:8b`
+  * `OLLAMA_BASE_URL=http://localhost:11434`
+
+Note: semantic dedup embeddings are still Gemini-backed in the current implementation.
+That means Claude generation works, but full end-to-end runs still benefit from a valid
+Gemini key unless the embedding path is changed.
+
 ## Pipeline Overview
 
 ### 1) Seed
@@ -119,6 +151,12 @@ That means the near-term goal is not “discoveries on demand.” The near-term 
 * dashboard observability
 * cost tracking
 * golden evaluation framework
+* claim-level provenance validation
+* prediction enforcement
+* mechanism typing
+* prediction outcome tracking
+* lightweight credibility-weighted scoring
+* passive lineage / scar scaffolding
 
 ### Next major priorities
 
@@ -159,6 +197,16 @@ pip install -r requirements.txt
 
 Copy `.env.example` to `.env` and provide the required keys.
 
+Example Claude configuration:
+
+```bash
+ANTHROPIC_API_KEY=your_anthropic_key_here
+GEMINI_API_KEY=your_gemini_key_here
+TAVILY_API_KEY=your_tavily_api_key_here
+LLM_PROVIDER=claude
+BLACKCLAW_MODEL=claude-sonnet-4-6
+```
+
 ### 3) Initialize and run
 
 Run a single cycle:
@@ -183,7 +231,15 @@ Examples may include:
 python main.py --kill-stats
 python main.py --eval-stats
 python main.py --run-eval --eval-limit 5 --eval-version smoke
+python main.py --credibility-diagnostics --window 200
+python main.py --outcome-review-queue --limit 20
+python main.py --check-provenance --window 50
 ```
+
+## Grading Runs
+
+Use [BLACKCLAW_GRADING_RUBRIC.md](/Users/matiaschristensen/Documents/BlackClaw/BLACKCLAW_GRADING_RUBRIC.md)
+to review cycles and transmissions consistently before making bigger architectural changes.
 
 ## Dashboard
 
@@ -214,4 +270,3 @@ BlackClaw is built on the idea that distant domains can share real structure, an
 ## Bottom Line
 
 BlackClaw is trying to become a system that finds useful structural leverage across domains and rejects everything that is merely clever.
-my goal is to make this the oppenheimer for ai and the future 
