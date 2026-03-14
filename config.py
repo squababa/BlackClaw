@@ -78,6 +78,8 @@ TAVILY_API_KEY: str = _require("TAVILY_API_KEY")
 # --- Optional with defaults ---
 if LLM_PROVIDER == "ollama":
     MODEL: str = _optional("BLACKCLAW_MODEL", "qwen3:8b")
+elif LLM_PROVIDER == "claude":
+    MODEL = _optional("BLACKCLAW_MODEL", "claude-sonnet-4-6")
 else:
     MODEL = _optional("BLACKCLAW_MODEL", "gemini-2.5-flash")
 OLLAMA_BASE_URL: str = _optional("OLLAMA_BASE_URL", "http://localhost:11434")
