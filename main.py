@@ -441,6 +441,40 @@ def _print_rut_report(report: dict):
             )
 
 
+def _print_provider_status():
+    """Render the active generation and semantic dedup provider path."""
+    status = get_provider_status()
+    print("[ProviderStatus]")
+    print(
+        "Generation: "
+        f"{status.get('generation_provider')} / {status.get('generation_model')}"
+    )
+    embedding_provider = status.get("embedding_provider")
+    embedding_model = status.get("embedding_model")
+    embedding_path = status.get("embedding_path")
+    if embedding_model:
+        print(
+            "Embeddings/Dedup: "
+            f"{embedding_provider} / {embedding_model} via {embedding_path}"
+        )
+    else:
+        print(
+            "Embeddings/Dedup: "
+            f"{embedding_provider} via {embedding_path}"
+        )
+    print(
+        "Semantic dedup: "
+        + (
+            "enabled for standard candidate evaluation"
+            if status.get("semantic_dedup_enabled")
+            else "disabled"
+        )
+    )
+    print(
+        "Note: eval runs currently call candidate evaluation with dedup disabled."
+    )
+
+
 def _print_reasoning_audit(report: dict):
     """Render the reasoning-failure audit in plain text."""
     if report.get("insufficient_data"):
@@ -2677,7 +2711,7 @@ from score import (
     run_adversarial_rubric,
     run_invariance_check,
 )
-from llm_client import get_llm_client
+from llm_client import get_llm_client, get_provider_status
 from prediction_evidence import scan_prediction_for_evidence
 from sanitize import check_llm_output
 from transmit import (
@@ -2764,6 +2798,11 @@ def parse_args():
         "--export",
         action="store_true",
         help="Export transmissions to transmissions_export.json and exit",
+    )
+    parser.add_argument(
+        "--provider-status",
+        action="store_true",
+        help="Print the active generation provider/model and semantic dedup embedding path, then exit",
     )
     parser.add_argument(
         "--rut-report",
@@ -4595,11 +4634,15 @@ def main():
     """Main entry point."""
     args = parse_args()
 
-    init_db()
-
     if args.rut_window <= 0:
         print("  [!] --rut-window requires a positive integer.")
         sys.exit(1)
+    if args.provider_status:
+        _print_provider_status()
+        return
+
+    init_db()
+
     if args.rut_report:
         _print_rut_report(rut_report(window=args.rut_window))
         return
