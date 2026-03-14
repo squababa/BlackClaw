@@ -57,6 +57,7 @@ from store import (
     rut_report,
     save_evaluation,
     list_evaluation_run_summaries,
+    get_bottleneck_diagnostics,
     get_credibility_stats,
     get_credibility_diagnostics,
     list_recent_transmission_mechanisms,
@@ -148,6 +149,10 @@ def _parse_report_only_args():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument(
         "--kill-stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--bottleneck-diagnostics",
         action="store_true",
     )
     parser.add_argument(
@@ -346,6 +351,11 @@ def _parse_report_only_args():
         type=int,
         default=200,
         metavar="N",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
     )
     parser.add_argument(
         "--limit",
@@ -2014,6 +2024,138 @@ def _print_kill_stats(report: dict, window_requested: int):
     )
 
 
+def _resolve_diagnostic_threshold(explicit_threshold: float | None) -> float:
+    """Resolve the threshold used for read-only diagnostics."""
+    if explicit_threshold is not None:
+        return float(explicit_threshold)
+    try:
+        from config import TRANSMIT_THRESHOLD as configured_threshold
+    except Exception:
+        configured_threshold = 0.6
+    return float(configured_threshold)
+
+
+def _print_bottleneck_diagnostics(report: dict):
+    """Render a deterministic bottleneck report from recent exploration rows."""
+    total = int(report.get("sample_size", 0) or 0)
+    threshold_value = float(report.get("threshold_used", 0.6) or 0.6)
+    counts = report.get("counts") or {}
+
+    def _count(key: str) -> int:
+        return int(counts.get(key, 0) or 0)
+
+    def _pct(value: int) -> str:
+        if total <= 0:
+            return "0.0%"
+        return f"{(value / total) * 100:.1f}%"
+
+    print("[BottleneckDiagnostics]")
+    print("Local SQLite only.")
+    print(
+        f"Recent explorations inspected: {total} "
+        f"(requested: {int(report.get('window_requested', 0) or 0)}, "
+        f"total stored: {int(report.get('total_explorations', 0) or 0)})"
+    )
+    print(f"Below-threshold cutoff used: {threshold_value:.3f}")
+    print("Terminal outcomes:")
+    for label, key in (
+        ("No patterns extracted", "no_patterns_extracted"),
+        ("Patterns found but no connection", "patterns_found_but_no_connection"),
+        ("Connection found but below threshold", "connection_found_but_below_threshold"),
+        ("Threshold passed but validation failed", "threshold_passed_but_validation_failed"),
+        ("Validation passed but adversarial failed", "validation_passed_but_adversarial_failed"),
+        ("Adversarial passed but invariance failed", "adversarial_passed_but_invariance_failed"),
+        ("Killed as boring", "killed_as_boring"),
+        ("Killed as semantic duplicate", "killed_as_semantic_duplicate"),
+        ("Quality passed but provenance failed", "quality_passed_but_provenance_failed"),
+        ("Transmitted", "transmitted"),
+    ):
+        count = _count(key)
+        print(f"  {label}: {count} ({_pct(count)})")
+
+    extra_rows = [
+        ("Distance floor failed", "distance_floor_failed"),
+        ("Killed as common knowledge", "killed_as_common_knowledge"),
+        ("Uncategorized", "uncategorized"),
+    ]
+    extra_present = [
+        (label, key) for label, key in extra_rows if _count(key) > 0
+    ]
+    if extra_present:
+        print("Additional observed outcomes:")
+        for label, key in extra_present:
+            count = _count(key)
+            print(f"  {label}: {count} ({_pct(count)})")
+
+    upstream_total = sum(
+        _count(key)
+        for key in (
+            "no_patterns_extracted",
+            "patterns_found_but_no_connection",
+            "connection_found_but_below_threshold",
+            "threshold_passed_but_validation_failed",
+            "validation_passed_but_adversarial_failed",
+            "adversarial_passed_but_invariance_failed",
+            "killed_as_boring",
+            "killed_as_semantic_duplicate",
+            "distance_floor_failed",
+            "killed_as_common_knowledge",
+        )
+    )
+    evidence_validation = int(
+        report.get("evidence_linked_validation_failures", 0) or 0
+    )
+    upstream_total = max(0, upstream_total - evidence_validation)
+    provenance_total = (
+        _count("quality_passed_but_provenance_failed") + evidence_validation
+    )
+    print(
+        "Diagnostic split: "
+        f"upstream_or_quality={upstream_total} ({_pct(upstream_total)}) | "
+        f"provenance_or_evidence={provenance_total} ({_pct(provenance_total)}) | "
+        f"transmitted={_count('transmitted')} ({_pct(_count('transmitted'))})"
+    )
+    if evidence_validation > 0:
+        print(
+            "  provenance_or_evidence includes "
+            f"{evidence_validation} validation failures tied to evidence/provenance."
+        )
+
+    validation_reasons = report.get("top_validation_reasons") or []
+    print("Top validation rejection reasons:")
+    if not validation_reasons:
+        print("  none")
+    else:
+        for row in validation_reasons:
+            print(f"  {int(row.get('count', 0) or 0)}x\t{row.get('reason', '')}")
+
+    provenance_reasons = report.get("top_provenance_reasons") or []
+    print("Top provenance failure reasons:")
+    if not provenance_reasons:
+        print("  none")
+    else:
+        for row in provenance_reasons:
+            print(f"  {int(row.get('count', 0) or 0)}x\t{row.get('reason', '')}")
+
+    mechanism_rows = report.get("surviving_mechanism_types") or []
+    print("Mechanism types for candidates that survived through invariance:")
+    if not mechanism_rows:
+        print("  none")
+    else:
+        for row in mechanism_rows:
+            print(f"  {int(row.get('count', 0) or 0)}x\t{row.get('reason', '')}")
+
+    marker_coverage = report.get("marker_coverage") or {}
+    rewrite_known = int(marker_coverage.get("rewrite_boring_known", 0) or 0)
+    dedup_known = int(marker_coverage.get("semantic_duplicate_known", 0) or 0)
+    if rewrite_known < total or dedup_known < total:
+        print(
+            "Marker coverage: "
+            f"rewrite_boring known for {rewrite_known}/{total}, "
+            f"semantic_duplicate known for {dedup_known}/{total}."
+        )
+
+
 def _print_invalid_seed_error(seed_name: str, suggestions: list[str]):
     """Render a CLI-friendly invalid built-in seed error."""
     print(
@@ -2068,6 +2210,7 @@ if __name__ == "__main__":
     _early_other_report_count = sum(
         [
             _early_report_args.kill_stats,
+            _early_report_args.bottleneck_diagnostics,
             _early_report_args.credibility_stats,
             _early_report_args.credibility_diagnostics,
             _early_report_args.check_predictions,
@@ -2081,6 +2224,7 @@ if __name__ == "__main__":
     if (
         (
             _early_report_args.kill_stats
+            or _early_report_args.bottleneck_diagnostics
             or _early_report_args.credibility_stats
             or _early_report_args.credibility_diagnostics
             or _early_report_args.check_predictions
@@ -2242,6 +2386,7 @@ if __name__ == "__main__":
             sys.exit(1)
     _early_report_action_requested = (
         _early_report_args.kill_stats
+        or _early_report_args.bottleneck_diagnostics
         or _early_report_args.credibility_stats
         or _early_report_args.credibility_diagnostics
         or _early_report_args.predictions
@@ -2297,6 +2442,15 @@ if __name__ == "__main__":
             _print_kill_stats(
                 _get_kill_stats(window=_early_report_args.window),
                 _early_report_args.window,
+            )
+        if _early_report_args.bottleneck_diagnostics:
+            _print_bottleneck_diagnostics(
+                get_bottleneck_diagnostics(
+                    limit=_early_report_args.window,
+                    threshold=_resolve_diagnostic_threshold(
+                        _early_report_args.threshold
+                    ),
+                )
             )
         if _early_report_args.credibility_stats:
             _print_credibility_stats(
@@ -2629,6 +2783,11 @@ def parse_args():
         help="Print kill stats for recent explorations and exit",
     )
     parser.add_argument(
+        "--bottleneck-diagnostics",
+        action="store_true",
+        help="Summarize where recent exploration candidates are dying and exit",
+    )
+    parser.add_argument(
         "--review-recent",
         action="store_true",
         help="List recent explorations/transmissions with grading context and exit",
@@ -2648,7 +2807,7 @@ def parse_args():
         type=int,
         default=200,
         metavar="N",
-        help="How many recent rows to inspect for kill stats, credibility stats, credibility diagnostics, or prediction checks (default: 200)",
+        help="How many recent rows to inspect for kill stats, bottleneck diagnostics, credibility stats, credibility diagnostics, or prediction checks (default: 200)",
     )
     parser.add_argument(
         "--limit",
@@ -4176,6 +4335,8 @@ def _score_store_and_transmit(
         invariance_json=candidate["invariance_result"],
         evidence_map=candidate["prepared_connection"].get("evidence_map"),
         mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
+        rewrite_boring=candidate["boring"],
+        semantic_duplicate=candidate["semantic_duplicate"],
         transmitted=candidate["should_transmit"],
     )
     strong_rejection_analysis = _strong_rejection_analysis(candidate)
@@ -4279,6 +4440,8 @@ def run_cycle(
             seed_category=seed["category"],
             patterns_found=None,
             chain_path=[seed["name"]],
+            rewrite_boring=False,
+            semantic_duplicate=False,
         )
         print_cycle_status(
             cycle_num,
@@ -4412,6 +4575,8 @@ def run_cycle(
             chain_path=[seed["name"]],
             seed_url=seed_url,
             seed_excerpt=seed_excerpt,
+            rewrite_boring=False,
+            semantic_duplicate=False,
         )
 
     total_tx = get_next_transmission_number() - 1
