@@ -82,6 +82,13 @@ PREDICTION_EVIDENCE_REVIEWABLE_CLASSIFICATIONS = (
     "possible_support",
     "possible_contradiction",
 )
+TRANSMISSION_MANUAL_GRADES = (
+    "strong",
+    "interesting_but_weak",
+    "generic",
+    "provenance_failed",
+    "salvage_candidate",
+)
 PREDICTION_OUTCOME_SUGGESTION_BUCKETS = (
     "review_for_support",
     "review_for_contradiction",
@@ -358,6 +365,15 @@ def _normalize_strong_rejection_status(value: object) -> str:
     return clean if clean in STRONG_REJECTION_STATUSES else "open"
 
 
+def _normalize_transmission_manual_grade(value: object) -> str | None:
+    """Normalize manual transmission grades into the stored v1 label set."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return None
+    clean = text.lower()
+    return clean if clean in TRANSMISSION_MANUAL_GRADES else None
+
+
 def _normalize_bool_flag(value: object) -> int:
     """Normalize optional truthy values into SQLite-friendly 0/1 integers."""
     if isinstance(value, bool):
@@ -452,6 +468,8 @@ def init_db():
             user_notes TEXT,
             dive_result TEXT,
             dive_timestamp TEXT,
+            manual_grade TEXT,
+            manual_grade_note TEXT,
             evidence_map_json TEXT,
             mechanism_typing_json TEXT,
             parent_transmission_number INTEGER,
@@ -666,6 +684,10 @@ def init_db():
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_result TEXT")
     if "dive_timestamp" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN dive_timestamp TEXT")
+    if "manual_grade" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN manual_grade TEXT")
+    if "manual_grade_note" not in transmission_columns:
+        conn.execute("ALTER TABLE transmissions ADD COLUMN manual_grade_note TEXT")
     if "evidence_map_json" not in transmission_columns:
         conn.execute("ALTER TABLE transmissions ADD COLUMN evidence_map_json TEXT")
     if "mechanism_typing_json" not in transmission_columns:
@@ -1793,6 +1815,129 @@ def list_recent_transmission_mechanisms(limit: int = 20) -> list[dict]:
                 "has_mechanism_typing": isinstance(raw_typing, str)
                 and bool(raw_typing.strip()),
                 "mechanism_typing": _mechanism_typing_or_none(raw_typing),
+            }
+        )
+    return payload
+
+
+def _recent_review_rejection_summary(
+    validation_json: object,
+    adversarial_rubric_json: object,
+    invariance_json: object,
+) -> tuple[str | None, list[str]]:
+    """Extract the most specific stored rejection stage/reasons when available."""
+    validation = _json_object_or_empty(validation_json)
+    validation_reasons = _clean_reason_list(
+        validation.get("rejection_reasons")
+    ) or _clean_reason_list(validation.get("reasons"))
+    if validation_reasons or validation.get("passed") is False:
+        return "validation", validation_reasons or ["validation failed"]
+
+    adversarial = _json_object_or_empty(adversarial_rubric_json)
+    kill_reasons = _clean_reason_list(adversarial.get("kill_reasons"))
+    if kill_reasons:
+        return "adversarial", kill_reasons
+
+    invariance = _json_object_or_empty(invariance_json)
+    invariance_score = _coerce_optional_float(invariance.get("invariance_score"))
+    if (
+        invariance_score is not None
+        and invariance_score < INVARIANCE_KILL_THRESHOLD
+    ):
+        invariance_reasons = _clean_reason_list(invariance.get("failure_modes"))
+        note = _clean_optional_text(invariance.get("notes"))
+        if note is not None and note not in invariance_reasons:
+            invariance_reasons.append(note)
+        if not invariance_reasons:
+            invariance_reasons.append(
+                f"invariance_score below {INVARIANCE_KILL_THRESHOLD:.2f}"
+            )
+        return "invariance", invariance_reasons
+
+    return None, []
+
+
+def list_recent_review_items(limit: int = 20) -> list[dict]:
+    """List recent explorations/transmissions with context for manual review."""
+    conn = _connect()
+    safe_limit = max(1, int(limit))
+    rows = conn.execute(
+        """SELECT
+            e.id AS exploration_id,
+            e.timestamp AS exploration_timestamp,
+            e.seed_domain,
+            e.seed_category,
+            e.jump_target_domain,
+            e.connection_description,
+            e.total_score,
+            e.transmitted AS exploration_transmitted,
+            e.validation_json,
+            e.adversarial_rubric_json,
+            e.invariance_json,
+            e.mechanism_typing_json AS exploration_mechanism_typing_json,
+            t.transmission_number,
+            t.timestamp AS transmission_timestamp,
+            t.formatted_output,
+            t.manual_grade,
+            t.manual_grade_note,
+            t.mechanism_typing_json AS transmission_mechanism_typing_json
+        FROM explorations e
+        LEFT JOIN transmissions t
+            ON t.id = (
+                SELECT tt.id
+                FROM transmissions tt
+                WHERE tt.exploration_id = e.id
+                ORDER BY tt.transmission_number DESC, tt.id DESC
+                LIMIT 1
+            )
+        ORDER BY e.id DESC
+        LIMIT ?""",
+        (safe_limit,),
+    ).fetchall()
+    conn.close()
+
+    payload = []
+    for row in rows:
+        mechanism_typing = _mechanism_typing_or_none(
+            row["transmission_mechanism_typing_json"]
+        ) or _mechanism_typing_or_none(row["exploration_mechanism_typing_json"])
+        mechanism_type = (
+            mechanism_typing.get("mechanism_type")
+            if isinstance(mechanism_typing, dict)
+            else None
+        )
+        rejection_stage, rejection_reasons = _recent_review_rejection_summary(
+            row["validation_json"],
+            row["adversarial_rubric_json"],
+            row["invariance_json"],
+        )
+        connection_description = _clean_optional_text(row["connection_description"])
+        transmitted = bool(_normalize_bool_flag(row["exploration_transmitted"])) or (
+            row["transmission_number"] is not None
+        )
+        payload.append(
+            {
+                "exploration_id": row["exploration_id"],
+                "timestamp": row["exploration_timestamp"],
+                "seed_domain": _clean_optional_text(row["seed_domain"]),
+                "seed_category": _clean_optional_text(row["seed_category"]),
+                "target_domain": _clean_optional_text(row["jump_target_domain"]),
+                "connection_found": bool(
+                    connection_description or _clean_optional_text(row["jump_target_domain"])
+                ),
+                "connection_description": connection_description,
+                "transmitted": transmitted,
+                "transmission_number": row["transmission_number"],
+                "transmission_timestamp": row["transmission_timestamp"],
+                "formatted_output": _clean_optional_text(row["formatted_output"]),
+                "total_score": _coerce_optional_float(row["total_score"]),
+                "rejection_stage": rejection_stage,
+                "rejection_reasons": rejection_reasons,
+                "mechanism_type": _clean_optional_text(mechanism_type),
+                "manual_grade": _normalize_transmission_manual_grade(
+                    row["manual_grade"]
+                ),
+                "manual_grade_note": _clean_optional_text(row["manual_grade_note"]),
             }
         )
     return payload
@@ -4128,6 +4273,44 @@ def set_transmission_feedback(
             SET user_rating = ?, user_notes = ?
             WHERE transmission_number = ?""",
             (user_rating, note if note else None, transmission_number),
+        )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def set_transmission_manual_grade(
+    transmission_number: int,
+    manual_grade: str,
+    note: str | None = None,
+) -> bool:
+    """Store a lightweight manual grade and optional note for one transmission."""
+    clean_grade = _normalize_transmission_manual_grade(manual_grade)
+    if clean_grade is None:
+        raise ValueError(
+            "manual_grade must be one of: " + ", ".join(TRANSMISSION_MANUAL_GRADES)
+        )
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT 1 FROM transmissions WHERE transmission_number = ? LIMIT 1",
+        (transmission_number,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        return False
+    if note is None:
+        conn.execute(
+            """UPDATE transmissions
+            SET manual_grade = ?
+            WHERE transmission_number = ?""",
+            (clean_grade, transmission_number),
+        )
+    else:
+        conn.execute(
+            """UPDATE transmissions
+            SET manual_grade = ?, manual_grade_note = ?
+            WHERE transmission_number = ?""",
+            (clean_grade, _clean_optional_text(note), transmission_number),
         )
     conn.commit()
     conn.close()
