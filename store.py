@@ -2120,6 +2120,157 @@ def _recent_review_rejection_summary(
     return None, []
 
 
+def _reason_looks_like_provenance_failure(reason: object) -> bool:
+    """Classify rubric-style provenance failures from stored rejection text."""
+    text = _clean_optional_text(reason)
+    if text is None:
+        return False
+    lower = text.lower()
+    return any(
+        token in lower
+        for token in (
+            "evidence_map",
+            "provenance",
+            "claim_snippet_mismatch",
+            "missing support",
+            "source_reference",
+        )
+    )
+
+
+def _reason_looks_like_validation_packaging_failure(reason: object) -> bool:
+    """Classify validation packaging failures from stored rejection text."""
+    text = _clean_optional_text(reason)
+    if text is None:
+        return False
+    lower = text.lower()
+    return any(
+        token in lower
+        for token in (
+            "mechanism must",
+            "mechanism_type",
+            "mechanism typing",
+            "prediction must",
+            "prediction should",
+            "variable_mapping",
+            "required fields",
+        )
+    )
+
+
+def _suggest_transmission_grade(
+    *,
+    total_score: float | None,
+    rejection_stage: str | None,
+    rejection_reasons: list[str],
+) -> tuple[str, str, float]:
+    """Suggest a transmission letter grade from existing stored review signals."""
+    if rejection_stage in {"validation", "adversarial", "invariance"} or rejection_reasons:
+        return (
+            "F",
+            "stored late-stage failure reasons indicate this transmission is not trustworthy",
+            0.87,
+        )
+    if total_score is None:
+        return (
+            "C",
+            "transmitted without a stored total score, so keep this as an interesting but weak draft",
+            0.42,
+        )
+    if total_score >= 0.8:
+        return (
+            "A",
+            "high stored total score with no later-stage rejection signals",
+            0.78,
+        )
+    if total_score >= 0.7:
+        return (
+            "B",
+            "useful transmitted candidate, but the stored score leaves at least one notable weakness",
+            0.74,
+        )
+    if total_score >= 0.65:
+        return (
+            "C",
+            "transmitted candidate looks interesting but still weak enough to need repair",
+            0.72,
+        )
+    if total_score >= 0.6:
+        return (
+            "D",
+            "transmitted just above threshold, suggesting weak mechanism or evidence support",
+            0.76,
+        )
+    return (
+        "F",
+        "transmitted below the normal quality floor",
+        0.91,
+    )
+
+
+def _suggest_review_grade(
+    *,
+    pattern_count: int,
+    connection_found: bool,
+    transmitted: bool,
+    total_score: float | None,
+    rejection_stage: str | None,
+    rejection_reasons: list[str],
+) -> tuple[str, str, float]:
+    """Suggest a rubric-aligned review grade using deterministic stored signals."""
+    clean_reasons = _clean_reason_list(rejection_reasons)
+    if transmitted:
+        return _suggest_transmission_grade(
+            total_score=total_score,
+            rejection_stage=rejection_stage,
+            rejection_reasons=clean_reasons,
+        )
+    if pattern_count <= 0:
+        return (
+            "no_patterns",
+            "stored exploration has no extracted patterns",
+            0.98,
+        )
+    if not connection_found:
+        return (
+            "jump_stage_fail",
+            "patterns were present but no connection survived the jump stage",
+            0.95,
+        )
+    if rejection_stage in {"adversarial", "invariance"}:
+        return (
+            "adversarial_or_invariance_fail",
+            "candidate reached a late stress test and was rejected there",
+            0.94,
+        )
+    if rejection_stage == "validation":
+        if any(_reason_looks_like_provenance_failure(reason) for reason in clean_reasons):
+            return (
+                "provenance_fail",
+                "candidate looked promising but failed evidence/provenance support",
+                0.92,
+            )
+        if any(
+            _reason_looks_like_validation_packaging_failure(reason)
+            for reason in clean_reasons
+        ):
+            return (
+                "validation_packaging_fail",
+                "candidate failed mechanism/prediction packaging checks",
+                0.9,
+            )
+        return (
+            "validation_packaging_fail",
+            "candidate failed validation, but the stored reasons do not clearly isolate provenance",
+            0.63,
+        )
+    return (
+        "score_gate_fail",
+        "candidate found a connection but did not survive the score or distance gate",
+        0.78,
+    )
+
+
 def list_recent_review_items(limit: int = 20) -> list[dict]:
     """List recent explorations/transmissions with context for manual review."""
     conn = _connect()
@@ -2130,6 +2281,7 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
             e.timestamp AS exploration_timestamp,
             e.seed_domain,
             e.seed_category,
+            e.patterns_found,
             e.jump_target_domain,
             e.connection_description,
             e.total_score,
@@ -2176,8 +2328,23 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
             row["invariance_json"],
         )
         connection_description = _clean_optional_text(row["connection_description"])
+        pattern_count = len(_json_array_or_empty(row["patterns_found"]))
         transmitted = bool(_normalize_bool_flag(row["exploration_transmitted"])) or (
             row["transmission_number"] is not None
+        )
+        if transmitted:
+            rejection_stage = None
+            rejection_reasons = []
+        connection_found = bool(
+            connection_description or _clean_optional_text(row["jump_target_domain"])
+        )
+        suggested_grade, suggested_reason, suggested_confidence = _suggest_review_grade(
+            pattern_count=pattern_count,
+            connection_found=connection_found,
+            transmitted=transmitted,
+            total_score=_coerce_optional_float(row["total_score"]),
+            rejection_stage=rejection_stage,
+            rejection_reasons=rejection_reasons,
         )
         payload.append(
             {
@@ -2185,10 +2352,9 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
                 "timestamp": row["exploration_timestamp"],
                 "seed_domain": _clean_optional_text(row["seed_domain"]),
                 "seed_category": _clean_optional_text(row["seed_category"]),
+                "pattern_count": pattern_count,
                 "target_domain": _clean_optional_text(row["jump_target_domain"]),
-                "connection_found": bool(
-                    connection_description or _clean_optional_text(row["jump_target_domain"])
-                ),
+                "connection_found": connection_found,
                 "connection_description": connection_description,
                 "transmitted": transmitted,
                 "transmission_number": row["transmission_number"],
@@ -2199,6 +2365,9 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
                 "rejection_reasons": rejection_reasons,
                 "mechanism_type": _clean_optional_text(mechanism_type),
                 "late_stage_timing": _json_object_or_empty(row["late_stage_timing_json"]),
+                "suggested_grade": suggested_grade,
+                "suggested_reason": suggested_reason,
+                "suggested_confidence": round(float(suggested_confidence), 2),
                 "manual_grade": _normalize_transmission_manual_grade(
                     row["manual_grade"]
                 ),
