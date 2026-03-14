@@ -452,6 +452,7 @@ def init_db():
             invariance_json TEXT,
             evidence_map_json TEXT,
             mechanism_typing_json TEXT,
+            late_stage_timing_json TEXT,
             rewrite_boring INTEGER,
             semantic_duplicate INTEGER,
             transmitted INTEGER NOT NULL DEFAULT 0
@@ -665,6 +666,8 @@ def init_db():
         conn.execute("ALTER TABLE explorations ADD COLUMN evidence_map_json TEXT")
     if "mechanism_typing_json" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN mechanism_typing_json TEXT")
+    if "late_stage_timing_json" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN late_stage_timing_json TEXT")
     if "rewrite_boring" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN rewrite_boring INTEGER")
     if "semantic_duplicate" not in existing_columns:
@@ -1124,6 +1127,7 @@ def save_exploration(
     invariance_json: dict | str | None = None,
     evidence_map: dict | None = None,
     mechanism_typing: dict | None = None,
+    late_stage_timing: dict | None = None,
     rewrite_boring: bool | None = None,
     semantic_duplicate: bool | None = None,
     transmitted: bool = False,
@@ -1137,8 +1141,9 @@ def save_exploration(
          seed_excerpt, target_url, target_excerpt, novelty_score, distance_score,
          depth_score, total_score, validation_json, adversarial_rubric_json,
          invariance_json, evidence_map_json, mechanism_typing_json,
+         late_stage_timing_json,
          rewrite_boring, semantic_duplicate, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
@@ -1185,6 +1190,11 @@ def save_exploration(
             (
                 json.dumps(normalize_mechanism_typing(mechanism_typing), ensure_ascii=False)
                 if isinstance(mechanism_typing, dict)
+                else None
+            ),
+            (
+                json.dumps(late_stage_timing, ensure_ascii=False, sort_keys=True)
+                if isinstance(late_stage_timing, dict) and late_stage_timing
                 else None
             ),
             (
@@ -2128,6 +2138,7 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
             e.adversarial_rubric_json,
             e.invariance_json,
             e.mechanism_typing_json AS exploration_mechanism_typing_json,
+            e.late_stage_timing_json,
             t.transmission_number,
             t.timestamp AS transmission_timestamp,
             t.formatted_output,
@@ -2187,6 +2198,7 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
                 "rejection_stage": rejection_stage,
                 "rejection_reasons": rejection_reasons,
                 "mechanism_type": _clean_optional_text(mechanism_type),
+                "late_stage_timing": _json_object_or_empty(row["late_stage_timing_json"]),
                 "manual_grade": _normalize_transmission_manual_grade(
                     row["manual_grade"]
                 ),
