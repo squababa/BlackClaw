@@ -25,6 +25,7 @@ from hypothesis_validation import (
 )
 from store import (
     _connect,
+    TRANSMISSION_MANUAL_GRADES,
     init_db,
     save_exploration,
     save_transmission,
@@ -37,6 +38,7 @@ from store import (
     save_deep_dive,
     export_transmissions,
     set_transmission_feedback,
+    set_transmission_manual_grade,
     get_transmission_feedback_context,
     get_transmission_lineage_metadata,
     get_strong_rejection_lineage_metadata,
@@ -71,6 +73,7 @@ from store import (
     get_strong_rejection,
     update_strong_rejection_status,
     save_strong_rejection,
+    list_recent_review_items,
 )
 from seed import pick_seed, resolve_seed_choice
 
@@ -146,6 +149,22 @@ def _parse_report_only_args():
     parser.add_argument(
         "--kill-stats",
         action="store_true",
+    )
+    parser.add_argument(
+        "--review-recent",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--grade-transmission",
+        type=int,
+        default=None,
+        metavar="NUMBER",
+    )
+    parser.add_argument(
+        "--grade",
+        type=str,
+        choices=TRANSMISSION_MANUAL_GRADES,
+        default=None,
     )
     parser.add_argument(
         "--credibility-stats",
@@ -525,6 +544,14 @@ def _truncate_text(value: object, limit: int) -> str:
     return cleaned[: limit - 3].rstrip() + "..."
 
 
+def _indent_block(value: object, prefix: str = "  ") -> str:
+    """Indent a stored multiline block for readable CLI review output."""
+    text = str(value or "").strip()
+    if not text:
+        return prefix + "—"
+    return "\n".join(f"{prefix}{line}" if line else prefix.rstrip() for line in text.splitlines())
+
+
 def _short_timestamp(value: object) -> str:
     """Format stored timestamps compactly for CLI tables."""
     text = str(value or "").strip()
@@ -581,6 +608,51 @@ def _print_prediction_outcomes(limit: int = 20):
             f"{_short_timestamp(row.get('validated_at'))}\t"
             f"{_truncate_text(_prediction_summary_from_row(row), 96)}"
         )
+
+
+def _print_recent_review_items(limit: int = 20):
+    """Render recent explorations/transmissions with manual grading context."""
+    rows = list_recent_review_items(limit=max(1, int(limit)))
+    if not rows:
+        print("[ReviewRecent] No explorations found.")
+        return
+
+    print(f"[ReviewRecent] Recent {len(rows)} explorations")
+    for row in rows:
+        total_score = row.get("total_score")
+        total_text = f"{float(total_score):.3f}" if total_score is not None else "—"
+        reasons = row.get("rejection_reasons") or []
+        reason_text = "; ".join(reasons[:3]) if reasons else "—"
+        print(
+            f"exploration #{row.get('exploration_id')} | "
+            f"{_short_timestamp(row.get('timestamp'))}"
+        )
+        print(
+            f"  seed={row.get('seed_domain') or '—'} | "
+            f"target={row.get('target_domain') or '—'} | "
+            f"connection_found={'yes' if row.get('connection_found') else 'no'} | "
+            f"transmitted={'yes' if row.get('transmitted') else 'no'}"
+        )
+        print(
+            f"  tx={row.get('transmission_number') or '—'} | "
+            f"total_score={total_text} | "
+            f"mechanism_type={row.get('mechanism_type') or '—'}"
+        )
+        print(
+            f"  rejection_stage={row.get('rejection_stage') or '—'} | "
+            f"reasons={reason_text}"
+        )
+        print(
+            f"  manual_grade={row.get('manual_grade') or '—'} | "
+            f"note={_truncate_text(row.get('manual_grade_note'), 96)}"
+        )
+        if row.get("transmitted"):
+            print("  transmission:")
+            print(_indent_block(row.get("formatted_output")))
+        else:
+            print("  connection:")
+            print(_indent_block(_truncate_text(row.get("connection_description"), 280)))
+        print("")
 
 
 def _print_prediction_outcome_stats(report: dict):
@@ -1979,6 +2051,12 @@ if __name__ == "__main__":
             _early_report_args.mark_unknown is not None,
         ]
     )
+    _early_transmission_review_action_count = sum(
+        [
+            _early_report_args.review_recent,
+            _early_report_args.grade_transmission is not None,
+        ]
+    )
     _early_strong_rejection_action_count = sum(
         [
             _early_report_args.strong_rejections,
@@ -2021,17 +2099,35 @@ if __name__ == "__main__":
             or _early_report_args.evidence_review_queue
             or _early_report_args.scan_open_predictions
             or _early_report_args.strong_rejections
+            or _early_report_args.review_recent
         )
         and _early_report_args.limit is not None
         and _early_report_args.limit <= 0
     ):
         print("  [!] --limit requires a positive integer.")
         sys.exit(1)
+    if (
+        _early_report_args.grade_transmission is None
+        and _early_report_args.grade is not None
+    ):
+        print("  [!] --grade can only be used with --grade-transmission.")
+        sys.exit(1)
+    if (
+        _early_report_args.grade_transmission is not None
+        and _early_report_args.grade is None
+    ):
+        print("  [!] --grade-transmission also requires --grade.")
+        sys.exit(1)
     if _early_report_args.rut_report and _early_report_args.rut_window <= 0:
         print("  [!] --rut-window requires a positive integer.")
         sys.exit(1)
     if _early_report_args.audit_reasoning and _early_report_args.audit_limit <= 0:
         print("  [!] --audit-limit requires a positive integer.")
+        sys.exit(1)
+    if _early_transmission_review_action_count > 1:
+        print(
+            "  [!] Use only one transmission review action at a time: --review-recent or --grade-transmission."
+        )
         sys.exit(1)
     if _early_prediction_action_count > 1:
         print(
@@ -2046,6 +2142,15 @@ if __name__ == "__main__":
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
         print(
             "  [!] Prediction actions cannot be combined with other report-only actions."
+        )
+        sys.exit(1)
+    if _early_transmission_review_action_count > 0 and (
+        _early_prediction_action_count > 0
+        or _early_strong_rejection_action_count > 0
+        or _early_other_report_count > 0
+    ):
+        print(
+            "  [!] Transmission review actions cannot be combined with prediction, strong-rejection, or other report-only actions."
         )
         sys.exit(1)
     if _early_strong_rejection_action_count > 0 and (
@@ -2070,9 +2175,10 @@ if __name__ == "__main__":
         and not _early_report_args.evidence_review_queue
         and not _early_report_args.scan_open_predictions
         and not _early_report_args.strong_rejections
+        and not _early_report_args.review_recent
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, or --review-recent."
         )
         sys.exit(1)
     if (
@@ -2087,9 +2193,10 @@ if __name__ == "__main__":
         and _early_report_args.dismiss_evidence is None
         and _early_report_args.mark_salvaged is None
         and _early_report_args.dismiss_strong_rejection is None
+        and _early_report_args.grade_transmission is None
     ):
         print(
-            "  [!] --note can only be used with evidence review updates, prediction outcome update flags, or strong-rejection status updates."
+            "  [!] --note can only be used with --grade-transmission, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
         )
         sys.exit(1)
     if (
@@ -2123,6 +2230,7 @@ if __name__ == "__main__":
         ("--mark-failed", _early_report_args.mark_failed),
         ("--mark-unknown", _early_report_args.mark_unknown),
         ("--strong-rejection", _early_report_args.strong_rejection),
+        ("--grade-transmission", _early_report_args.grade_transmission),
         ("--mark-salvaged", _early_report_args.mark_salvaged),
         (
             "--dismiss-strong-rejection",
@@ -2155,12 +2263,14 @@ if __name__ == "__main__":
         or _early_report_args.prediction is not None
         or _early_report_args.strong_rejections
         or _early_report_args.strong_rejection is not None
+        or _early_report_args.review_recent
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
         or _early_report_args.mark_mixed is not None
         or _early_report_args.mark_expired is not None
         or _early_report_args.mark_failed is not None
         or _early_report_args.mark_unknown is not None
+        or _early_report_args.grade_transmission is not None
         or _early_report_args.mark_salvaged is not None
         or _early_report_args.dismiss_strong_rejection is not None
         or _early_report_args.rut_report
@@ -2204,6 +2314,8 @@ if __name__ == "__main__":
             _print_provenance_check_report(limit=_early_report_args.window)
         if _early_report_args.check_mechanisms:
             _print_mechanism_check_report(limit=_early_report_args.window)
+        if _early_report_args.review_recent:
+            _print_recent_review_items(limit=_early_report_args.limit or 10)
         if _early_report_args.predictions:
             _print_predictions_list(limit=20)
         if _early_report_args.prediction_outcomes:
@@ -2294,6 +2406,26 @@ if __name__ == "__main__":
             _early_report_args.prediction
         ):
             sys.exit(1)
+        if (
+            _early_report_args.grade_transmission is not None
+            and not set_transmission_manual_grade(
+                _early_report_args.grade_transmission,
+                _early_report_args.grade,
+                note=_early_report_args.note,
+            )
+        ):
+            print(
+                f"  [!] Transmission #{_early_report_args.grade_transmission} not found."
+            )
+            sys.exit(1)
+        if _early_report_args.grade_transmission is not None:
+            print(
+                "[Grade] Saved "
+                f"{_early_report_args.grade} for transmission "
+                f"#{_early_report_args.grade_transmission}"
+            )
+            if _early_report_args.note is not None:
+                print("  [Grade] Note saved.")
         if (
             _early_report_args.mark_supported is not None
             and not _apply_prediction_outcome_update(
@@ -2497,6 +2629,11 @@ def parse_args():
         help="Print kill stats for recent explorations and exit",
     )
     parser.add_argument(
+        "--review-recent",
+        action="store_true",
+        help="List recent explorations/transmissions with grading context and exit",
+    )
+    parser.add_argument(
         "--credibility-stats",
         action="store_true",
         help="Summarize local prediction credibility and problem-finding quality stats and exit",
@@ -2518,7 +2655,7 @@ def parse_args():
         type=int,
         default=None,
         metavar="N",
-        help="Optional limit for scan, evidence-list, outcome-review-queue, evidence-review-queue, or strong-rejection list commands",
+        help="Optional limit for scan, evidence-list, review-recent, outcome-review-queue, evidence-review-queue, or strong-rejection list commands",
     )
     parser.add_argument(
         "--star",
@@ -2533,6 +2670,20 @@ def parse_args():
         default=None,
         metavar="NUMBER",
         help="Mark a transmission as dismissed and exit",
+    )
+    parser.add_argument(
+        "--grade-transmission",
+        type=int,
+        default=None,
+        metavar="NUMBER",
+        help="Store a manual grade for a transmission and exit",
+    )
+    parser.add_argument(
+        "--grade",
+        type=str,
+        choices=TRANSMISSION_MANUAL_GRADES,
+        default=None,
+        help="Manual grade label to store with --grade-transmission",
     )
     parser.add_argument(
         "--dive",
@@ -4293,8 +4444,10 @@ def main():
 
     feedback_action_count = sum(
         [
+            args.review_recent,
             args.star is not None,
             args.dismiss is not None,
+            args.grade_transmission is not None,
             args.dive is not None,
             args.transmission_lineage is not None,
         ]
@@ -4347,6 +4500,12 @@ def main():
     if args.limit is not None and args.limit <= 0:
         print("  [!] --limit requires a positive integer.")
         sys.exit(1)
+    if args.grade_transmission is None and args.grade is not None:
+        print("  [!] --grade can only be used with --grade-transmission.")
+        sys.exit(1)
+    if args.grade_transmission is not None and args.grade is None:
+        print("  [!] --grade-transmission also requires --grade.")
+        sys.exit(1)
     if (
         not args.run_eval
         and (
@@ -4361,7 +4520,7 @@ def main():
         sys.exit(1)
     if feedback_action_count > 1:
         print(
-            "  [!] Use only one of --star, --dismiss, --dive, or --transmission-lineage at a time."
+            "  [!] Use only one of --review-recent, --star, --dismiss, --grade-transmission, --dive, or --transmission-lineage at a time."
         )
         sys.exit(1)
     if prediction_action_count > 1:
@@ -4378,7 +4537,7 @@ def main():
         prediction_action_count > 0 or strong_rejection_action_count > 0
     ):
         print(
-            "  [!] Prediction, audit, and strong-rejection actions cannot be combined with --star, --dismiss, or --dive."
+            "  [!] Prediction, audit, and strong-rejection actions cannot be combined with transmission review/feedback actions."
         )
         sys.exit(1)
     if prediction_action_count > 0 and strong_rejection_action_count > 0:
@@ -4395,7 +4554,7 @@ def main():
         or args.dry_run
     ):
         print(
-            "  [!] --run-eval cannot be combined with feedback, prediction, strong-rejection, export, --seed, or --dry-run actions."
+            "  [!] --run-eval cannot be combined with transmission review/feedback, prediction, strong-rejection, export, --seed, or --dry-run actions."
         )
         sys.exit(1)
     if args.audit_reasoning and args.audit_limit <= 0:
@@ -4413,13 +4572,15 @@ def main():
         and not args.evidence_review_queue
         and not args.scan_open_predictions
         and not args.strong_rejections
+        and not args.review_recent
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, or --strong-rejections."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, or --review-recent."
         )
         sys.exit(1)
     if (
         args.note is not None
+        and args.grade_transmission is None
         and args.star is None
         and args.dismiss is None
         and args.mark_supported is None
@@ -4434,7 +4595,7 @@ def main():
         and args.dismiss_strong_rejection is None
     ):
         print(
-            "  [!] --note can only be used with --star, --dismiss, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
+            "  [!] --note can only be used with --star, --dismiss, --grade-transmission, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
         )
         sys.exit(1)
     if (
@@ -4453,6 +4614,7 @@ def main():
     for flag_name, tx_num in (
         ("--star", args.star),
         ("--dismiss", args.dismiss),
+        ("--grade-transmission", args.grade_transmission),
         ("--dive", args.dive),
         ("--transmission-lineage", args.transmission_lineage),
         ("--prediction", args.prediction),
@@ -4492,6 +4654,25 @@ def main():
         print(f"[Feedback] Dismissed transmission #{args.dismiss}")
         if args.note is not None:
             print("  [Feedback] Note saved.")
+        return
+
+    if args.review_recent:
+        _print_recent_review_items(limit=args.limit or 10)
+        return
+
+    if args.grade_transmission is not None:
+        if not set_transmission_manual_grade(
+            args.grade_transmission,
+            args.grade,
+            note=args.note,
+        ):
+            print(f"  [!] Transmission #{args.grade_transmission} not found.")
+            sys.exit(1)
+        print(
+            f"[Grade] Saved {args.grade} for transmission #{args.grade_transmission}"
+        )
+        if args.note is not None:
+            print("  [Grade] Note saved.")
         return
 
     if args.dive is not None:
