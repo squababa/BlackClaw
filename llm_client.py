@@ -191,6 +191,27 @@ class OllamaClient:
 _CLIENT = None
 
 
+def get_provider_status() -> dict[str, object]:
+    """Describe the active generation and semantic dedup embedding path."""
+    if LLM_PROVIDER == "ollama":
+        embedding_provider = "local"
+        embedding_model = None
+        embedding_path = "OllamaClient.embed_content (deterministic hashed fallback)"
+    else:
+        embedding_provider = "gemini"
+        embedding_model = EMBEDDING_MODEL
+        embedding_path = "google.generativeai.embed_content"
+
+    return {
+        "generation_provider": LLM_PROVIDER,
+        "generation_model": MODEL,
+        "embedding_provider": embedding_provider,
+        "embedding_model": embedding_model,
+        "embedding_path": embedding_path,
+        "semantic_dedup_enabled": True,
+    }
+
+
 def get_llm_client():
     """Return provider client from LLM_PROVIDER."""
     global _CLIENT
