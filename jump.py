@@ -30,9 +30,13 @@ SEARCH RESULTS FROM OTHER FIELDS:
 {search_results}
 
 Strict rules:
-- Reject vague analogies and keyword overlap.
+- Look for a conserved causal structure, not shared topic words.
+- A real structural match usually preserves the same driver -> mechanism -> outcome shape, with similar control logic.
+- Strong structural clues include similar threshold behavior, routing, bottlenecks, feedback loops, switching conditions, or gating logic.
+- Reject vague analogies, keyword overlap, and broad theme matches without similar causal organization.
 - Reject universal principles that connect everything (generic feedback, emergence, optimization, networks).
-- Approve only if there is a concrete mechanistic or mathematical signal in a specific target field.
+- Approve if there is a concrete mechanistic or mathematical signal in a specific target field, even if the evidence is only enough for a plausible structural analogue rather than a full hypothesis.
+- If the search results show a mechanistically plausible partial analogue with clear structural overlap, pass it to Stage 2 instead of rejecting it early.
 
 Return ONLY valid JSON. No markdown.
 If no real signal: {{"no_connection": true}}
