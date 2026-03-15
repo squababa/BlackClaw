@@ -1673,6 +1673,7 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
     counts: Counter[str] = Counter()
     validation_reasons: Counter[str] = Counter()
     provenance_reasons: Counter[str] = Counter()
+    provenance_failure_details: Counter[tuple[bool, str, str]] = Counter()
     surviving_mechanism_types: Counter[str] = Counter()
     rewrite_marker_known = 0
     dedup_marker_known = 0
@@ -1698,6 +1699,16 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
             if isinstance(validation.get("claim_provenance"), dict)
             else {}
         )
+        for detail in _extract_provenance_review_details(validation, limit=3):
+            provenance_failure_details.update(
+                [
+                    (
+                        bool(detail.get("critical_mapping")),
+                        str(detail.get("pair") or ""),
+                        str(detail.get("failure_type") or "provenance_failure"),
+                    )
+                ]
+            )
         claim_issues = _clean_reason_list(claim_provenance.get("issues"))
         validation_provenance_reasons = list(claim_issues)
         for reason in validation_reason_list:
@@ -1852,6 +1863,23 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
         },
         "top_validation_reasons": _top_reason_rows(validation_reasons, top_n=10),
         "top_provenance_reasons": _top_reason_rows(provenance_reasons, top_n=10),
+        "top_provenance_failure_details": [
+            {
+                "critical_mapping": critical_mapping,
+                "pair": pair or None,
+                "failure_type": failure_type,
+                "count": int(count or 0),
+            }
+            for (critical_mapping, pair, failure_type), count in sorted(
+                provenance_failure_details.items(),
+                key=lambda item: (
+                    -int(item[1] or 0),
+                    0 if item[0][0] else 1,
+                    item[0][2],
+                    item[0][1],
+                ),
+            )[:5]
+        ],
         "surviving_mechanism_types": _top_reason_rows(
             surviving_mechanism_types,
             top_n=10,
@@ -2138,6 +2166,81 @@ def _reason_looks_like_provenance_failure(reason: object) -> bool:
     )
 
 
+def _provenance_failure_type_label(detail: object) -> str:
+    """Choose one concise failure label from stored provenance detail."""
+    payload = detail if isinstance(detail, dict) else {}
+    reason_codes = [
+        str(item).strip()
+        for item in (payload.get("reason_codes") or [])
+        if str(item).strip()
+    ]
+    for code in (
+        "claim_snippet_mismatch",
+        "low_overall_provenance_quality",
+        "generic_evidence",
+        "vague_snippet",
+        "vague_claim",
+        "missing_source_reference",
+    ):
+        if code in reason_codes:
+            return code
+    reasons = {
+        str(item).strip().lower()
+        for item in (payload.get("reasons") or [])
+        if str(item).strip()
+    }
+    message = (_clean_optional_text(payload.get("message")) or "").lower()
+    if "missing evidence" in reasons or "missing support" in message:
+        return "missing support"
+    if reason_codes:
+        return reason_codes[0]
+    return "provenance_failure"
+
+
+def _extract_provenance_review_details(
+    validation_json: object,
+    *,
+    limit: int | None = 2,
+) -> list[dict]:
+    """Extract concise provenance-failure details for review/report surfaces."""
+    validation = _json_object_or_empty(validation_json)
+    claim_provenance = _json_object_or_empty(validation.get("claim_provenance"))
+    raw_details = claim_provenance.get("failure_details")
+    if not isinstance(raw_details, list):
+        return []
+
+    details = []
+    for item in raw_details:
+        if not isinstance(item, dict):
+            continue
+        kind = _clean_optional_text(item.get("kind")) or "unknown"
+        source_variable = _clean_optional_text(item.get("source_variable"))
+        target_variable = _clean_optional_text(item.get("target_variable"))
+        pair = None
+        if source_variable and target_variable:
+            pair = f"{source_variable} -> {target_variable}"
+        details.append(
+            {
+                "kind": kind,
+                "pair": pair,
+                "failure_type": _provenance_failure_type_label(item),
+                "critical_mapping": kind == "variable_mapping",
+            }
+        )
+
+    details.sort(
+        key=lambda item: (
+            0 if item.get("critical_mapping") else 1,
+            0 if item.get("pair") else 1,
+            str(item.get("failure_type") or ""),
+            str(item.get("pair") or ""),
+        )
+    )
+    if limit is None:
+        return details
+    return details[: max(1, int(limit))]
+
+
 def _reason_looks_like_validation_packaging_failure(reason: object) -> bool:
     """Classify validation packaging failures from stored rejection text."""
     text = _clean_optional_text(reason)
@@ -2346,6 +2449,10 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
             rejection_stage=rejection_stage,
             rejection_reasons=rejection_reasons,
         )
+        provenance_failure_details = _extract_provenance_review_details(
+            row["validation_json"],
+            limit=2,
+        )
         payload.append(
             {
                 "exploration_id": row["exploration_id"],
@@ -2363,6 +2470,7 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
                 "total_score": _coerce_optional_float(row["total_score"]),
                 "rejection_stage": rejection_stage,
                 "rejection_reasons": rejection_reasons,
+                "provenance_failure_details": provenance_failure_details,
                 "mechanism_type": _clean_optional_text(mechanism_type),
                 "late_stage_timing": _json_object_or_empty(row["late_stage_timing_json"]),
                 "suggested_grade": suggested_grade,

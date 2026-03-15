@@ -674,6 +674,18 @@ def _short_timestamp(value: object) -> str:
     return text.replace("T", " ")[:19]
 
 
+def _provenance_failure_detail_text(detail: object, limit: int = 120) -> str:
+    """Render one compact provenance-failure detail for CLI review output."""
+    payload = detail if isinstance(detail, dict) else {}
+    pair = str(payload.get("pair") or "mechanism_assertion").strip()
+    failure_type = str(payload.get("failure_type") or "provenance_failure").strip()
+    critical = "yes" if payload.get("critical_mapping") else "no"
+    return _truncate_text(
+        f"pair={pair} | type={failure_type} | critical={critical}",
+        limit,
+    )
+
+
 def _format_percent(value: float | None) -> str:
     """Render optional ratios as percentages."""
     if value is None:
@@ -756,6 +768,15 @@ def _print_recent_review_items(limit: int = 20):
             f"  rejection_stage={row.get('rejection_stage') or '—'} | "
             f"reasons={reason_text}"
         )
+        provenance_failure_details = row.get("provenance_failure_details") or []
+        if provenance_failure_details:
+            print(
+                "  provenance_focus="
+                + "; ".join(
+                    _provenance_failure_detail_text(detail, limit=88)
+                    for detail in provenance_failure_details[:2]
+                )
+            )
         late_stage_timing = row.get("late_stage_timing")
         if late_stage_timing:
             print(f"  late_stage_timing={_late_stage_timing_text(late_stage_timing)}")
@@ -2254,6 +2275,20 @@ def _print_bottleneck_diagnostics(report: dict):
     else:
         for row in provenance_reasons:
             print(f"  {int(row.get('count', 0) or 0)}x\t{row.get('reason', '')}")
+
+    provenance_failure_details = report.get("top_provenance_failure_details") or []
+    print("Top provenance failure details:")
+    if not provenance_failure_details:
+        print("  none")
+    else:
+        for row in provenance_failure_details:
+            pair = row.get("pair") or "mechanism_assertion"
+            failure_type = row.get("failure_type") or "provenance_failure"
+            critical = "yes" if row.get("critical_mapping") else "no"
+            print(
+                f"  {int(row.get('count', 0) or 0)}x\t"
+                f"pair={pair}\ttype={failure_type}\tcritical={critical}"
+            )
 
     mechanism_rows = report.get("surviving_mechanism_types") or []
     print("Mechanism types for candidates that survived through invariance:")
