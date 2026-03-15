@@ -71,11 +71,15 @@ Requirements:
   - Each variable mapping entry must include source_variable, target_variable, claim, evidence_snippet, source_reference, and may include support_level.
   - The first 3 variable_mapping entries are the critical mappings, so the first 3 evidence_map.variable_mappings entries must be the strongest-supported ones and must align to those same critical mappings.
   - For each critical mapping, the claim must closely match the mapped variables, the evidence_snippet must directly support that exact claim, and the source_reference must point to the specific search result containing that snippet.
+  - For critical mappings, write the claim as a direct restatement of what the evidence_snippet literally supports. Do not let the claim become broader, more abstract, or more mechanistic than the snippet itself.
   - For critical mappings, prefer direct support over inferential support whenever possible.
   - Prefer fewer, better-supported critical mappings over extra weak ones. If support is thin, keep the first 3 mappings narrow and well-supported instead of inventing broader weak critical mappings. Non-critical mappings are lower priority.
+  - If a snippet supports only a weaker, local correspondence, keep the mapping claim equally weak and local.
   - Write each claim at the same level of specificity as the mapped variables. Do not make the claim broader than the mapping itself.
   - Do not use vague evidence_snippet text that only supports the broader domain, the general story, or the overall mechanism.
   - Do not cite a broad mechanism sentence as support for a narrow variable-level mapping.
+  - For the first 3 critical mappings, choose snippets that mention the mapped variable, threshold, process, or operator directly when possible.
+  - If exact support is unavailable, weaken or omit the mapping rather than overstating what the snippet proves.
   - If a snippet only supports the overall causal story but not the exact mapped-variable claim, use it for mechanism_assertions instead of variable_mappings.
   - evidence_map.mechanism_assertions must include at least 1 entry with mechanism_claim, evidence_snippet, and source_reference.
   - mechanism_assertions must support the actual causal operator or control logic in the mechanism (what triggers, routes, switches, inhibits, amplifies, or accumulates), not just background context about the target domain.
@@ -86,11 +90,12 @@ Requirements:
 - Provide a falsifiable test with metric + confirm + falsify.
 - The mechanism field must name one specific causal process, not a broad analogy or generic system description.
 - In `mechanism`, explicitly state:
-  - what accumulates, routes, switches, inhibits, amplifies, transfers, or converts what,
-  - which trigger, comparator, threshold, control variable, or bottleneck matters,
-  - and what state transition, failure mode, or measurable outcome follows.
+  - the operative causal operator,
+  - the control, trigger, threshold, comparator, or bottleneck variable,
+  - and the resulting state transition, failure mode, or measurable outcome.
 - The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Describe the operative causal operator, not just a resemblance.
 - Make `mechanism` process-level and falsifiable. Avoid metaphorical summaries or generic "things interact" language.
+- Do not write `mechanism` as only analogy, resemblance, or high-level summary. It must state a concrete process that could be tested against alternatives.
 - Bad mechanism fields include:
   - "both systems involve complex interactions"
   - "both optimize under constraints"
