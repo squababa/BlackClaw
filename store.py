@@ -1611,7 +1611,13 @@ def get_reasoning_failure_audit(limit: int = 200) -> dict:
         "total_explorations": int(total_explorations),
         "sample_size": len(rows),
         "limit": safe_limit,
+        "window_requested": safe_limit,
         "insufficient_data": int(total_explorations) < 100,
+        "downstream": {
+            "total": adversarial_total + invariance_total,
+            "adversarial_total": adversarial_total,
+            "invariance_total": invariance_total,
+        },
         "validator": {
             "total": validator_total,
             "reason_instances_total": int(sum(validator_reasons.values())),
@@ -1673,6 +1679,8 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
     counts: Counter[str] = Counter()
     validation_reasons: Counter[str] = Counter()
     provenance_reasons: Counter[str] = Counter()
+    adversarial_reason_counts: Counter[str] = Counter()
+    invariance_reason_counts: Counter[str] = Counter()
     provenance_failure_details: Counter[tuple[bool, str, str]] = Counter()
     surviving_mechanism_types: Counter[str] = Counter()
     rewrite_marker_known = 0
@@ -1721,14 +1729,21 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
             ) and reason_text not in validation_provenance_reasons:
                 validation_provenance_reasons.append(reason_text)
 
-        adversarial_reasons = _clean_reason_list(adversarial.get("kill_reasons"))
-        adversarial_failed = bool(adversarial_reasons)
+        adversarial_reason_list = _clean_reason_list(adversarial.get("kill_reasons"))
+        adversarial_failed = bool(adversarial_reason_list)
 
         invariance_score = _coerce_optional_float(invariance.get("invariance_score"))
         invariance_failed = (
             invariance_score is not None
             and invariance_score < INVARIANCE_KILL_THRESHOLD
         )
+        invariance_reason_list = _clean_reason_list(invariance.get("failure_modes"))
+        invariance_note = _clean_optional_text(invariance.get("notes"))
+        if (
+            invariance_note is not None
+            and invariance_note not in invariance_reason_list
+        ):
+            invariance_reason_list.append(invariance_note)
 
         connection_found = bool(
             target_domain
@@ -1811,9 +1826,16 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
             continue
         if adversarial_failed:
             counts["validation_passed_but_adversarial_failed"] += 1
+            adversarial_reason_counts.update(
+                adversarial_reason_list or ["unspecified adversarial rejection"]
+            )
             continue
         if invariance_failed:
             counts["adversarial_passed_but_invariance_failed"] += 1
+            invariance_reason_counts.update(
+                invariance_reason_list
+                or [f"invariance_score below {INVARIANCE_KILL_THRESHOLD:.2f}"]
+            )
             continue
         if rewrite_boring:
             counts["killed_as_boring"] += 1
@@ -1863,6 +1885,14 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
         },
         "top_validation_reasons": _top_reason_rows(validation_reasons, top_n=10),
         "top_provenance_reasons": _top_reason_rows(provenance_reasons, top_n=10),
+        "top_adversarial_reasons": _top_reason_rows(
+            adversarial_reason_counts,
+            top_n=10,
+        ),
+        "top_invariance_reasons": _top_reason_rows(
+            invariance_reason_counts,
+            top_n=10,
+        ),
         "top_provenance_failure_details": [
             {
                 "critical_mapping": critical_mapping,
@@ -2420,6 +2450,8 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
         mechanism_typing = _mechanism_typing_or_none(
             row["transmission_mechanism_typing_json"]
         ) or _mechanism_typing_or_none(row["exploration_mechanism_typing_json"])
+        adversarial_rubric = _json_object_or_empty(row["adversarial_rubric_json"])
+        invariance_result = _json_object_or_empty(row["invariance_json"])
         mechanism_type = (
             mechanism_typing.get("mechanism_type")
             if isinstance(mechanism_typing, dict)
@@ -2470,6 +2502,8 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
                 "total_score": _coerce_optional_float(row["total_score"]),
                 "rejection_stage": rejection_stage,
                 "rejection_reasons": rejection_reasons,
+                "adversarial_rubric": adversarial_rubric,
+                "invariance_result": invariance_result,
                 "provenance_failure_details": provenance_failure_details,
                 "mechanism_type": _clean_optional_text(mechanism_type),
                 "late_stage_timing": _json_object_or_empty(row["late_stage_timing_json"]),
