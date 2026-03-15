@@ -69,17 +69,34 @@ Requirements:
 - Provide evidence_map with claim-level evidence:
   - evidence_map.variable_mappings must cover each critical mapping in variable_mapping (at least 3 entries).
   - Each variable mapping entry must include source_variable, target_variable, claim, evidence_snippet, source_reference, and may include support_level.
+  - The first 3 variable_mapping entries are the critical mappings, so the first 3 evidence_map.variable_mappings entries must be the strongest-supported ones and must align to those same critical mappings.
   - For each critical mapping, the claim must closely match the mapped variables, the evidence_snippet must directly support that exact claim, and the source_reference must point to the specific search result containing that snippet.
-  - Prefer fewer, better-supported critical mappings over extra weak ones. Non-critical mappings are lower priority.
+  - For critical mappings, prefer direct support over inferential support whenever possible.
+  - Prefer fewer, better-supported critical mappings over extra weak ones. If support is thin, keep the first 3 mappings narrow and well-supported instead of inventing broader weak critical mappings. Non-critical mappings are lower priority.
+  - Write each claim at the same level of specificity as the mapped variables. Do not make the claim broader than the mapping itself.
   - Do not use vague evidence_snippet text that only supports the broader domain, the general story, or the overall mechanism.
   - Do not cite a broad mechanism sentence as support for a narrow variable-level mapping.
+  - If a snippet only supports the overall causal story but not the exact mapped-variable claim, use it for mechanism_assertions instead of variable_mappings.
   - evidence_map.mechanism_assertions must include at least 1 entry with mechanism_claim, evidence_snippet, and source_reference.
+  - mechanism_assertions must support the actual causal operator or control logic in the mechanism (what triggers, routes, switches, inhibits, amplifies, or accumulates), not just background context about the target domain.
   - Keep evidence_snippet short and grounded in SEARCH RESULTS. Use a result title or URL for source_reference. Do not invent sources.
 - Provide `prediction` as a structured object with these keys:
   observable, time_horizon, direction, magnitude, confidence,
   falsification_condition, utility_rationale, who_benefits.
 - Provide a falsifiable test with metric + confirm + falsify.
-- The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Do not just describe a similarity - name the process.
+- The mechanism field must name one specific causal process, not a broad analogy or generic system description.
+- In `mechanism`, explicitly state:
+  - what accumulates, routes, switches, inhibits, amplifies, transfers, or converts what,
+  - which trigger, comparator, threshold, control variable, or bottleneck matters,
+  - and what state transition, failure mode, or measurable outcome follows.
+- The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Describe the operative causal operator, not just a resemblance.
+- Make `mechanism` process-level and falsifiable. Avoid metaphorical summaries or generic "things interact" language.
+- Bad mechanism fields include:
+  - "both systems involve complex interactions"
+  - "both optimize under constraints"
+  - "both exhibit adaptation"
+  - "both use feedback"
+  unless the mechanism also names a specific process and control logic.
 - The prediction must include a directional outcome (increase, decrease, higher, lower), a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
@@ -91,7 +108,7 @@ If valid:
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
   "connection": "2-4 sentence mechanism-level explanation",
-  "mechanism": "specific shared process",
+  "mechanism": "specific shared causal process naming the operator, trigger/control variable, and resulting state transition",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],
@@ -101,8 +118,8 @@ If valid:
       {{
         "source_variable": "a_in_source",
         "target_variable": "b_in_target",
-        "claim": "why this mapped variable corresponds across domains",
-        "evidence_snippet": "short supporting evidence from search results",
+        "claim": "tight claim explaining this exact mapped-variable correspondence",
+        "evidence_snippet": "short snippet directly supporting that exact claim",
         "source_reference": "title or URL from search results",
         "support_level": "direct"
       }}
