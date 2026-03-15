@@ -57,6 +57,7 @@ Requirements:
 - Keep target_domain aligned with Stage 1.
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
+- Order variable_mapping so the first 3 mappings are the strongest-supported critical mappings. If more mappings are included, put weaker or less direct ones after those first 3.
 - Provide `mechanism_type` using exactly one tag from this controlled v1 vocabulary:
   {mechanism_vocab}
 - Provide `mechanism_type_confidence` as a numeric value in the 0.00-1.00 range.
@@ -64,6 +65,10 @@ Requirements:
 - Provide evidence_map with claim-level evidence:
   - evidence_map.variable_mappings must cover each critical mapping in variable_mapping (at least 3 entries).
   - Each variable mapping entry must include source_variable, target_variable, claim, evidence_snippet, source_reference, and may include support_level.
+  - For each critical mapping, the claim must closely match the mapped variables, the evidence_snippet must directly support that exact claim, and the source_reference must point to the specific search result containing that snippet.
+  - Prefer fewer, better-supported critical mappings over extra weak ones. Non-critical mappings are lower priority.
+  - Do not use vague evidence_snippet text that only supports the broader domain, the general story, or the overall mechanism.
+  - Do not cite a broad mechanism sentence as support for a narrow variable-level mapping.
   - evidence_map.mechanism_assertions must include at least 1 entry with mechanism_claim, evidence_snippet, and source_reference.
   - Keep evidence_snippet short and grounded in SEARCH RESULTS. Use a result title or URL for source_reference. Do not invent sources.
 - Provide `prediction` as a structured object with these keys:
