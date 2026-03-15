@@ -553,13 +553,34 @@ def _print_reasoning_audit(report: dict):
 
     sample_size = report.get("sample_size", 0)
     total_explorations = report.get("total_explorations", 0)
+    window_requested = report.get("window_requested", report.get("limit", sample_size))
+    downstream = report.get("downstream") or {}
     print(
-        f"[ReasoningAudit] Last {sample_size} explorations (total stored: {total_explorations})"
+        f"[ReasoningAudit] Last {sample_size} explorations "
+        f"(requested: {window_requested}, total stored: {total_explorations})"
+    )
+    validator = report.get("validator", {})
+    print(
+        f"validator\ttotal={validator.get('total', 0)}\treason_instances={validator.get('reason_instances_total', 0)}"
+    )
+    validator_reasons = validator.get("top_reasons") or []
+    if not validator_reasons:
+        print("  none")
+    else:
+        for reason_row in validator_reasons:
+            print(
+                f"  {reason_row.get('count', 0)}x\t{reason_row.get('reason', '')}"
+            )
+
+    print(
+        "downstream_late_stage_kills"
+        f"\ttotal={int(downstream.get('total', 0) or 0)}"
+        f"\tadversarial={int(downstream.get('adversarial_total', 0) or 0)}"
+        f"\tinvariance={int(downstream.get('invariance_total', 0) or 0)}"
     )
     for stage_key, stage_label in (
-        ("validator", "validator"),
-        ("adversarial", "adversarial"),
-        ("invariance", "invariance"),
+        ("adversarial", "adversarial_kill_reasons"),
+        ("invariance", "invariance_failure_modes"),
     ):
         stage = report.get(stage_key, {})
         print(
@@ -686,6 +707,70 @@ def _provenance_failure_detail_text(detail: object, limit: int = 120) -> str:
     )
 
 
+def _clean_inline_text(value: object) -> str | None:
+    """Normalize one review string into a compact single line."""
+    cleaned = " ".join(str(value or "").split()).strip()
+    return cleaned or None
+
+
+def _first_review_reason(values: object) -> str | None:
+    """Pick the first non-empty stored reason from a list-like payload."""
+    if not isinstance(values, list):
+        return None
+    for value in values:
+        cleaned = _clean_inline_text(value)
+        if cleaned is not None:
+            return cleaned
+    return None
+
+
+def _recent_review_late_gate_lines(row: dict) -> list[str]:
+    """Render compact late-gate failure details for review surfaces."""
+    rejection_stage = row.get("rejection_stage")
+    if rejection_stage == "adversarial":
+        adversarial = (
+            row.get("adversarial_rubric")
+            if isinstance(row.get("adversarial_rubric"), dict)
+            else {}
+        )
+        top_reason = _first_review_reason(adversarial.get("kill_reasons")) or _first_review_reason(
+            row.get("rejection_reasons")
+        )
+        lines = ["  late_gate=passed validation; died at adversarial"]
+        if top_reason is not None:
+            lines.append(
+                "  adversarial_top_kill=" + _truncate_text(top_reason, 120)
+            )
+        return lines
+
+    if rejection_stage == "invariance":
+        invariance = (
+            row.get("invariance_result")
+            if isinstance(row.get("invariance_result"), dict)
+            else {}
+        )
+        top_failure = _first_review_reason(invariance.get("failure_modes"))
+        note = _clean_inline_text(invariance.get("notes"))
+        invariance_score = invariance.get("invariance_score")
+        lines = ["  late_gate=passed validation + adversarial; died at invariance"]
+        try:
+            lines.append(
+                "  invariance_score="
+                f"{float(invariance_score):.3f} (< {INVARIANCE_KILL_THRESHOLD:.2f})"
+            )
+        except (TypeError, ValueError):
+            pass
+        if top_failure is not None:
+            lines.append(
+                "  invariance_focus=" + _truncate_text(top_failure, 120)
+            )
+        elif note is not None:
+            lines.append("  invariance_focus=" + _truncate_text(note, 120))
+        return lines
+
+    return []
+
+
 def _format_percent(value: float | None) -> str:
     """Render optional ratios as percentages."""
     if value is None:
@@ -768,6 +853,8 @@ def _print_recent_review_items(limit: int = 20):
             f"  rejection_stage={row.get('rejection_stage') or '—'} | "
             f"reasons={reason_text}"
         )
+        for line in _recent_review_late_gate_lines(row):
+            print(line)
         provenance_failure_details = row.get("provenance_failure_details") or []
         if provenance_failure_details:
             print(
@@ -2274,6 +2361,22 @@ def _print_bottleneck_diagnostics(report: dict):
         print("  none")
     else:
         for row in provenance_reasons:
+            print(f"  {int(row.get('count', 0) or 0)}x\t{row.get('reason', '')}")
+
+    adversarial_reasons = report.get("top_adversarial_reasons") or []
+    print("Top adversarial kill reasons:")
+    if not adversarial_reasons:
+        print("  none")
+    else:
+        for row in adversarial_reasons:
+            print(f"  {int(row.get('count', 0) or 0)}x\t{row.get('reason', '')}")
+
+    invariance_reasons = report.get("top_invariance_reasons") or []
+    print("Top invariance failure reasons:")
+    if not invariance_reasons:
+        print("  none")
+    else:
+        for row in invariance_reasons:
             print(f"  {int(row.get('count', 0) or 0)}x\t{row.get('reason', '')}")
 
     provenance_failure_details = report.get("top_provenance_failure_details") or []
