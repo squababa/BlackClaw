@@ -5,6 +5,7 @@ Two-stage process:
 2) Hypothesize a mechanism-level mapping from that signal.
 """
 import json
+import re
 from tavily import TavilyClient
 from config import TAVILY_API_KEY
 from hypothesis_validation import (
@@ -130,6 +131,112 @@ MISSING_FIELDS_REPAIR_PROMPT = (
     "Your output is missing fields: {missing_fields}. Return ONLY corrected JSON with those fields filled. "
     "Do not change the source_domain or target_domain. Do not add a depth field."
 )
+
+GENERIC_QUERY_TOKENS = {
+    "change",
+    "changes",
+    "complex",
+    "constraint",
+    "constraints",
+    "dynamic",
+    "dynamics",
+    "effect",
+    "effects",
+    "generic",
+    "interaction",
+    "interactions",
+    "local",
+    "multiple",
+    "process",
+    "processes",
+    "structure",
+    "structures",
+    "system",
+    "systems",
+}
+MECHANISM_QUERY_TOKENS = {
+    "accumulation",
+    "amplification",
+    "bottleneck",
+    "cascade",
+    "channel",
+    "channels",
+    "competition",
+    "constrained",
+    "coupled",
+    "coupling",
+    "decay",
+    "destabilization",
+    "disturbance",
+    "feedback",
+    "filtering",
+    "gating",
+    "inhibition",
+    "periodic",
+    "propagation",
+    "queueing",
+    "release",
+    "reset",
+    "routing",
+    "saturation",
+    "selective",
+    "spatial",
+    "stabilization",
+    "switching",
+    "threshold",
+}
+
+
+def _tokenize_query_terms(text: str) -> list[str]:
+    """Extract lowercase query tokens while preserving hyphenated mechanism words."""
+    return re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", (text or "").lower())
+
+
+def _build_jump_search_query(
+    pattern: dict,
+    source_domain: str,
+    source_category: str,
+) -> str:
+    """Deterministically enrich pattern queries with concrete mechanism-bearing terms."""
+    raw_query = str(pattern.get("search_query", "") or "").strip()
+    if not raw_query:
+        return ""
+
+    blocked_tokens = set(_tokenize_query_terms(source_domain))
+    blocked_tokens.update(_tokenize_query_terms(source_category))
+
+    def _filtered_tokens(text: str) -> list[str]:
+        out = []
+        for token in _tokenize_query_terms(text):
+            if token in blocked_tokens or token in GENERIC_QUERY_TOKENS:
+                continue
+            if len(token) <= 2:
+                continue
+            out.append(token)
+        return out
+
+    selected: list[str] = []
+    base_tokens = _filtered_tokens(raw_query)
+    pattern_tokens = _filtered_tokens(
+        " ".join(
+            [
+                str(pattern.get("pattern_name", "") or ""),
+                str(pattern.get("abstract_structure", "") or ""),
+            ]
+        )
+    )
+
+    for token in base_tokens:
+        if token not in selected:
+            selected.append(token)
+
+    for token in pattern_tokens:
+        if token in MECHANISM_QUERY_TOKENS and token not in selected:
+            selected.append(token)
+        if len(selected) >= 6:
+            break
+
+    return " ".join(selected[:6]) or raw_query
 
 
 def _extract_json_substring(text: str) -> str | None:
@@ -469,7 +576,7 @@ def lateral_jump(
     3. Stage 2 hypothesize a mechanism-first mapping
     4. Return connection dict or None
     """
-    query = pattern.get("search_query", "")
+    query = _build_jump_search_query(pattern, source_domain, source_category)
     if not query:
         return None
 
