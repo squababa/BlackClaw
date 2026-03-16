@@ -97,10 +97,14 @@ Requirements:
 - `test.confirm` and `test.falsify` must each refer to that same named metric and its explicit comparator. Do not write vague test language like "check whether the effect happens."
 - Do not pair a broad analogy with a loosely related metric. If the metric only weakly proxies the claimed mechanism, narrow the claim or return `no_connection`.
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
+- The first clause of `mechanism` must open with the named target-domain process noun phrase itself, not with a consequence sentence, threshold/result summary, or broad pattern description.
 - The mechanism must name the exact target-domain process that `test.metric` is supposed to measure.
 - `test.metric`, `test.confirm`, and `test.falsify` must directly measure that named process or its immediate observable consequence, not a distant downstream proxy.
 - Prefer a process name or standard causal operator a target-domain paper might use (for example: `SERCA-mediated SR refilling`, `GABAergic lateral inhibition`, `zero-cross switching`, `frictional contact network formation`).
+- Prefer a process term already present in target evidence, mechanism assertions, or standard target-domain literature wording.
 - Unacceptable mechanism naming includes generic placeholders such as `a threshold mechanism`, `a gating effect`, `a competitive dynamic`, or `a self-reinforcing process`.
+- Unacceptable mechanism openings also include result-first phrasing such as `when a threshold is crossed...`, `feedback causes escalation...`, or `the system transitions to...` before naming the process.
+- If you cannot name a process already grounded in target-domain evidence or literature-facing wording, return `no_connection`.
 - If you can describe only a pattern, threshold crossing, or transition but cannot name the operative target-domain process in target-domain terms, return `no_connection`.
 - In `mechanism`, explicitly state:
   - the operative causal operator,
@@ -150,7 +154,7 @@ If valid:
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
   "connection": "2-4 sentence explanation that starts with the primary target-domain claim/process, then links the source-domain correspondence",
-  "mechanism": "one named operative target-domain causal process using paper-like process wording, naming the operator, trigger/control variable, and resulting state transition measured by the test",
+  "mechanism": "one named operative target-domain causal process opening with a grounded process noun phrase, then naming the operator, trigger/control variable, and resulting state transition measured by the test",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],
