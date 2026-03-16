@@ -88,11 +88,14 @@ Requirements:
   observable, time_horizon, direction, magnitude, confidence,
   falsification_condition, utility_rationale, who_benefits.
 - Provide a falsifiable test with metric + confirm + falsify.
+- `test.metric` must name one concrete measurable metric explicitly. Use a standard reported metric name where possible, and keep it specific enough that a paper table, figure, or abstract result could report it directly.
+- `test.confirm` and `test.falsify` must each refer to that same named metric and its explicit comparator. Do not write vague test language like "check whether the effect happens."
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
 - In `mechanism`, explicitly state:
   - the operative causal operator,
   - the control, trigger, threshold, comparator, or bottleneck variable,
   - and the resulting state transition, failure mode, or measurable outcome.
+- If you cannot name one operative causal process with its control or trigger variable and resulting state transition, return `no_connection` instead of writing a broad analogy-only mechanism.
 - If multiple processes are present, choose the dominant operator as the main mechanism and treat other processes as boundary conditions, assumptions, or brief secondary notes. Do not merge background processes into the primary mechanism.
 - The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Describe the primary causal operator, not just a resemblance.
 - Make `mechanism` process-level and falsifiable. Avoid metaphorical summaries or generic "things interact" language.
@@ -118,6 +121,9 @@ Requirements:
 - Make the comparison phrasing explicit and simple. Prefer exactly one primary comparator such as before/after, treatment/control, lower or higher than baseline, or "as X increases, Y decreases."
 - State one expected directional outcome using the current schema's directional comparison words (`increase`, `decrease`, `higher`, or `lower`). Even narrower or cleaner predictions must still populate `prediction.direction` with one of those directional terms.
 - Phrase the prediction so it reads like a paper abstract result sentence, figure caption, reported trend, correlation, or threshold comparison.
+- Prefer predictions that one paper abstract, one figure, or one reported result trend could directly support or contradict on their own.
+- Avoid predictions that require several linked observations, multiple distinct subclaims, latent-variable inference, or combined curve-shape assumptions before they count as validated.
+- If a prediction could be written either as one direct reported comparison or as a compound story, choose the one direct reported comparison.
 - Avoid decorative, elegant, or idiosyncratic wording when a standard measurable phrasing would be more likely to appear in an abstract or results section.
 - Avoid overloaded prediction sentences that stack threshold behavior, monotonicity, saturation, timing, and mechanism in one claim unless each part is essential and jointly testable from the same result family.
 - Prefer narrower predictions that can be falsified or supported by one literature result family over elegant but broad claims that only retrieve domain-adjacent evidence.
@@ -132,7 +138,7 @@ If valid:
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
   "connection": "2-4 sentence mechanism-level explanation",
-  "mechanism": "specific shared causal process naming the operator, trigger/control variable, and resulting state transition",
+  "mechanism": "one named operative causal process naming the operator, trigger/control variable, and resulting state transition",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],
@@ -160,13 +166,13 @@ If valid:
     "observable": "canonical measurable quantity or event reported in literature",
     "time_horizon": "when the observable should move in the stated context",
     "direction": "increase/decrease/higher/lower for one explicit named comparison",
-    "magnitude": "expected effect size, threshold, or explicitly bounded null effect",
+    "magnitude": "expected effect size, threshold, or bounded null effect that the same result family could report directly",
     "confidence": "low/medium/high or numeric confidence",
     "falsification_condition": "what concrete result would falsify the prediction",
     "utility_rationale": "why this prediction is useful to test or act on",
     "who_benefits": "who can use this prediction"
   }},
-  "test": {{"data": "specific dataset or experiment to use", "metric": "canonical reported metric name", "horizon": "same or compatible time horizon", "confirm": "what result confirms the hypothesis", "falsify": "what result falsifies it"}},
+  "test": {{"data": "specific dataset or experiment to use", "metric": "one concrete canonical reported metric name", "horizon": "same or compatible time horizon", "confirm": "what result on that metric confirms the hypothesis", "falsify": "what result on that metric falsifies it"}},
   "assumptions": ["...", "..."],
   "boundary_conditions": "when this mapping should and should not hold",
   "evidence": "specific evidence from search results"
