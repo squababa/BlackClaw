@@ -114,7 +114,11 @@ Requirements:
 - Make `prediction` literature-resolvable: phrase it so a paper abstract or results section could directly support or contradict it.
 - Prefer one measurable outcome and one primary comparison condition over multiple coupled outcomes or several linked claims.
 - Make the observable explicit and concrete. Name the measurable variable, metric, population, intervention, comparator, or context when those details matter for checking the claim against external evidence.
+- Prefer canonical literature-facing metric names already used in the target-domain search results or standard papers. Use common reported terms (for example, false-positive rate, hazard ratio, burst probability, SPL in dB, odds ratio, correlation coefficient) instead of bespoke paraphrases when an established metric exists.
+- Make the comparison phrasing explicit and simple. Prefer exactly one primary comparator such as before/after, treatment/control, lower or higher than baseline, or "as X increases, Y decreases."
 - State one expected directional outcome using the current schema's directional comparison words (`increase`, `decrease`, `higher`, or `lower`). Even narrower or cleaner predictions must still populate `prediction.direction` with one of those directional terms.
+- Phrase the prediction so it reads like a paper abstract result sentence, figure caption, reported trend, correlation, or threshold comparison.
+- Avoid decorative, elegant, or idiosyncratic wording when a standard measurable phrasing would be more likely to appear in an abstract or results section.
 - Avoid overloaded prediction sentences that stack threshold behavior, monotonicity, saturation, timing, and mechanism in one claim unless each part is essential and jointly testable from the same result family.
 - Prefer narrower predictions that can be falsified or supported by one literature result family over elegant but broad claims that only retrieve domain-adjacent evidence.
 - The prediction must include a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
@@ -153,16 +157,16 @@ If valid:
     ]
   }},
   "prediction": {{
-    "observable": "specific measurable quantity or event reported in literature",
+    "observable": "canonical measurable quantity or event reported in literature",
     "time_horizon": "when the observable should move in the stated context",
-    "direction": "increase/decrease/higher/lower for the named comparison",
+    "direction": "increase/decrease/higher/lower for one explicit named comparison",
     "magnitude": "expected effect size, threshold, or explicitly bounded null effect",
     "confidence": "low/medium/high or numeric confidence",
     "falsification_condition": "what concrete result would falsify the prediction",
     "utility_rationale": "why this prediction is useful to test or act on",
     "who_benefits": "who can use this prediction"
   }},
-  "test": {{"data": "specific dataset or experiment to use", "metric": "measurable quantity", "horizon": "same or compatible time horizon", "confirm": "what result confirms the hypothesis", "falsify": "what result falsifies it"}},
+  "test": {{"data": "specific dataset or experiment to use", "metric": "canonical reported metric name", "horizon": "same or compatible time horizon", "confirm": "what result confirms the hypothesis", "falsify": "what result falsifies it"}},
   "assumptions": ["...", "..."],
   "boundary_conditions": "when this mapping should and should not hold",
   "evidence": "specific evidence from search results"
