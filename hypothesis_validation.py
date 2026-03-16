@@ -267,6 +267,20 @@ CORE_TARGET_BROAD_PAGE_MARKERS = (
     "how to",
 )
 
+TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS = UNIVERSAL_MECHANISM_WORDS | {
+    "threshold",
+    "thresholds",
+    "switch",
+    "switches",
+    "switching",
+    "mode",
+    "modes",
+    "mode-switch",
+    "mode-switching",
+    "transition",
+    "transitions",
+}
+
 
 def _word_tokens(text: str) -> list[str]:
     return re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_/\-]*", text.lower())
@@ -534,19 +548,57 @@ def _find_core_target_evidence_failure(
     ]:
         if not isinstance(entry, dict):
             continue
+        entry_type = str(entry.get("entry_type") or "").strip()
         claim_text = _clean_optional_text(
             entry.get("mechanism_claim") or entry.get("claim")
         ) or ""
         snippet_text = _clean_optional_text(entry.get("evidence_snippet")) or ""
         source_text = _clean_optional_text(entry.get("source_reference")) or ""
         combined_text = " ".join(
-            part for part in (claim_text, snippet_text, source_text) if part
+            part
+            for part in (
+                (snippet_text, source_text)
+                if entry_type == "top_level_target_evidence"
+                else (claim_text, snippet_text, source_text)
+            )
+            if part
         )
         if not combined_text:
             continue
 
         combined_lower = combined_text.lower()
         entry_terms = _meaningful_terms(combined_text)
+        mechanism_match_terms = mechanism_terms
+        metric_match_terms = metric_terms
+        observable_match_terms = observable_terms
+        if entry_type == "top_level_target_evidence":
+            filtered_entry_terms = {
+                term
+                for term in entry_terms
+                if term not in TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS
+            }
+            filtered_mechanism_terms = {
+                term
+                for term in mechanism_terms
+                if term not in TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS
+            }
+            filtered_metric_terms = {
+                term
+                for term in metric_terms
+                if term not in TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS
+            }
+            filtered_observable_terms = {
+                term
+                for term in observable_terms
+                if term not in TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS
+            }
+            entry_terms = filtered_entry_terms if filtered_entry_terms else entry_terms
+            if filtered_mechanism_terms:
+                mechanism_match_terms = filtered_mechanism_terms
+            if filtered_metric_terms:
+                metric_match_terms = filtered_metric_terms
+            if filtered_observable_terms:
+                observable_match_terms = filtered_observable_terms
         score = entry.get("provenance_score") or {}
         score_reasons = {
             str(reason).strip().lower()
@@ -554,30 +606,30 @@ def _find_core_target_evidence_failure(
             if str(reason).strip()
         }
 
-        mechanism_overlap = len(entry_terms & mechanism_terms)
-        metric_overlap = len(entry_terms & metric_terms)
-        observable_overlap = len(entry_terms & observable_terms)
+        mechanism_overlap = len(entry_terms & mechanism_match_terms)
+        metric_overlap = len(entry_terms & metric_match_terms)
+        observable_overlap = len(entry_terms & observable_match_terms)
 
-        matches_mechanism = bool(mechanism_terms) and (
+        matches_mechanism = bool(mechanism_match_terms) and (
             (mechanism_text and len(mechanism_text) >= 12 and mechanism_text.lower() in combined_lower)
-            or mechanism_overlap >= _minimum_core_overlap(mechanism_terms)
+            or mechanism_overlap >= _minimum_core_overlap(mechanism_match_terms)
         )
-        matches_metric = bool(metric_terms) and (
+        matches_metric = bool(metric_match_terms) and (
             (metric_text and len(metric_text) >= 8 and metric_text.lower() in combined_lower)
             or metric_overlap
-            >= _minimum_core_overlap(metric_terms)
+            >= _minimum_core_overlap(metric_match_terms)
         )
-        matches_observable = bool(observable_terms) and (
+        matches_observable = bool(observable_match_terms) and (
             (
                 observable_text
                 and len(observable_text) >= 8
                 and observable_text.lower() in combined_lower
             )
             or observable_overlap
-            >= _minimum_core_overlap(observable_terms)
+            >= _minimum_core_overlap(observable_match_terms)
         )
         core_match = matches_mechanism or matches_metric or (
-            not metric_terms and matches_observable
+            not metric_match_terms and matches_observable
         )
 
         weak_source = _looks_like_weak_target_source(source_text)
@@ -587,7 +639,7 @@ def _find_core_target_evidence_failure(
 
         evaluated_entries.append(
             {
-                "entry_type": str(entry.get("entry_type") or "").strip(),
+                "entry_type": entry_type,
                 "core_match": core_match,
                 "weak_source": weak_source,
                 "broad_page": broad_page,

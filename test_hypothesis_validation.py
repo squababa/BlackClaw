@@ -247,3 +247,122 @@ def test_summary_rejects_weak_top_level_target_evidence_even_with_strong_evidenc
 
     assert report["passes"] is False
     assert "target evidence too weak for core claim" in report["issues"]
+
+
+def test_summary_rejects_off_domain_top_level_target_evidence_with_generic_overlap() -> None:
+    payload = {
+        "variable_mapping": {
+            "atrial event sampling": "premature atrial event detection",
+            "detection rate threshold": "mode-switch trigger criterion",
+            "mode-switch trigger criterion": "non-tracking ventricular pacing",
+        },
+        "mechanism": (
+            "Pacemaker atrial event sampling compares each atrial interval "
+            "against a programmable mode-switch detection rate threshold and "
+            "triggers a ventricular pacing mode transition during atrial "
+            "tachyarrhythmia."
+        ),
+        "prediction": {
+            "observable": (
+                "False-positive mode-switch episode rate as a function of the "
+                "programmed detection threshold"
+            )
+        },
+        "test": {
+            "metric": (
+                "Inappropriate mode-switch episode count per 24 hours by "
+                "programmed detection threshold value"
+            )
+        },
+        "target_url": (
+            "https://www.researchgate.net/publication/"
+            "258614412_Thresholds_Mode-Switching_and_Emergent_"
+            "Pseudo-Equilibrium_in_Geomorphic_Systems"
+        ),
+        "target_excerpt": (
+            "The unstable-to-stable mode switches are an emergent outcome of "
+            "the gradient selection and threshold modulation principles in "
+            "geomorphic systems."
+        ),
+        "evidence_map": {
+            "variable_mappings": [
+                {
+                    "source_variable": "atrial event sampling",
+                    "target_variable": "premature atrial event detection",
+                    "claim": (
+                        "Pacemaker mode switching relies on correct detection "
+                        "of premature atrial events."
+                    ),
+                    "evidence_snippet": (
+                        "Mode switching aims to achieve an appropriate "
+                        "ventricular rate during periods of atrial arrhythmias "
+                        "by the correct detection of premature atrial events."
+                    ),
+                    "source_reference": (
+                        "Mode switching for atrial tachyarrhythmias - "
+                        "ScienceDirect.com"
+                    ),
+                },
+                {
+                    "source_variable": "detection rate threshold",
+                    "target_variable": "mode-switch trigger criterion",
+                    "claim": (
+                        "The pacemaker mode-switching algorithm compares "
+                        "detected atrial rates against a programmable rate "
+                        "criterion."
+                    ),
+                    "evidence_snippet": (
+                        "Mode switching aims to achieve an appropriate "
+                        "ventricular rate during periods of atrial arrhythmias "
+                        "by the correct detection of premature atrial events."
+                    ),
+                    "source_reference": (
+                        "Mode switching for atrial tachyarrhythmias - "
+                        "ScienceDirect.com"
+                    ),
+                },
+                {
+                    "source_variable": "mode-switch trigger criterion",
+                    "target_variable": "non-tracking ventricular pacing",
+                    "claim": (
+                        "When the atrial rate criterion is exceeded, the "
+                        "pacemaker replaces the tracking routine with an "
+                        "alternative pacing mode."
+                    ),
+                    "evidence_snippet": (
+                        "Mode switching aims to achieve an appropriate "
+                        "ventricular rate during periods of atrial arrhythmias "
+                        "by the correct detection of premature atrial events."
+                    ),
+                    "source_reference": (
+                        "Mode switching for atrial tachyarrhythmias - "
+                        "ScienceDirect.com"
+                    ),
+                },
+            ],
+            "mechanism_assertions": [
+                {
+                    "mechanism_claim": (
+                        "The pacemaker mode-switching algorithm samples atrial "
+                        "events, compares them against a programmed threshold, "
+                        "and switches ventricular pacing modes during atrial "
+                        "tachyarrhythmia."
+                    ),
+                    "evidence_snippet": (
+                        "Mode switching aims to achieve an appropriate "
+                        "ventricular rate during periods of atrial arrhythmias "
+                        "by the correct detection of premature atrial events."
+                    ),
+                    "source_reference": (
+                        "Mode switching for atrial tachyarrhythmias - "
+                        "ScienceDirect.com"
+                    ),
+                }
+            ],
+        },
+    }
+
+    report = summarize_evidence_map_provenance(payload)
+
+    assert report["passes"] is False
+    assert "target evidence too weak for core claim" in report["issues"]
