@@ -675,6 +675,27 @@ def _prediction_summary_from_row(row: dict) -> str:
     return text or "—"
 
 
+def _prediction_quality_label_from_row(row: dict) -> str:
+    """Render the stored or computed prediction quality label for CLI tables."""
+    return prediction_quality_label(_prediction_quality_from_row(row))
+
+
+def _prediction_review_evidence_text(row: dict) -> str:
+    """Summarize reviewable evidence counts in one compact cell."""
+    return (
+        f"s:{int(row.get('accepted_support_hits', 0) or 0)}"
+        f"/c:{int(row.get('accepted_contradiction_hits', 0) or 0)}"
+        f"/u:{int(row.get('unreviewed_reviewable_hits', 0) or 0)}"
+    )
+
+
+def _prediction_review_age_text(value: object) -> str:
+    """Format queue age or staleness values for compact report tables."""
+    if value is None:
+        return "—"
+    return f"{int(value)}d"
+
+
 def _truncate_text(value: object, limit: int) -> str:
     """Collapse whitespace and cap long text for tabular reports."""
     cleaned = " ".join(str(value or "").split()).strip()
@@ -929,7 +950,7 @@ def _apply_suggested_grades(limit: int = 20, note: str | None = None) -> bool:
     rows = list_recent_review_items(limit=max(1, int(limit)))
     applied: list[tuple[int, str]] = []
     skipped = 0
-    extra_note = _clean_optional_text(note)
+    extra_note = _clean_inline_text(note)
 
     for row in rows:
         if not row.get("transmitted"):
@@ -1169,23 +1190,25 @@ def _print_prediction_outcome_suggestion_stats(report: dict):
 
     print("[OutcomeSuggestionStats] Top actionable predictions")
     print(
-        "prediction_id\ttx\tsuggestion_bucket\tmechanism_type\tutility_class\t"
-        "accepted_support_hits\taccepted_contradiction_hits\t"
-        "unreviewed_reviewable_hits\tprediction"
+        "prediction_id\tpriority\treview_status\tage\tstale\ttx\tsuggestion\t"
+        "mechanism\tquality\tevidence\tprediction"
     )
     if not top_actionable:
         print("none")
         return
     for row in top_actionable:
+        quality_label = _truncate_text(_prediction_quality_label_from_row(row), 18)
         print(
             f"{int(row.get('id', 0) or 0)}\t"
+            f"{row.get('review_priority') or 'low'}\t"
+            f"{_truncate_text(row.get('review_status') or 'unknown', 28)}\t"
+            f"{_prediction_review_age_text(row.get('age_days'))}\t"
+            f"{_prediction_review_age_text(row.get('staleness_days'))}\t"
             f"{row.get('transmission_number') or '—'}\t"
-            f"{row.get('suggestion_bucket') or 'insufficient_evidence'}\t"
+            f"{_truncate_text(row.get('suggestion_bucket') or 'insufficient_evidence', 24)}\t"
             f"{_truncate_text(row.get('mechanism_type') or 'unknown', 24)}\t"
-            f"{row.get('utility_class') or 'unknown'}\t"
-            f"{int(row.get('accepted_support_hits', 0) or 0)}\t"
-            f"{int(row.get('accepted_contradiction_hits', 0) or 0)}\t"
-            f"{int(row.get('unreviewed_reviewable_hits', 0) or 0)}\t"
+            f"{quality_label}\t"
+            f"{_prediction_review_evidence_text(row)}\t"
             f"{_truncate_text(row.get('prediction_summary'), 96)}"
         )
 
@@ -1382,39 +1405,36 @@ def _print_prediction_outcome_review_queue(limit: int = 20):
 
     unresolved_count = sum(1 for row in rows if row.get("is_unresolved"))
     thin_count = sum(1 for row in rows if row.get("needs_more_evidence"))
+    stale_count = sum(
+        1 for row in rows if row.get("staleness_days") is not None and row.get("staleness_days") >= 14
+    )
     print(f"[PredictionOutcomeReviewQueue] Recent {len(rows)} review-ready predictions")
     print(
-        f"unresolved={unresolved_count} | oldest_first=yes | strongest_evidence_first=yes | thin_evidence={thin_count}"
+        "unresolved="
+        f"{unresolved_count} | deterministic_sort=priority,evidence,quality,age | "
+        f"thin_evidence={thin_count} | stale_scans_14d={stale_count}"
     )
     print(
-        "pred\tpriority\tage_d\ttx\tstatus\toutcome\tmechanism\tevidence\t"
-        "recommendation\tutility\tprediction"
+        "pred\tpriority\treview_status\tage\tstale\ttx\tmechanism\tquality\t"
+        "evidence\trecommendation\tprediction"
     )
     for row in rows:
-        utility_text = row.get("utility_class") or "unknown"
-        if utility_text == "unknown":
-            utility_text = "—"
         mechanism_type = row.get("mechanism_type") or "—"
+        quality_label = _truncate_text(_prediction_quality_label_from_row(row), 18)
         summary = _truncate_text(_prediction_summary_from_row(row), 96)
-        evidence_text = (
-            f"a:{int(row.get('accepted_reviewable_hits', 0) or 0)}"
-            f"/s:{int(row.get('accepted_support_hits', 0) or 0)}"
-            f"/c:{int(row.get('accepted_contradiction_hits', 0) or 0)}"
-            f"/u:{int(row.get('unreviewed_reviewable_hits', 0) or 0)}"
-        )
         recommendation = row.get("recommendation") or "insufficient_evidence"
         if row.get("needs_more_evidence"):
             recommendation = "insufficient_evidence"
         print(
             f"{row.get('id')}\t{row.get('review_priority') or 'low'}\t"
-            f"{(row.get('age_days') if row.get('age_days') is not None else '—')}\t"
+            f"{_truncate_text(row.get('review_status') or 'unknown', 28)}\t"
+            f"{_prediction_review_age_text(row.get('age_days'))}\t"
+            f"{_prediction_review_age_text(row.get('staleness_days'))}\t"
             f"{row.get('transmission_number')}\t"
-            f"{row.get('status') or 'unknown'}\t"
-            f"{row.get('outcome_status') or 'open'}\t"
             f"{_truncate_text(mechanism_type, 24)}\t"
-            f"{evidence_text}\t"
+            f"{quality_label}\t"
+            f"{_prediction_review_evidence_text(row)}\t"
             f"{_truncate_text(recommendation, 26)}\t"
-            f"{_truncate_text(utility_text, 12)}\t"
             f"{summary}"
         )
 
