@@ -59,6 +59,9 @@ SEARCH RESULTS:
 
 Requirements:
 - Keep target_domain aligned with Stage 1.
+- Lock onto exactly one primary target-domain causal claim before elaborating the comparison.
+- That primary claim must name one measurable target-domain operator or operator-driven outcome that can be checked in literature or experiments.
+- `connection`, `mechanism`, `prediction`, and `test` must all stay centered on that same primary claim. If they drift to different effects or outcomes, return `no_connection`.
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
 - Order variable_mapping so the first 3 mappings are the strongest-supported critical mappings. If more mappings are included, put weaker or less direct ones after those first 3.
@@ -88,9 +91,13 @@ Requirements:
   observable, time_horizon, direction, magnitude, confidence,
   falsification_condition, utility_rationale, who_benefits.
 - Provide a falsifiable test with metric + confirm + falsify.
+- A compelling comparison is not sufficient. If you cannot tie the hypothesis to one measurable target-domain operator or operator-driven outcome, return `no_connection`.
 - `test.metric` must name one concrete measurable metric explicitly. Use a standard reported metric name where possible, and keep it specific enough that a paper table, figure, or abstract result could report it directly.
+- `prediction.observable`, `test.metric`, `test.confirm`, and `test.falsify` must all evaluate the same named target-domain operator or its direct measurable outcome, with the same primary comparator.
 - `test.confirm` and `test.falsify` must each refer to that same named metric and its explicit comparator. Do not write vague test language like "check whether the effect happens."
+- Do not pair a broad analogy with a loosely related metric. If the metric only weakly proxies the claimed mechanism, narrow the claim or return `no_connection`.
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
+- The mechanism must name the exact target-domain process that `test.metric` is supposed to measure.
 - In `mechanism`, explicitly state:
   - the operative causal operator,
   - the control, trigger, threshold, comparator, or bottleneck variable,
@@ -114,6 +121,7 @@ Requirements:
   - same phase-transition language but equilibrium versus driven-transition mismatch
   unless the mechanism also names a specific process and control logic.
 - Prefer a smaller, narrower, more defensible mechanism claim over a broad impressive claim that is likely to fail adversarially. Precision of causal correspondence matters more than scope.
+- If several mechanism-to-test framings are possible, choose the single framing with the cleanest measurable target-domain operator and the clearest one-result-family test.
 - Make `prediction` literature-resolvable: phrase it so a paper abstract or results section could directly support or contradict it.
 - Prefer one measurable outcome and one primary comparison condition over multiple coupled outcomes or several linked claims.
 - Make the observable explicit and concrete. Name the measurable variable, metric, population, intervention, comparator, or context when those details matter for checking the claim against external evidence.
@@ -137,8 +145,8 @@ If valid:
   "no_connection": false,
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
-  "connection": "2-4 sentence mechanism-level explanation",
-  "mechanism": "one named operative causal process naming the operator, trigger/control variable, and resulting state transition",
+  "connection": "2-4 sentence explanation that starts with the primary target-domain claim/process, then links the source-domain correspondence",
+  "mechanism": "one named operative target-domain causal process naming the operator, trigger/control variable, and resulting state transition measured by the test",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],
