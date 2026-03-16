@@ -88,7 +88,10 @@ Requirements:
   - evidence_map.mechanism_assertions must include at least 1 entry with mechanism_claim, evidence_snippet, and source_reference.
   - mechanism_assertions must support the actual causal operator or control logic in the mechanism (what triggers, routes, switches, inhibits, amplifies, or accumulates), not just background context about the target domain.
   - At least one target-domain snippet or mechanism_assertion must directly support the named target-domain process or the exact metric/immediate observable consequence used in the test.
+  - For the named target-domain process, `test.metric`, and the first 3 critical mappings, prefer scholarly, technical, primary, standards, or otherwise domain-credible target evidence when available.
   - Reject off-domain or generic background target evidence. If a result title or evidence_snippet is not clearly about the target domain, named process, or named metric, treat it as unusable and return `no_connection`.
+  - Treat generic blogs, broad explainers, hobbyist pages, or weakly related overviews as weak evidence for the core target-domain process or metric. Do not use them as the main grounding for the core claim if reasonably domain-appropriate evidence is unavailable; return `no_connection` instead.
+  - If a target result title or snippet is only loosely related or obviously lower-quality than needed for the named process or metric, treat it as weak evidence and do not anchor the core claim on it.
   - Keep evidence_snippet short and grounded in SEARCH RESULTS. Use a result title or URL for source_reference. Do not invent sources.
 - Provide `prediction` as a structured object with these keys:
   observable, time_horizon, direction, magnitude, confidence,
