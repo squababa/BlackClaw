@@ -96,6 +96,14 @@ PREDICTION_OUTCOME_SUGGESTION_BUCKETS = (
     "waiting_on_review",
     "insufficient_evidence",
 )
+PREDICTION_EVIDENCE_SCAN_STATUSES = (
+    "not_scanned",
+    "evidence_found",
+    "no_evidence_found",
+    "provider_network_error",
+    "retrieval_failure",
+    "partial_scan_success",
+)
 PASSIVE_SCAR_MIN_COUNT = 3
 PASSIVE_SCAR_FAMILIES = (
     {
@@ -635,6 +643,8 @@ def init_db():
             validated_at TEXT,
             utility_class TEXT NOT NULL DEFAULT "unknown",
             last_scanned_at TEXT,
+            last_scan_status TEXT,
+            last_scan_error TEXT,
             needs_review INTEGER NOT NULL DEFAULT 0,
             notes TEXT,
             created_at TEXT NOT NULL,
@@ -781,6 +791,10 @@ def init_db():
         )
     if "last_scanned_at" not in prediction_columns:
         conn.execute("ALTER TABLE predictions ADD COLUMN last_scanned_at TEXT")
+    if "last_scan_status" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN last_scan_status TEXT")
+    if "last_scan_error" not in prediction_columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN last_scan_error TEXT")
     if "needs_review" not in prediction_columns:
         conn.execute(
             'ALTER TABLE predictions ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0'
@@ -1381,6 +1395,8 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 validated_at,
                 utility_class,
                 last_scanned_at,
+                last_scan_status,
+                last_scan_error,
                 needs_review,
                 notes,
                 created_at,
@@ -1417,6 +1433,8 @@ def list_predictions(status: str | None = None, limit: int = 20) -> list[dict]:
                 validated_at,
                 utility_class,
                 last_scanned_at,
+                last_scan_status,
+                last_scan_error,
                 needs_review,
                 notes,
                 created_at,
@@ -1509,6 +1527,13 @@ def _prediction_row_to_dict(row: sqlite3.Row | dict) -> dict:
         payload.get("utility_class")
     )
     payload["last_scanned_at"] = _clean_optional_text(payload.get("last_scanned_at"))
+    last_scan_status = _clean_optional_text(payload.get("last_scan_status"))
+    payload["last_scan_status"] = (
+        last_scan_status
+        if last_scan_status in PREDICTION_EVIDENCE_SCAN_STATUSES
+        else "not_scanned"
+    )
+    payload["last_scan_error"] = _clean_optional_text(payload.get("last_scan_error"))
     payload["needs_review"] = bool(_normalize_bool_flag(payload.get("needs_review")))
     payload["prediction_json"] = parsed_prediction
     payload["prediction_quality"] = parsed_quality if parsed_quality else None
@@ -3522,6 +3547,8 @@ def get_prediction(id: int) -> dict | None:
             validated_at,
             utility_class,
             last_scanned_at,
+            last_scan_status,
+            last_scan_error,
             needs_review,
             notes,
             created_at,
@@ -3554,6 +3581,8 @@ def list_open_predictions_for_evidence_scan(limit: int | None = 10) -> list[dict
             p.validated_at,
             p.utility_class,
             p.last_scanned_at,
+            p.last_scan_status,
+            p.last_scan_error,
             p.needs_review,
             p.notes,
             p.created_at,
@@ -3643,6 +3672,8 @@ def save_prediction_evidence_scan(
     prediction_id: int,
     hits: list[dict] | None = None,
     scan_timestamp: str | None = None,
+    scan_status: str | None = None,
+    scan_error: str | None = None,
 ) -> dict:
     """Persist one evidence scan and update scan metadata on the prediction row."""
     clean_scan_timestamp = (
@@ -3650,6 +3681,14 @@ def save_prediction_evidence_scan(
         if scan_timestamp is not None
         else _now()
     )
+    clean_scan_status = _clean_optional_text(scan_status)
+    if clean_scan_status not in PREDICTION_EVIDENCE_SCAN_STATUSES:
+        clean_scan_status = (
+            "evidence_found"
+            if hits
+            else "no_evidence_found"
+        )
+    clean_scan_error = _clean_optional_text(scan_error)
     normalized_hits: list[dict] = []
     for hit in hits or []:
         title = _clean_optional_text(hit.get("title"))
@@ -3686,6 +3725,8 @@ def save_prediction_evidence_scan(
             "saved": False,
             "prediction_id": prediction_id,
             "scan_timestamp": clean_scan_timestamp,
+            "scan_status": clean_scan_status,
+            "scan_error": clean_scan_error,
             "inserted_hits": 0,
             "needs_review": False,
         }
@@ -3719,10 +3760,13 @@ def save_prediction_evidence_scan(
 
     conn.execute(
         """UPDATE predictions
-        SET last_scanned_at = ?, needs_review = ?, updated_at = ?
+        SET last_scanned_at = ?, last_scan_status = ?, last_scan_error = ?,
+            needs_review = ?, updated_at = ?
         WHERE id = ?""",
         (
             clean_scan_timestamp,
+            clean_scan_status,
+            clean_scan_error,
             1 if needs_review else 0,
             now,
             prediction_id,
@@ -3734,6 +3778,8 @@ def save_prediction_evidence_scan(
         "saved": True,
         "prediction_id": prediction_id,
         "scan_timestamp": clean_scan_timestamp,
+        "scan_status": clean_scan_status,
+        "scan_error": clean_scan_error,
         "inserted_hits": inserted_hits,
         "needs_review": needs_review,
     }
@@ -4007,6 +4053,20 @@ def get_prediction_evidence_stats() -> dict:
         ).fetchone()["count"]
         or 0
     )
+    open_predictions_by_scan_status = {
+        label: 0 for label in PREDICTION_EVIDENCE_SCAN_STATUSES
+    }
+    for row in conn.execute(
+        """SELECT last_scan_status, COUNT(*) AS count
+        FROM predictions
+        WHERE LOWER(COALESCE(outcome_status, '')) = 'open'
+        GROUP BY last_scan_status"""
+    ).fetchall():
+        label = _clean_optional_text(row["last_scan_status"]) or "not_scanned"
+        if label not in open_predictions_by_scan_status:
+            label = "not_scanned"
+        open_predictions_by_scan_status[label] += int(row["count"] or 0)
+
     total_predictions_scanned = int(
         conn.execute(
             """SELECT COUNT(*) AS count
@@ -4022,6 +4082,7 @@ def get_prediction_evidence_stats() -> dict:
         "by_review_status": by_review_status,
         "open_predictions_needing_review": open_predictions_needing_review,
         "open_predictions_scanned": open_predictions_scanned,
+        "open_predictions_by_scan_status": open_predictions_by_scan_status,
         "total_predictions_scanned": total_predictions_scanned,
     }
 
