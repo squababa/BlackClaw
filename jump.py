@@ -88,20 +88,29 @@ Requirements:
   observable, time_horizon, direction, magnitude, confidence,
   falsification_condition, utility_rationale, who_benefits.
 - Provide a falsifiable test with metric + confirm + falsify.
-- The mechanism field must name one specific causal process, not a broad analogy or generic system description.
+- The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
 - In `mechanism`, explicitly state:
   - the operative causal operator,
   - the control, trigger, threshold, comparator, or bottleneck variable,
   - and the resulting state transition, failure mode, or measurable outcome.
-- The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Describe the operative causal operator, not just a resemblance.
+- If multiple processes are present, choose the dominant operator as the main mechanism and treat other processes as boundary conditions, assumptions, or brief secondary notes. Do not merge background processes into the primary mechanism.
+- The mechanism field must use causal language: explain what drives, causes, regulates, inhibits, amplifies, couples, transfers, or converts what. Describe the primary causal operator, not just a resemblance.
 - Make `mechanism` process-level and falsifiable. Avoid metaphorical summaries or generic "things interact" language.
 - Do not write `mechanism` as only analogy, resemblance, or high-level summary. It must state a concrete process that could be tested against alternatives.
+- Do not claim structural identity or a strong mechanism match when the systems only share broad vocabulary, loose dynamics, or superficially similar outcomes.
+- Do not elevate a supporting or background dynamic into the primary mechanism. If the analogy depends on a fragile hidden assumption that is likely to fail under adversarial scrutiny, weaken the claim substantially or return `no_connection`.
 - Bad mechanism fields include:
   - "both systems involve complex interactions"
   - "both optimize under constraints"
   - "both exhibit adaptation"
   - "both use feedback"
+- Bad mechanism matches also include:
+  - same threshold vocabulary but different underlying trigger or operator
+  - same bottleneck language but different causal limiter
+  - same feedback language but different control loop structure
+  - same phase-transition language but equilibrium versus driven-transition mismatch
   unless the mechanism also names a specific process and control logic.
+- Prefer a smaller, narrower, more defensible mechanism claim over a broad impressive claim that is likely to fail adversarially. Precision of causal correspondence matters more than scope.
 - The prediction must include a directional outcome (increase, decrease, higher, lower), a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
