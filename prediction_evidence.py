@@ -3,6 +3,7 @@ BlackClaw Prediction Evidence Scanning
 Operator-triggered candidate evidence search for open predictions.
 Uses Tavily plus deterministic heuristics; it never updates outcomes directly.
 """
+import json
 import re
 
 from tavily import TavilyClient
@@ -199,53 +200,144 @@ def _direction_polarity(prediction_row: dict) -> str | None:
     return None
 
 
-def _build_base_terms(prediction_row: dict) -> list[str]:
+def _parsed_test_payload(prediction_row: dict) -> dict:
+    test_payload = prediction_row.get("test")
+    if isinstance(test_payload, dict):
+        return test_payload
+    test_text = _clean_text(test_payload)
+    if not test_text.startswith("{"):
+        return {}
+    try:
+        loaded = json.loads(test_text)
+    except (TypeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _collect_query_terms(values: list[object], limit: int) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        for token in _normalized_tokens(_clean_text(value)):
+            if token in terms:
+                continue
+            terms.append(token)
+            if len(terms) >= limit:
+                return terms
+    return terms
+
+
+def _compose_query_text(*term_groups: list[str], limit: int = 16) -> str:
+    terms: list[str] = []
+    for group in term_groups:
+        for token in group:
+            if token in terms:
+                continue
+            terms.append(token)
+            if len(terms) >= limit:
+                return " ".join(terms)
+    return " ".join(terms)
+
+
+def _outcome_terms(prediction_row: dict) -> list[str]:
     payload = prediction_row.get("prediction_json") or {}
-    candidates = [
-        prediction_row.get("target_domain"),
-        payload.get("observable"),
-        prediction_row.get("metric"),
-        payload.get("statement") or prediction_row.get("prediction"),
-        prediction_row.get("source_domain"),
-    ]
-    base_terms: list[str] = []
-    for value in candidates:
-        phrase = _salient_phrase(value, max_tokens=8)
-        if not phrase:
-            continue
-        for token in phrase.split():
-            if token not in base_terms:
-                base_terms.append(token)
-        if len(base_terms) >= 14:
-            break
-    return base_terms[:14]
+    return _collect_query_terms(
+        [
+            payload.get("observable"),
+            prediction_row.get("metric"),
+            payload.get("statement") or prediction_row.get("prediction"),
+        ],
+        limit=10,
+    )
+
+
+def _context_terms(prediction_row: dict) -> list[str]:
+    test_payload = _parsed_test_payload(prediction_row)
+    return _collect_query_terms(
+        [
+            test_payload.get("data"),
+            prediction_row.get("target_domain"),
+            prediction_row.get("mechanism_type"),
+        ],
+        limit=8,
+    )
+
+
+def _support_terms(prediction_row: dict) -> list[str]:
+    payload = prediction_row.get("prediction_json") or {}
+    test_payload = _parsed_test_payload(prediction_row)
+    return _collect_query_terms(
+        [
+            payload.get("direction"),
+            payload.get("magnitude"),
+            test_payload.get("confirm"),
+        ],
+        limit=10,
+    )
+
+
+def _contradiction_terms(prediction_row: dict, polarity: str | None) -> list[str]:
+    payload = prediction_row.get("prediction_json") or {}
+    test_payload = _parsed_test_payload(prediction_row)
+    contradiction_terms = _collect_query_terms(
+        [
+            payload.get("falsification_condition"),
+            test_payload.get("falsify"),
+        ],
+        limit=10,
+    )
+    if contradiction_terms:
+        return contradiction_terms
+    if polarity == "positive":
+        return _collect_query_terms(["no effect lower decrease null result"], limit=6)
+    if polarity == "negative":
+        return _collect_query_terms(["no effect higher increase null result"], limit=6)
+    return _collect_query_terms(["no effect flat threshold absent null result"], limit=6)
+
+
+def _mechanism_terms(prediction_row: dict) -> list[str]:
+    payload = prediction_row.get("prediction_json") or {}
+    test_payload = _parsed_test_payload(prediction_row)
+    return _collect_query_terms(
+        [
+            prediction_row.get("mechanism_type"),
+            test_payload.get("data"),
+            payload.get("time_horizon"),
+            "mechanism experiment measurement",
+        ],
+        limit=8,
+    )
+
+
+def _build_base_terms(prediction_row: dict) -> list[str]:
+    return _compose_query_text(
+        _outcome_terms(prediction_row),
+        _context_terms(prediction_row),
+        limit=14,
+    ).split()
 
 
 def build_prediction_scan_queries(prediction_row: dict) -> list[dict]:
     """Build conservative search queries from stored prediction fields."""
-    payload = prediction_row.get("prediction_json") or {}
     base_terms = _build_base_terms(prediction_row)
     if not base_terms:
         return []
 
-    base_query = " ".join(base_terms[:10])
     polarity = _direction_polarity(prediction_row)
+    query_base_terms = list(base_terms[:8])
+    support_terms = _support_terms(prediction_row)
+    contradiction_terms = _contradiction_terms(prediction_row, polarity)
+    mechanism_terms = _mechanism_terms(prediction_row)
     queries: list[dict] = []
-
-    if polarity == "positive":
-        support_suffix = "increase higher positive correlation study"
-        contradiction_suffix = "no correlation decrease lower null result"
-    elif polarity == "negative":
-        support_suffix = "decrease lower negative correlation study"
-        contradiction_suffix = "no correlation increase higher null result"
-    else:
-        support_suffix = "mechanism evidence study"
-        contradiction_suffix = "no effect contradictory evidence study"
 
     queries.append(
         {
             "intent": "support",
-            "query": _clean_text(f"{base_query} {support_suffix}"),
+            "query": _compose_query_text(
+                query_base_terms,
+                support_terms,
+                _collect_query_terms(["measured effect study"], limit=3),
+                limit=14,
+            ),
             "base_terms": list(base_terms),
             "polarity": polarity,
         }
@@ -253,25 +345,29 @@ def build_prediction_scan_queries(prediction_row: dict) -> list[dict]:
     queries.append(
         {
             "intent": "contradiction",
-            "query": _clean_text(f"{base_query} {contradiction_suffix}"),
+            "query": _compose_query_text(
+                query_base_terms,
+                contradiction_terms,
+                _collect_query_terms(["contradiction null result study"], limit=4),
+                limit=14,
+            ),
             "base_terms": list(base_terms),
             "polarity": polarity,
         }
     )
-
-    falsification_phrase = _salient_phrase(
-        payload.get("falsification_condition") or prediction_row.get("test"),
-        max_tokens=10,
+    queries.append(
+        {
+            "intent": "background",
+            "query": _compose_query_text(
+                query_base_terms,
+                mechanism_terms,
+                _collect_query_terms(["background experiment study"], limit=3),
+                limit=14,
+            ),
+            "base_terms": list(dict.fromkeys(base_terms + mechanism_terms)),
+            "polarity": polarity,
+        }
     )
-    if falsification_phrase:
-        queries.append(
-            {
-                "intent": "contradiction",
-                "query": _clean_text(f"{falsification_phrase} study"),
-                "base_terms": list(dict.fromkeys(base_terms + falsification_phrase.split())),
-                "polarity": polarity,
-            }
-        )
 
     deduped: list[dict] = []
     seen_queries: set[str] = set()
@@ -332,16 +428,22 @@ def _classify_hit(hit_text: str, query_spec: dict) -> str:
         support_score = complex_score + (1 if relation_score >= 2 else 0)
         contradiction_score = _count_matches(lowered, _NULL_SIGNAL_TERMS)
 
-    if query_spec.get("intent") == "support":
+    intent = query_spec.get("intent")
+    if intent == "support":
         if support_score >= max(1, contradiction_score):
             return "possible_support"
         if contradiction_score >= 2:
             return "possible_contradiction"
-    else:
+    elif intent == "contradiction":
         if contradiction_score >= max(1, support_score):
             return "possible_contradiction"
         if support_score >= 2 and support_score > contradiction_score:
             return "possible_support"
+    else:
+        if support_score >= 2 and support_score > contradiction_score:
+            return "possible_support"
+        if contradiction_score >= 2 and contradiction_score > support_score:
+            return "possible_contradiction"
     return "unclear"
 
 
