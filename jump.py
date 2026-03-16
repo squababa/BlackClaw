@@ -79,6 +79,7 @@ Requirements:
   - Prefer fewer, better-supported critical mappings over extra weak ones. If support is thin, keep the first 3 mappings narrow and well-supported instead of inventing broader weak critical mappings. Non-critical mappings are lower priority.
   - If a snippet supports only a weaker, local correspondence, keep the mapping claim equally weak and local.
   - Write each claim at the same level of specificity as the mapped variables. Do not make the claim broader than the mapping itself.
+  - Each variable mapping snippet must directly bear on the mapped target-domain variable, not just the broader target-domain story or a nearby downstream effect.
   - Do not use vague evidence_snippet text that only supports the broader domain, the general story, or the overall mechanism.
   - Do not cite a broad mechanism sentence as support for a narrow variable-level mapping.
   - For the first 3 critical mappings, choose snippets that mention the mapped variable, threshold, process, or operator directly when possible.
@@ -86,6 +87,8 @@ Requirements:
   - If a snippet only supports the overall causal story but not the exact mapped-variable claim, use it for mechanism_assertions instead of variable_mappings.
   - evidence_map.mechanism_assertions must include at least 1 entry with mechanism_claim, evidence_snippet, and source_reference.
   - mechanism_assertions must support the actual causal operator or control logic in the mechanism (what triggers, routes, switches, inhibits, amplifies, or accumulates), not just background context about the target domain.
+  - At least one target-domain snippet or mechanism_assertion must directly support the named target-domain process or the exact metric/immediate observable consequence used in the test.
+  - Reject off-domain or generic background target evidence. If a result title or evidence_snippet is not clearly about the target domain, named process, or named metric, treat it as unusable and return `no_connection`.
   - Keep evidence_snippet short and grounded in SEARCH RESULTS. Use a result title or URL for source_reference. Do not invent sources.
 - Provide `prediction` as a structured object with these keys:
   observable, time_horizon, direction, magnitude, confidence,
@@ -105,6 +108,7 @@ Requirements:
 - Unacceptable mechanism naming includes generic placeholders such as `a threshold mechanism`, `a gating effect`, `a competitive dynamic`, or `a self-reinforcing process`.
 - Unacceptable mechanism openings also include result-first phrasing such as `when a threshold is crossed...`, `feedback causes escalation...`, or `the system transitions to...` before naming the process.
 - If you cannot name a process already grounded in target-domain evidence or literature-facing wording, return `no_connection`.
+- If the named process cannot be grounded in target evidence or mechanism assertions, return `no_connection`.
 - If you can describe only a pattern, threshold crossing, or transition but cannot name the operative target-domain process in target-domain terms, return `no_connection`.
 - In `mechanism`, explicitly state:
   - the operative causal operator,
