@@ -233,6 +233,40 @@ PROVENANCE_SNIPPET_SPECIFICITY_MIN = 0.45
 PROVENANCE_SOURCE_TRACEABILITY_MIN = 0.4
 PROVENANCE_OVERALL_MIN = 0.55
 
+CORE_TARGET_WEAK_SOURCE_MARKERS = (
+    "blog",
+    "blogs",
+    "medium.com",
+    "substack",
+    "wordpress",
+    "blogspot",
+    "forum",
+    "forums",
+    "reddit",
+    "stackexchange",
+    "quora",
+    "diyaudio",
+    "all about circuits",
+    "hobby",
+    "hobbyist",
+    "wikia",
+    "fandom",
+)
+
+CORE_TARGET_BROAD_PAGE_MARKERS = (
+    "how ",
+    "overview",
+    "introduction",
+    "explainer",
+    "guide",
+    "tutorial",
+    "basics",
+    "beginner",
+    "faq",
+    "what is",
+    "how to",
+)
+
 
 def _word_tokens(text: str) -> list[str]:
     return re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_/\-]*", text.lower())
@@ -421,6 +455,214 @@ def _score_provenance_evidence_item(
         "source_traceability": source_traceability,
         "overall": overall,
         "reasons": reasons,
+    }
+
+
+def _extract_test_metric_text(test: object) -> str | None:
+    if isinstance(test, dict):
+        text = " ".join(str(test.get(key, "")) for key in ("metric", "metrics"))
+        return _clean_optional_text(text)
+    return _clean_optional_text(test)
+
+
+def _minimum_core_overlap(terms: set[str]) -> int:
+    if not terms:
+        return 0
+    if len(terms) <= 2:
+        return 1
+    return 2
+
+
+def _looks_like_weak_target_source(source_reference: object) -> bool:
+    text = (_clean_optional_text(source_reference) or "").lower()
+    return bool(text) and any(
+        marker in text for marker in CORE_TARGET_WEAK_SOURCE_MARKERS
+    )
+
+
+def _looks_like_broad_target_page(source_reference: object) -> bool:
+    text = (_clean_optional_text(source_reference) or "").lower()
+    return bool(text) and any(
+        marker in text for marker in CORE_TARGET_BROAD_PAGE_MARKERS
+    )
+
+
+def _find_core_target_evidence_failure(
+    payload: dict,
+    *,
+    critical_mapping_entries: list[dict],
+    mechanism_entries: list[dict],
+) -> dict | None:
+    mechanism_text = _clean_optional_text(payload.get("mechanism")) or ""
+    metric_text = _extract_test_metric_text(payload.get("test")) or ""
+    prediction = (
+        payload.get("prediction") if isinstance(payload.get("prediction"), dict) else {}
+    )
+    observable_text = _clean_optional_text(prediction.get("observable")) or ""
+    core_claim_text = " ".join(
+        part for part in (mechanism_text, metric_text, observable_text) if part
+    )
+    top_level_target_entry = None
+
+    mechanism_terms = _meaningful_terms(mechanism_text)
+    metric_terms = _meaningful_terms(metric_text)
+    observable_terms = _meaningful_terms(observable_text)
+    if not (mechanism_terms or metric_terms or observable_terms):
+        return None
+
+    target_excerpt = _clean_optional_text(payload.get("target_excerpt"))
+    target_url = _clean_optional_text(payload.get("target_url"))
+    if target_excerpt is not None or target_url is not None:
+        top_level_target_entry = {
+            "entry_type": "top_level_target_evidence",
+            "claim": core_claim_text,
+            "evidence_snippet": target_excerpt,
+            "source_reference": target_url,
+            "provenance_score": _score_provenance_evidence_item(
+                core_claim_text,
+                target_excerpt,
+                target_url,
+                required_terms=(mechanism_terms | metric_terms | observable_terms),
+            ),
+        }
+
+    evaluated_entries = []
+    for entry in [
+        *critical_mapping_entries,
+        *mechanism_entries,
+        *([top_level_target_entry] if top_level_target_entry is not None else []),
+    ]:
+        if not isinstance(entry, dict):
+            continue
+        claim_text = _clean_optional_text(
+            entry.get("mechanism_claim") or entry.get("claim")
+        ) or ""
+        snippet_text = _clean_optional_text(entry.get("evidence_snippet")) or ""
+        source_text = _clean_optional_text(entry.get("source_reference")) or ""
+        combined_text = " ".join(
+            part for part in (claim_text, snippet_text, source_text) if part
+        )
+        if not combined_text:
+            continue
+
+        combined_lower = combined_text.lower()
+        entry_terms = _meaningful_terms(combined_text)
+        score = entry.get("provenance_score") or {}
+        score_reasons = {
+            str(reason).strip().lower()
+            for reason in (score.get("reasons") or [])
+            if str(reason).strip()
+        }
+
+        mechanism_overlap = len(entry_terms & mechanism_terms)
+        metric_overlap = len(entry_terms & metric_terms)
+        observable_overlap = len(entry_terms & observable_terms)
+
+        matches_mechanism = bool(mechanism_terms) and (
+            (mechanism_text and len(mechanism_text) >= 12 and mechanism_text.lower() in combined_lower)
+            or mechanism_overlap >= _minimum_core_overlap(mechanism_terms)
+        )
+        matches_metric = bool(metric_terms) and (
+            (metric_text and len(metric_text) >= 8 and metric_text.lower() in combined_lower)
+            or metric_overlap
+            >= _minimum_core_overlap(metric_terms)
+        )
+        matches_observable = bool(observable_terms) and (
+            (
+                observable_text
+                and len(observable_text) >= 8
+                and observable_text.lower() in combined_lower
+            )
+            or observable_overlap
+            >= _minimum_core_overlap(observable_terms)
+        )
+        core_match = matches_mechanism or matches_metric or (
+            not metric_terms and matches_observable
+        )
+
+        weak_source = _looks_like_weak_target_source(source_text)
+        broad_page = _looks_like_broad_target_page(source_text)
+        generic_signal = "generic evidence" in score_reasons
+        mismatch_signal = "claim/snippet mismatch" in score_reasons
+
+        evaluated_entries.append(
+            {
+                "entry_type": str(entry.get("entry_type") or "").strip(),
+                "core_match": core_match,
+                "weak_source": weak_source,
+                "broad_page": broad_page,
+                "generic_signal": generic_signal,
+                "mismatch_signal": mismatch_signal,
+            }
+        )
+
+    if not evaluated_entries:
+        return None
+
+    top_level_target_failures = [
+        item
+        for item in evaluated_entries
+        if item.get("entry_type") == "top_level_target_evidence"
+        and (
+            not item["core_match"]
+            or item["weak_source"]
+            or item["broad_page"]
+            or item["generic_signal"]
+            or item["mismatch_signal"]
+        )
+    ]
+    if top_level_target_failures:
+        reasons: list[str] = []
+        if any(item["weak_source"] for item in top_level_target_failures):
+            reasons.append("core support relies on weak target source")
+        if any(item["broad_page"] for item in top_level_target_failures):
+            reasons.append("core support relies on broad overview-style page")
+        if any(item["generic_signal"] for item in top_level_target_failures):
+            reasons.append("core support remains generic")
+        if any(
+            (not item["core_match"]) or item["mismatch_signal"]
+            for item in top_level_target_failures
+        ):
+            reasons.append("core support does not clearly match process or metric")
+        return {
+            "message": "target evidence too weak for core claim",
+            "reasons": _dedupe_preserve_order(reasons),
+            "reason_codes": ["weak_core_target_evidence"],
+        }
+
+    core_entries = [item for item in evaluated_entries if item["core_match"]]
+    strong_core_entries = [
+        item
+        for item in core_entries
+        if not (
+            item["weak_source"]
+            or item["broad_page"]
+            or item["generic_signal"]
+            or item["mismatch_signal"]
+        )
+    ]
+    if strong_core_entries:
+        return None
+
+    reasons: list[str] = []
+    if core_entries:
+        if any(item["weak_source"] for item in core_entries):
+            reasons.append("core support relies on weak target source")
+        if any(item["broad_page"] for item in core_entries):
+            reasons.append("core support relies on broad overview-style page")
+        if any(item["generic_signal"] for item in core_entries):
+            reasons.append("core support remains generic")
+        if any(item["mismatch_signal"] for item in core_entries):
+            reasons.append("core support does not clearly match process or metric")
+        if not reasons:
+            reasons.append("core support relies mainly on weak target evidence")
+    else:
+        reasons.append("no direct support for named process or core metric")
+
+    return {
+        "message": "target evidence too weak for core claim",
+        "reasons": _dedupe_preserve_order(reasons),
+        "reason_codes": ["weak_core_target_evidence"],
     }
 
 
@@ -1079,6 +1321,7 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
 
     missing_critical_mappings = []
     supported_critical_mapping_count = 0
+    best_critical_mapping_entries = []
     for source_variable, target_variable in critical_pairs:
         key = (
             _normalized_text_key(source_variable),
@@ -1114,6 +1357,7 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
                 ((item.get("provenance_score") or {}).get("overall")) or 0.0
             ),
         )
+        best_critical_mapping_entries.append(best_entry)
         score = best_entry.get("provenance_score") or {}
         quality_failures = _provenance_quality_failures(score)
         if quality_failures:
@@ -1212,6 +1456,24 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
                     "reasons": quality_failures,
                     "reason_codes": failure.get("reason_codes") or [],
                     "score": score,
+                }
+            )
+
+    if not issues:
+        core_target_failure = _find_core_target_evidence_failure(
+            payload,
+            critical_mapping_entries=best_critical_mapping_entries,
+            mechanism_entries=supported_mechanism_assertions,
+        )
+        if core_target_failure is not None:
+            issues.append(core_target_failure["message"])
+            failure_details.append(
+                {
+                    "kind": "core_target_evidence",
+                    "message": core_target_failure["message"],
+                    "reasons": core_target_failure.get("reasons") or [],
+                    "reason_codes": core_target_failure.get("reason_codes") or [],
+                    "score": None,
                 }
             )
 
