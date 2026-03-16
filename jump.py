@@ -111,7 +111,13 @@ Requirements:
   - same phase-transition language but equilibrium versus driven-transition mismatch
   unless the mechanism also names a specific process and control logic.
 - Prefer a smaller, narrower, more defensible mechanism claim over a broad impressive claim that is likely to fail adversarially. Precision of causal correspondence matters more than scope.
-- The prediction must include a directional outcome (increase, decrease, higher, lower), a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
+- Make `prediction` literature-resolvable: phrase it so a paper abstract or results section could directly support or contradict it.
+- Prefer one measurable outcome and one primary comparison condition over multiple coupled outcomes or several linked claims.
+- Make the observable explicit and concrete. Name the measurable variable, metric, population, intervention, comparator, or context when those details matter for checking the claim against external evidence.
+- State one expected directional outcome using the current schema's directional comparison words (`increase`, `decrease`, `higher`, or `lower`). Even narrower or cleaner predictions must still populate `prediction.direction` with one of those directional terms.
+- Avoid overloaded prediction sentences that stack threshold behavior, monotonicity, saturation, timing, and mechanism in one claim unless each part is essential and jointly testable from the same result family.
+- Prefer narrower predictions that can be falsified or supported by one literature result family over elegant but broad claims that only retrieve domain-adjacent evidence.
+- The prediction must include a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
 Return ONLY valid JSON. No markdown.
@@ -147,10 +153,10 @@ If valid:
     ]
   }},
   "prediction": {{
-    "observable": "measurable quantity or event",
-    "time_horizon": "when the observable should move",
-    "direction": "increase/decrease/higher/lower",
-    "magnitude": "expected effect size or threshold",
+    "observable": "specific measurable quantity or event reported in literature",
+    "time_horizon": "when the observable should move in the stated context",
+    "direction": "increase/decrease/higher/lower for the named comparison",
+    "magnitude": "expected effect size, threshold, or explicitly bounded null effect",
     "confidence": "low/medium/high or numeric confidence",
     "falsification_condition": "what concrete result would falsify the prediction",
     "utility_rationale": "why this prediction is useful to test or act on",
