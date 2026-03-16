@@ -236,6 +236,10 @@ def _parse_report_only_args():
         metavar="NUMBER",
     )
     parser.add_argument(
+        "--apply-suggested-grades",
+        action="store_true",
+    )
+    parser.add_argument(
         "--grade",
         type=str,
         choices=TRANSMISSION_MANUAL_GRADES,
@@ -671,6 +675,27 @@ def _prediction_summary_from_row(row: dict) -> str:
     return text or "—"
 
 
+def _prediction_quality_label_from_row(row: dict) -> str:
+    """Render the stored or computed prediction quality label for CLI tables."""
+    return prediction_quality_label(_prediction_quality_from_row(row))
+
+
+def _prediction_review_evidence_text(row: dict) -> str:
+    """Summarize reviewable evidence counts in one compact cell."""
+    return (
+        f"s:{int(row.get('accepted_support_hits', 0) or 0)}"
+        f"/c:{int(row.get('accepted_contradiction_hits', 0) or 0)}"
+        f"/u:{int(row.get('unreviewed_reviewable_hits', 0) or 0)}"
+    )
+
+
+def _prediction_review_age_text(value: object) -> str:
+    """Format queue age or staleness values for compact report tables."""
+    if value is None:
+        return "—"
+    return f"{int(value)}d"
+
+
 def _truncate_text(value: object, limit: int) -> str:
     """Collapse whitespace and cap long text for tabular reports."""
     cleaned = " ".join(str(value or "").split()).strip()
@@ -891,6 +916,83 @@ def _print_recent_review_items(limit: int = 20):
         print("")
 
 
+def _map_suggested_grade_to_manual(row: dict) -> tuple[str | None, str | None]:
+    """Map transmission suggested grades onto the stored manual-grade schema."""
+    suggested = str(row.get("suggested_grade") or "").strip().upper()
+    transmission_number = row.get("transmission_number")
+    if not suggested or transmission_number is None:
+        return None, None
+
+    manual_grade = None
+    if suggested == "A":
+        manual_grade = "strong"
+    elif suggested == "B":
+        manual_grade = "interesting_but_weak"
+    elif suggested == "C":
+        manual_grade = "salvage_candidate"
+    elif suggested in {"D", "F"}:
+        manual_grade = "generic"
+    if manual_grade is None:
+        return None, None
+
+    confidence = row.get("suggested_confidence")
+    confidence_text = f"{float(confidence):.2f}" if confidence is not None else "—"
+    reason = _clean_inline_text(row.get("suggested_reason")) or "no stored reason"
+    note = (
+        f"auto-applied from suggested_grade={suggested} "
+        f"(confidence={confidence_text}): {reason}"
+    )
+    return manual_grade, note
+
+
+def _apply_suggested_grades(limit: int = 20, note: str | None = None) -> bool:
+    """Apply suggested grades to recent transmitted rows missing manual grades."""
+    rows = list_recent_review_items(limit=max(1, int(limit)))
+    applied: list[tuple[int, str]] = []
+    skipped = 0
+    extra_note = _clean_inline_text(note)
+
+    for row in rows:
+        if not row.get("transmitted"):
+            continue
+        if row.get("manual_grade"):
+            skipped += 1
+            continue
+        transmission_number = row.get("transmission_number")
+        if transmission_number is None:
+            skipped += 1
+            continue
+        manual_grade, auto_note = _map_suggested_grade_to_manual(row)
+        if manual_grade is None:
+            skipped += 1
+            continue
+        final_note = auto_note
+        if extra_note:
+            final_note = f"{auto_note} | {extra_note}" if auto_note else extra_note
+        if set_transmission_manual_grade(
+            int(transmission_number),
+            manual_grade,
+            note=final_note,
+        ):
+            applied.append((int(transmission_number), manual_grade))
+        else:
+            skipped += 1
+
+    if not applied:
+        print("[Grade] No recent transmitted rows needed suggested-grade application.")
+        return False
+
+    print(
+        f"[Grade] Applied suggested grades to {len(applied)} transmission(s) "
+        f"from the most recent {max(1, int(limit))} review rows."
+    )
+    for transmission_number, manual_grade in applied:
+        print(f"  tx #{transmission_number} -> {manual_grade}")
+    if skipped > 0:
+        print(f"  [Grade] Skipped {skipped} row(s) already graded or ineligible.")
+    return True
+
+
 def _print_prediction_outcome_stats(report: dict):
     """Render outcome stats by mechanism, score bands, and domains."""
     overview = report.get("overview") or {}
@@ -1088,23 +1190,25 @@ def _print_prediction_outcome_suggestion_stats(report: dict):
 
     print("[OutcomeSuggestionStats] Top actionable predictions")
     print(
-        "prediction_id\ttx\tsuggestion_bucket\tmechanism_type\tutility_class\t"
-        "accepted_support_hits\taccepted_contradiction_hits\t"
-        "unreviewed_reviewable_hits\tprediction"
+        "prediction_id\tpriority\treview_status\tage\tstale\ttx\tsuggestion\t"
+        "mechanism\tquality\tevidence\tprediction"
     )
     if not top_actionable:
         print("none")
         return
     for row in top_actionable:
+        quality_label = _truncate_text(_prediction_quality_label_from_row(row), 18)
         print(
             f"{int(row.get('id', 0) or 0)}\t"
+            f"{row.get('review_priority') or 'low'}\t"
+            f"{_truncate_text(row.get('review_status') or 'unknown', 28)}\t"
+            f"{_prediction_review_age_text(row.get('age_days'))}\t"
+            f"{_prediction_review_age_text(row.get('staleness_days'))}\t"
             f"{row.get('transmission_number') or '—'}\t"
-            f"{row.get('suggestion_bucket') or 'insufficient_evidence'}\t"
+            f"{_truncate_text(row.get('suggestion_bucket') or 'insufficient_evidence', 24)}\t"
             f"{_truncate_text(row.get('mechanism_type') or 'unknown', 24)}\t"
-            f"{row.get('utility_class') or 'unknown'}\t"
-            f"{int(row.get('accepted_support_hits', 0) or 0)}\t"
-            f"{int(row.get('accepted_contradiction_hits', 0) or 0)}\t"
-            f"{int(row.get('unreviewed_reviewable_hits', 0) or 0)}\t"
+            f"{quality_label}\t"
+            f"{_prediction_review_evidence_text(row)}\t"
             f"{_truncate_text(row.get('prediction_summary'), 96)}"
         )
 
@@ -1301,39 +1405,36 @@ def _print_prediction_outcome_review_queue(limit: int = 20):
 
     unresolved_count = sum(1 for row in rows if row.get("is_unresolved"))
     thin_count = sum(1 for row in rows if row.get("needs_more_evidence"))
+    stale_count = sum(
+        1 for row in rows if row.get("staleness_days") is not None and row.get("staleness_days") >= 14
+    )
     print(f"[PredictionOutcomeReviewQueue] Recent {len(rows)} review-ready predictions")
     print(
-        f"unresolved={unresolved_count} | oldest_first=yes | strongest_evidence_first=yes | thin_evidence={thin_count}"
+        "unresolved="
+        f"{unresolved_count} | deterministic_sort=priority,evidence,quality,age | "
+        f"thin_evidence={thin_count} | stale_scans_14d={stale_count}"
     )
     print(
-        "pred\tpriority\tage_d\ttx\tstatus\toutcome\tmechanism\tevidence\t"
-        "recommendation\tutility\tprediction"
+        "pred\tpriority\treview_status\tage\tstale\ttx\tmechanism\tquality\t"
+        "evidence\trecommendation\tprediction"
     )
     for row in rows:
-        utility_text = row.get("utility_class") or "unknown"
-        if utility_text == "unknown":
-            utility_text = "—"
         mechanism_type = row.get("mechanism_type") or "—"
+        quality_label = _truncate_text(_prediction_quality_label_from_row(row), 18)
         summary = _truncate_text(_prediction_summary_from_row(row), 96)
-        evidence_text = (
-            f"a:{int(row.get('accepted_reviewable_hits', 0) or 0)}"
-            f"/s:{int(row.get('accepted_support_hits', 0) or 0)}"
-            f"/c:{int(row.get('accepted_contradiction_hits', 0) or 0)}"
-            f"/u:{int(row.get('unreviewed_reviewable_hits', 0) or 0)}"
-        )
         recommendation = row.get("recommendation") or "insufficient_evidence"
         if row.get("needs_more_evidence"):
             recommendation = "insufficient_evidence"
         print(
             f"{row.get('id')}\t{row.get('review_priority') or 'low'}\t"
-            f"{(row.get('age_days') if row.get('age_days') is not None else '—')}\t"
+            f"{_truncate_text(row.get('review_status') or 'unknown', 28)}\t"
+            f"{_prediction_review_age_text(row.get('age_days'))}\t"
+            f"{_prediction_review_age_text(row.get('staleness_days'))}\t"
             f"{row.get('transmission_number')}\t"
-            f"{row.get('status') or 'unknown'}\t"
-            f"{row.get('outcome_status') or 'open'}\t"
             f"{_truncate_text(mechanism_type, 24)}\t"
-            f"{evidence_text}\t"
+            f"{quality_label}\t"
+            f"{_prediction_review_evidence_text(row)}\t"
             f"{_truncate_text(recommendation, 26)}\t"
-            f"{_truncate_text(utility_text, 12)}\t"
             f"{summary}"
         )
 
@@ -2453,6 +2554,7 @@ if __name__ == "__main__":
         [
             _early_report_args.review_recent,
             _early_report_args.grade_transmission is not None,
+            _early_report_args.apply_suggested_grades,
         ]
     )
     _early_strong_rejection_action_count = sum(
@@ -2518,6 +2620,11 @@ if __name__ == "__main__":
     ):
         print("  [!] --grade-transmission also requires --grade.")
         sys.exit(1)
+    if _early_report_args.apply_suggested_grades and _early_report_args.grade is not None:
+        print(
+            "  [!] --grade cannot be combined with --apply-suggested-grades."
+        )
+        sys.exit(1)
     if _early_report_args.rut_report and _early_report_args.rut_window <= 0:
         print("  [!] --rut-window requires a positive integer.")
         sys.exit(1)
@@ -2526,7 +2633,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_transmission_review_action_count > 1:
         print(
-            "  [!] Use only one transmission review action at a time: --review-recent or --grade-transmission."
+            "  [!] Use only one transmission review action at a time: --review-recent, --grade-transmission, or --apply-suggested-grades."
         )
         sys.exit(1)
     if _early_prediction_action_count > 1:
@@ -2576,9 +2683,10 @@ if __name__ == "__main__":
         and not _early_report_args.scan_open_predictions
         and not _early_report_args.strong_rejections
         and not _early_report_args.review_recent
+        and not _early_report_args.apply_suggested_grades
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, or --review-recent."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --review-recent, or --apply-suggested-grades."
         )
         sys.exit(1)
     if (
@@ -2594,9 +2702,10 @@ if __name__ == "__main__":
         and _early_report_args.mark_salvaged is None
         and _early_report_args.dismiss_strong_rejection is None
         and _early_report_args.grade_transmission is None
+        and not _early_report_args.apply_suggested_grades
     ):
         print(
-            "  [!] --note can only be used with --grade-transmission, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
+            "  [!] --note can only be used with --grade-transmission, --apply-suggested-grades, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
         )
         sys.exit(1)
     if (
@@ -2672,6 +2781,7 @@ if __name__ == "__main__":
         or _early_report_args.mark_failed is not None
         or _early_report_args.mark_unknown is not None
         or _early_report_args.grade_transmission is not None
+        or _early_report_args.apply_suggested_grades
         or _early_report_args.mark_salvaged is not None
         or _early_report_args.dismiss_strong_rejection is not None
         or _early_report_args.rut_report
@@ -2726,6 +2836,11 @@ if __name__ == "__main__":
             _print_mechanism_check_report(limit=_early_report_args.window)
         if _early_report_args.review_recent:
             _print_recent_review_items(limit=_early_report_args.limit or 10)
+        if _early_report_args.apply_suggested_grades:
+            _apply_suggested_grades(
+                limit=_early_report_args.limit or 20,
+                note=_early_report_args.note,
+            )
         if _early_report_args.predictions:
             _print_predictions_list(limit=20)
         if _early_report_args.prediction_outcomes:
@@ -3097,6 +3212,11 @@ def parse_args():
         default=None,
         metavar="NUMBER",
         help="Store a manual grade for a transmission and exit",
+    )
+    parser.add_argument(
+        "--apply-suggested-grades",
+        action="store_true",
+        help="Apply suggested grades to recent transmitted rows that do not already have a manual grade",
     )
     parser.add_argument(
         "--grade",
@@ -4896,6 +5016,7 @@ def main():
     feedback_action_count = sum(
         [
             args.review_recent,
+            args.apply_suggested_grades,
             args.star is not None,
             args.dismiss is not None,
             args.grade_transmission is not None,
@@ -4957,6 +5078,9 @@ def main():
     if args.grade_transmission is not None and args.grade is None:
         print("  [!] --grade-transmission also requires --grade.")
         sys.exit(1)
+    if args.apply_suggested_grades and args.grade is not None:
+        print("  [!] --grade cannot be combined with --apply-suggested-grades.")
+        sys.exit(1)
     if (
         not args.run_eval
         and (
@@ -4971,7 +5095,7 @@ def main():
         sys.exit(1)
     if feedback_action_count > 1:
         print(
-            "  [!] Use only one of --review-recent, --star, --dismiss, --grade-transmission, --dive, or --transmission-lineage at a time."
+            "  [!] Use only one of --review-recent, --apply-suggested-grades, --star, --dismiss, --grade-transmission, --dive, or --transmission-lineage at a time."
         )
         sys.exit(1)
     if prediction_action_count > 1:
@@ -5024,14 +5148,16 @@ def main():
         and not args.scan_open_predictions
         and not args.strong_rejections
         and not args.review_recent
+        and not args.apply_suggested_grades
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, or --review-recent."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --review-recent, or --apply-suggested-grades."
         )
         sys.exit(1)
     if (
         args.note is not None
         and args.grade_transmission is None
+        and not args.apply_suggested_grades
         and args.star is None
         and args.dismiss is None
         and args.mark_supported is None
@@ -5046,7 +5172,7 @@ def main():
         and args.dismiss_strong_rejection is None
     ):
         print(
-            "  [!] --note can only be used with --star, --dismiss, --grade-transmission, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
+            "  [!] --note can only be used with --star, --dismiss, --grade-transmission, --apply-suggested-grades, evidence review updates, prediction outcome update flags, or strong-rejection status updates."
         )
         sys.exit(1)
     if (
@@ -5109,6 +5235,13 @@ def main():
 
     if args.review_recent:
         _print_recent_review_items(limit=args.limit or 10)
+        return
+
+    if args.apply_suggested_grades:
+        _apply_suggested_grades(
+            limit=args.limit or 20,
+            note=args.note,
+        )
         return
 
     if args.grade_transmission is not None:

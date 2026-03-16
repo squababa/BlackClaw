@@ -403,6 +403,27 @@ def _normalize_timestamp_text(value: object) -> str | None:
     return parsed.isoformat()
 
 
+def _timestamp_age_days(value: object) -> int | None:
+    """Convert one stored timestamp into whole-day age for review queues."""
+    text = _clean_optional_text(value)
+    if text is None:
+        return None
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(
+        0,
+        int(
+            (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+            // 86400
+        ),
+    )
+
+
 def _coerce_optional_float(value: object) -> float | None:
     """Parse optional numeric values into floats when possible."""
     try:
@@ -2681,12 +2702,16 @@ def _prediction_outcome_suggestion_sort_key(row: dict) -> tuple:
     support_hits = int(row.get("accepted_support_hits", 0) or 0)
     contradiction_hits = int(row.get("accepted_contradiction_hits", 0) or 0)
     unreviewed_hits = int(row.get("unreviewed_reviewable_hits", 0) or 0)
+    quality_score = _coerce_optional_float(row.get("prediction_quality_score"))
+    age_days = row.get("age_days")
     return (
         bucket_priority.get(row.get("suggestion_bucket"), 99),
         -(support_hits + contradiction_hits),
         -max(support_hits, contradiction_hits),
         -unreviewed_hits,
-        -int(row.get("id", 0) or 0),
+        -(quality_score if quality_score is not None else -1.0),
+        -(age_days if age_days is not None else -1),
+        int(row.get("id", 0) or 0),
     )
 
 
@@ -2777,8 +2802,58 @@ def _list_prediction_outcome_suggestion_rows() -> list[dict]:
             or _clean_optional_text(payload.get("prediction"))
             or "—"
         )
+        payload = _annotate_prediction_review_candidate(payload)
         payloads.append(payload)
     return payloads
+
+
+def _prediction_outcome_review_status(payload: dict) -> str:
+    """Summarize one open prediction's current review posture."""
+    support_hits = int(payload.get("accepted_support_hits", 0) or 0)
+    contradiction_hits = int(payload.get("accepted_contradiction_hits", 0) or 0)
+    unreviewed_hits = int(payload.get("unreviewed_reviewable_hits", 0) or 0)
+    if support_hits > 0 and contradiction_hits > 0:
+        return "accepted_conflict"
+    if support_hits > 0 or contradiction_hits > 0:
+        return "accepted_ready"
+    if unreviewed_hits > 0:
+        return "needs_evidence_review"
+    if _clean_optional_text(payload.get("last_scanned_at")) is not None:
+        return "scanned_no_reviewable_evidence"
+    return "unscanned"
+
+
+def _annotate_prediction_review_candidate(payload: dict) -> dict:
+    """Attach compact operational metadata for review and queue surfaces."""
+    recommendation = payload.get("recommendation") or payload.get("suggestion_bucket")
+    accepted_total_hits = int(payload.get("accepted_support_hits", 0) or 0) + int(
+        payload.get("accepted_contradiction_hits", 0) or 0
+    )
+    payload["accepted_reviewable_hits"] = accepted_total_hits
+    payload["total_reviewable_hits"] = accepted_total_hits + int(
+        payload.get("unreviewed_reviewable_hits", 0) or 0
+    )
+    payload["age_days"] = _timestamp_age_days(
+        _clean_optional_text(payload.get("created_at"))
+        or _clean_optional_text(payload.get("updated_at"))
+        or _clean_optional_text(payload.get("validated_at"))
+    )
+    payload["staleness_days"] = _timestamp_age_days(payload.get("last_scanned_at"))
+    payload["review_status"] = _prediction_outcome_review_status(payload)
+    payload["review_priority"] = (
+        "conflict"
+        if recommendation == "conflicting_evidence"
+        else (
+            "high"
+            if int(payload.get("accepted_reviewable_hits", 0) or 0) > 0
+            else (
+                "medium"
+                if int(payload.get("unreviewed_reviewable_hits", 0) or 0) > 0
+                else "low"
+            )
+        )
+    )
+    return payload
 
 
 def _prediction_outcome_review_row_to_dict(row: sqlite3.Row | dict) -> dict:
@@ -2798,52 +2873,15 @@ def _prediction_outcome_review_row_to_dict(row: sqlite3.Row | dict) -> dict:
         payload["accepted_contradiction_hits"],
         payload["unreviewed_reviewable_hits"],
     )
-    accepted_total_hits = (
-        payload["accepted_support_hits"] + payload["accepted_contradiction_hits"]
-    )
-    payload["accepted_reviewable_hits"] = accepted_total_hits
-    payload["total_reviewable_hits"] = accepted_total_hits + payload["unreviewed_reviewable_hits"]
     outcome_status = _normalize_prediction_outcome_status(
         payload.get("outcome_status"),
         payload.get("status"),
     )
     payload["is_unresolved"] = outcome_status in {"open", "unknown"}
-    payload["needs_more_evidence"] = accepted_total_hits == 0
-    age_reference = (
-        _clean_optional_text(payload.get("created_at"))
-        or _clean_optional_text(payload.get("updated_at"))
-        or _clean_optional_text(payload.get("validated_at"))
-    )
-    age_days = None
-    if age_reference is not None:
-        candidate = age_reference[:-1] + "+00:00" if age_reference.endswith("Z") else age_reference
-        try:
-            parsed = datetime.fromisoformat(candidate)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            age_days = max(
-                0,
-                int(
-                    (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
-                    // 86400
-                ),
-            )
-        except ValueError:
-            age_days = None
-    payload["age_days"] = age_days
-    payload["review_priority"] = (
-        "conflict"
-        if payload["recommendation"] == "conflicting_evidence"
-        else (
-            "high"
-            if payload["is_unresolved"] and accepted_total_hits > 0
-            else (
-                "medium"
-                if payload["is_unresolved"] and payload["unreviewed_reviewable_hits"] > 0
-                else "low"
-            )
-        )
-    )
+    payload = _annotate_prediction_review_candidate(payload)
+    payload["needs_more_evidence"] = payload["accepted_reviewable_hits"] == 0
+    if not payload["is_unresolved"]:
+        payload["review_priority"] = "low"
     return payload
 
 
@@ -2912,9 +2950,12 @@ def list_prediction_outcome_review_queue(limit: int | None = 20) -> list[dict]:
             ON t.transmission_number = p.transmission_number
         LEFT JOIN explorations e
             ON e.id = t.exploration_id
-        WHERE COALESCE(ec.accepted_support_hits, 0) > 0
-           OR COALESCE(ec.accepted_contradiction_hits, 0) > 0
-           OR COALESCE(ec.unreviewed_reviewable_hits, 0) > 0
+        WHERE LOWER(COALESCE(p.outcome_status, p.status, 'open')) IN ('open', 'unknown')
+          AND (
+                COALESCE(ec.accepted_support_hits, 0) > 0
+             OR COALESCE(ec.accepted_contradiction_hits, 0) > 0
+             OR COALESCE(ec.unreviewed_reviewable_hits, 0) > 0
+          )
         ORDER BY
             CASE
                 WHEN LOWER(COALESCE(p.outcome_status, p.status, 'open')) IN ('open', 'unknown')
@@ -2933,6 +2974,7 @@ def list_prediction_outcome_review_queue(limit: int | None = 20) -> list[dict]:
             END ASC,
             (COALESCE(ec.accepted_support_hits, 0) + COALESCE(ec.accepted_contradiction_hits, 0)) DESC,
             COALESCE(ec.unreviewed_reviewable_hits, 0) DESC,
+            COALESCE(p.prediction_quality_score, -1) DESC,
             COALESCE(
                 NULLIF(p.created_at, ''),
                 NULLIF(p.updated_at, ''),
@@ -3353,11 +3395,22 @@ def get_prediction_outcome_suggestion_stats() -> dict:
                         "id": int(row.get("id", 0) or 0),
                         "transmission_number": row.get("transmission_number"),
                         "suggestion_bucket": suggestion_bucket,
+                        "review_priority": row.get("review_priority"),
+                        "review_status": row.get("review_status"),
                         "mechanism_type": mechanism_type,
                         "utility_class": utility_class,
+                        "prediction": row.get("prediction"),
+                        "prediction_json": row.get("prediction_json"),
+                        "test": row.get("test"),
+                        "prediction_quality": row.get("prediction_quality"),
+                        "prediction_quality_score": row.get("prediction_quality_score"),
                         "accepted_support_hits": accepted_support_hits,
                         "accepted_contradiction_hits": accepted_contradiction_hits,
                         "unreviewed_reviewable_hits": unreviewed_reviewable_hits,
+                        "accepted_reviewable_hits": row.get("accepted_reviewable_hits", 0),
+                        "total_reviewable_hits": row.get("total_reviewable_hits", 0),
+                        "age_days": row.get("age_days"),
+                        "staleness_days": row.get("staleness_days"),
                         "prediction_summary": row.get("prediction_summary") or "—",
                     }
                 )
