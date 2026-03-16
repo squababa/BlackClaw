@@ -74,6 +74,7 @@ from store import (
     get_strong_rejection,
     update_strong_rejection_status,
     save_strong_rejection,
+    populate_passive_strong_rejection_scars,
     list_recent_review_items,
 )
 from seed import pick_seed, resolve_seed_choice
@@ -1807,6 +1808,36 @@ def _scar_summary_text(payload: dict | None) -> str:
     return "—"
 
 
+def _print_passive_scar_population_report(report: dict):
+    """Render a concise passive scar-population update summary."""
+    family_counts = report.get("family_counts") or {}
+    updated_rows = report.get("updated_rows") or []
+    print(
+        f"[PassiveScars] scanned={int(report.get('scanned', 0) or 0)} | "
+        f"updated={int(report.get('updated', 0) or 0)} | "
+        f"min_count={int(report.get('min_count', 0) or 0)}"
+    )
+    print("[PassiveScars] Repeated families")
+    print("family\tcount")
+    if not family_counts:
+        print("none")
+    else:
+        for family, count in family_counts.items():
+            print(f"{family}\t{int(count or 0)}")
+    print("[PassiveScars] Updated strong rejections")
+    print("id\tfamily\tcount\tscar_summary")
+    if not updated_rows:
+        print("none")
+        return
+    for row in updated_rows:
+        print(
+            f"{int(row.get('id', 0) or 0)}\t"
+            f"{row.get('family') or 'unknown'}\t"
+            f"{int(row.get('count', 0) or 0)}\t"
+            f"{_truncate_text(row.get('summary') or 'Repeated failure family', 96)}"
+        )
+
+
 def _print_transmission_lineage(transmission_number: int) -> bool:
     """Render concise lineage metadata for one transmission."""
     row = get_transmission_lineage_metadata(transmission_number)
@@ -3408,6 +3439,11 @@ def parse_args():
         default=None,
         metavar="ID",
         help="Show concise lineage/scar metadata for a stored strong rejection id and exit",
+    )
+    parser.add_argument(
+        "--populate-scar-summaries",
+        action="store_true",
+        help="Passively store repeated-failure scar summaries on strong rejections and exit",
     )
     parser.add_argument(
         "--mark-salvaged",
@@ -5059,6 +5095,7 @@ def main():
             args.strong_rejections,
             args.strong_rejection is not None,
             args.strong_rejection_lineage is not None,
+            args.populate_scar_summaries,
             args.mark_salvaged is not None,
             args.dismiss_strong_rejection is not None,
         ]
@@ -5105,7 +5142,7 @@ def main():
         sys.exit(1)
     if strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one of --strong-rejections, --strong-rejection, --strong-rejection-lineage, --mark-salvaged, or --dismiss-strong-rejection at a time."
+            "  [!] Use only one of --strong-rejections, --strong-rejection, --strong-rejection-lineage, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and (
@@ -5353,6 +5390,12 @@ def main():
     if args.strong_rejection_lineage is not None:
         if not _print_strong_rejection_lineage(args.strong_rejection_lineage):
             sys.exit(1)
+        return
+
+    if args.populate_scar_summaries:
+        _print_passive_scar_population_report(
+            populate_passive_strong_rejection_scars()
+        )
         return
 
     if args.mark_salvaged is not None:

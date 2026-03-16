@@ -96,6 +96,30 @@ PREDICTION_OUTCOME_SUGGESTION_BUCKETS = (
     "waiting_on_review",
     "insufficient_evidence",
 )
+PASSIVE_SCAR_MIN_COUNT = 3
+PASSIVE_SCAR_FAMILIES = (
+    {
+        "family": "mechanism_specificity_failure",
+        "stage": "validation",
+        "summary": "Repeated mechanism specificity failures",
+        "match_type": "exact",
+        "needle": "validation:mechanism must name a specific process",
+    },
+    {
+        "family": "claim_snippet_mismatch",
+        "stage": "validation",
+        "summary": "Repeated claim/snippet mismatch provenance failures",
+        "match_type": "contains",
+        "needle": "claim_snippet_mismatch",
+    },
+    {
+        "family": "survival_score_below_threshold",
+        "stage": "adversarial",
+        "summary": "Repeated survival-score threshold failures",
+        "match_type": "contains",
+        "needle": "survival_score below",
+    },
+)
 STRONG_REJECTION_STATUSES = ("open", "salvaged", "dismissed")
 LINEAGE_CHANGE_TYPES = (
     "mechanism_changed",
@@ -1547,6 +1571,34 @@ def _normalize_scar_summary(value: object) -> dict | None:
     if isinstance(parsed.get("details"), dict) and parsed.get("details"):
         out["details"] = parsed.get("details")
     return out or None
+
+
+def _passive_scar_reason_match(reason: object, spec: dict) -> bool:
+    """Return whether one stored rejection reason matches a conservative scar family."""
+    text = _clean_optional_text(reason)
+    if text is None:
+        return False
+    needle = _clean_optional_text(spec.get("needle"))
+    if needle is None:
+        return False
+    if spec.get("match_type") == "exact":
+        return text == needle
+    return needle in text
+
+
+def _build_passive_scar_summary(spec: dict, count: int, matched_reason: str) -> dict:
+    """Build one deterministic passive scar summary payload."""
+    return {
+        "summary": _clean_optional_text(spec.get("summary")) or "Repeated failure family",
+        "count": max(0, int(count)),
+        "details": {
+            "family": _clean_optional_text(spec.get("family")) or "unknown",
+            "stage": _clean_optional_text(spec.get("stage")) or "unknown",
+            "match_type": _clean_optional_text(spec.get("match_type")) or "contains",
+            "needle": _clean_optional_text(spec.get("needle")) or "—",
+            "matched_reason": matched_reason,
+        },
+    }
 
 
 def _top_reason_rows(counter: Counter[str], top_n: int = 10) -> list[dict]:
@@ -4743,6 +4795,98 @@ def update_strong_rejection_status(
     conn.commit()
     conn.close()
     return True
+
+
+def populate_passive_strong_rejection_scars(
+    min_count: int = PASSIVE_SCAR_MIN_COUNT,
+) -> dict:
+    """Store conservative scar summaries on strong rejections with repeated failure families."""
+    safe_min_count = max(1, int(min_count))
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT id, rejection_reasons_json, scar_summary_json
+        FROM strong_rejections
+        ORDER BY id ASC"""
+    ).fetchall()
+
+    family_specs = {
+        _clean_optional_text(spec.get("family")) or "unknown": spec
+        for spec in PASSIVE_SCAR_FAMILIES
+    }
+    family_counts: Counter[str] = Counter()
+    parsed_rows: list[dict] = []
+
+    for row in rows:
+        reasons = _clean_reason_list(_json_array_or_empty(row["rejection_reasons_json"]))
+        matches_by_family: dict[str, list[str]] = {}
+        for reason in reasons:
+            for spec in PASSIVE_SCAR_FAMILIES:
+                family = _clean_optional_text(spec.get("family")) or "unknown"
+                if _passive_scar_reason_match(reason, spec):
+                    matches_by_family.setdefault(family, []).append(reason)
+                    family_counts[family] += 1
+        parsed_rows.append(
+            {
+                "id": int(row["id"]),
+                "existing_scar_summary": _normalize_scar_summary(row["scar_summary_json"]),
+                "matches_by_family": matches_by_family,
+            }
+        )
+
+    updated_rows: list[dict] = []
+    for row in parsed_rows:
+        matched_families = [
+            (
+                int(family_counts.get(family, 0) or 0),
+                len(reasons),
+                family,
+                reasons[0],
+            )
+            for family, reasons in row["matches_by_family"].items()
+            if int(family_counts.get(family, 0) or 0) >= safe_min_count and reasons
+        ]
+        if not matched_families:
+            continue
+        matched_families.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
+        count, _row_matches, family, matched_reason = matched_families[0]
+        scar_summary = _build_passive_scar_summary(
+            family_specs.get(family) or {},
+            count,
+            matched_reason,
+        )
+        if row["existing_scar_summary"] is not None:
+            continue
+        conn.execute(
+            """UPDATE strong_rejections
+            SET scar_summary_json = ?
+            WHERE id = ?""",
+            (
+                json.dumps(scar_summary, ensure_ascii=False, sort_keys=True),
+                row["id"],
+            ),
+        )
+        updated_rows.append(
+            {
+                "id": row["id"],
+                "family": family,
+                "count": count,
+                "summary": scar_summary.get("summary") or "Repeated failure family",
+            }
+        )
+
+    conn.commit()
+    conn.close()
+    return {
+        "scanned": len(parsed_rows),
+        "updated": len(updated_rows),
+        "min_count": safe_min_count,
+        "family_counts": {
+            family: int(count or 0)
+            for family, count in sorted(family_counts.items())
+            if int(count or 0) >= safe_min_count
+        },
+        "updated_rows": updated_rows,
+    }
 
 
 # --- Transmissions ---
