@@ -1307,6 +1307,19 @@ def _print_prediction_evidence_stats(report: dict):
     for label in ("unreviewed", "accepted", "dismissed"):
         print(f"{label}\t{int(by_review_status.get(label, 0) or 0)}")
 
+    by_scan_status = report.get("open_predictions_by_scan_status") or {}
+    print("[PredictionEvidenceStats] Open predictions by last scan status")
+    print("scan_status\tcount")
+    for label in (
+        "not_scanned",
+        "evidence_found",
+        "no_evidence_found",
+        "provider_network_error",
+        "retrieval_failure",
+        "partial_scan_success",
+    ):
+        print(f"{label}\t{int(by_scan_status.get(label, 0) or 0)}")
+
 
 def _print_prediction_evidence_detail(evidence_hit_id: int) -> bool:
     """Render one stored evidence hit as JSON."""
@@ -3572,14 +3585,28 @@ def _run_open_prediction_evidence_scan(limit: int | None = None):
     total_hits = 0
     total_reviewable_hits = 0
     flagged_predictions = 0
+    by_scan_status = {
+        "evidence_found": 0,
+        "no_evidence_found": 0,
+        "provider_network_error": 0,
+        "retrieval_failure": 0,
+        "partial_scan_success": 0,
+    }
     print(f"[PredictionEvidenceScan] Scanning {len(rows)} open predictions")
     for row in rows:
         scan_result = scan_prediction_for_evidence(row)
         scan_timestamp = _utc_now_iso()
+        scan_status = scan_result.get("scan_status") or "retrieval_failure"
+        if scan_status not in by_scan_status:
+            by_scan_status[scan_status] = 0
+        by_scan_status[scan_status] += 1
+        errors = scan_result.get("errors") or []
         stored = save_prediction_evidence_scan(
             row.get("id"),
             scan_result.get("hits") or [],
             scan_timestamp=scan_timestamp,
+            scan_status=scan_status,
+            scan_error=_truncate_text("; ".join(errors), 240) if errors else None,
         )
         reviewable_hits = sum(
             1
@@ -3593,6 +3620,7 @@ def _run_open_prediction_evidence_scan(limit: int | None = None):
 
         print(
             f"{row.get('id')}\ttx={row.get('transmission_number')}\t"
+            f"status={stored.get('scan_status') or 'retrieval_failure'}\t"
             f"hits={int(stored.get('inserted_hits', 0) or 0)}\t"
             f"reviewable={reviewable_hits}\t"
             f"needs_review={'yes' if stored.get('needs_review') else 'no'}"
@@ -3603,13 +3631,20 @@ def _run_open_prediction_evidence_scan(limit: int | None = None):
             "queries\t"
             + (_truncate_text(" || ".join(queries), 180) if queries else "none")
         )
-        errors = scan_result.get("errors") or []
         if errors:
             print("errors\t" + _truncate_text("; ".join(errors), 180))
 
     print(
         f"[PredictionEvidenceScan] Stored {total_hits} hits across {len(rows)} predictions; "
         f"{total_reviewable_hits} non-unclear hits flagged across {flagged_predictions} predictions."
+    )
+    print(
+        "[PredictionEvidenceScan] Outcomes\t"
+        f"evidence_found={int(by_scan_status.get('evidence_found', 0) or 0)}\t"
+        f"no_evidence_found={int(by_scan_status.get('no_evidence_found', 0) or 0)}\t"
+        f"provider_network_error={int(by_scan_status.get('provider_network_error', 0) or 0)}\t"
+        f"retrieval_failure={int(by_scan_status.get('retrieval_failure', 0) or 0)}\t"
+        f"partial_scan_success={int(by_scan_status.get('partial_scan_success', 0) or 0)}"
     )
 
 

@@ -383,11 +383,39 @@ def _merge_candidate(existing: dict, candidate: dict) -> dict:
     return merged
 
 
+def _scan_error_category(exc: Exception) -> str:
+    """Classify one retrieval failure into a compact operational bucket."""
+    message = str(exc).lower()
+    if any(
+        needle in message
+        for needle in (
+            "api.tavily.com",
+            "httpsconnectionpool",
+            "max retries exceeded",
+            "failed to resolve",
+            "name resolution",
+            "temporary failure",
+            "nodename nor servname",
+            "connection refused",
+            "connection aborted",
+            "timed out",
+            "ssl",
+        )
+    ):
+        return "provider_network_error"
+    return "retrieval_failure"
+
+
 def scan_prediction_for_evidence(prediction_row: dict) -> dict:
     """Run a conservative web scan for one open prediction."""
     query_specs = build_prediction_scan_queries(prediction_row)
     hits_by_key: dict[str, dict] = {}
     errors: list[str] = []
+    error_counts = {
+        "provider_network_error": 0,
+        "retrieval_failure": 0,
+    }
+    successful_queries = 0
 
     for query_spec in query_specs:
         try:
@@ -399,8 +427,10 @@ def scan_prediction_for_evidence(prediction_row: dict) -> dict:
             )
             increment_tavily_calls(1)
         except Exception as exc:
+            error_counts[_scan_error_category(exc)] += 1
             errors.append(f"{query_spec['query']}: {exc}")
             continue
+        successful_queries += 1
 
         for result in response.get("results", []) or []:
             title = _clean_text(result.get("title"))
@@ -425,8 +455,27 @@ def scan_prediction_for_evidence(prediction_row: dict) -> dict:
                 _merge_candidate(existing, candidate) if existing else candidate
             )
 
+    hit_count = len(hits_by_key)
+    if not query_specs:
+        scan_status = "retrieval_failure"
+    elif successful_queries == 0:
+        if error_counts["provider_network_error"] > 0:
+            scan_status = "provider_network_error"
+        else:
+            scan_status = "retrieval_failure"
+    elif error_counts["provider_network_error"] > 0 or error_counts["retrieval_failure"] > 0:
+        scan_status = "partial_scan_success"
+    elif hit_count > 0:
+        scan_status = "evidence_found"
+    else:
+        scan_status = "no_evidence_found"
+
     return {
         "queries": [item["query"] for item in query_specs],
         "hits": list(hits_by_key.values()),
         "errors": errors,
+        "scan_status": scan_status,
+        "query_count": len(query_specs),
+        "successful_queries": successful_queries,
+        "error_counts": error_counts,
     }
