@@ -98,6 +98,10 @@ Requirements:
 - Do not pair a broad analogy with a loosely related metric. If the metric only weakly proxies the claimed mechanism, narrow the claim or return `no_connection`.
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
 - The mechanism must name the exact target-domain process that `test.metric` is supposed to measure.
+- `test.metric`, `test.confirm`, and `test.falsify` must directly measure that named process or its immediate observable consequence, not a distant downstream proxy.
+- Prefer a process name or standard causal operator a target-domain paper might use (for example: `SERCA-mediated SR refilling`, `GABAergic lateral inhibition`, `zero-cross switching`, `frictional contact network formation`).
+- Unacceptable mechanism naming includes generic placeholders such as `a threshold mechanism`, `a gating effect`, `a competitive dynamic`, or `a self-reinforcing process`.
+- If you can describe only a pattern, threshold crossing, or transition but cannot name the operative target-domain process in target-domain terms, return `no_connection`.
 - In `mechanism`, explicitly state:
   - the operative causal operator,
   - the control, trigger, threshold, comparator, or bottleneck variable,
@@ -146,7 +150,7 @@ If valid:
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
   "connection": "2-4 sentence explanation that starts with the primary target-domain claim/process, then links the source-domain correspondence",
-  "mechanism": "one named operative target-domain causal process naming the operator, trigger/control variable, and resulting state transition measured by the test",
+  "mechanism": "one named operative target-domain causal process using paper-like process wording, naming the operator, trigger/control variable, and resulting state transition measured by the test",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],
