@@ -357,10 +357,6 @@ def _parse_report_only_args():
         metavar="ID",
     )
     parser.add_argument(
-        "--backfill-lineage-scars",
-        action="store_true",
-    )
-    parser.add_argument(
         "--mark-salvaged",
         type=int,
         default=None,
@@ -2833,7 +2829,6 @@ if __name__ == "__main__":
         [
             _early_report_args.strong_rejections,
             _early_report_args.strong_rejection is not None,
-            _early_report_args.backfill_lineage_scars,
             _early_report_args.mark_salvaged is not None,
             _early_report_args.dismiss_strong_rejection is not None,
         ]
@@ -2874,7 +2869,6 @@ if __name__ == "__main__":
             or _early_report_args.evidence_review_queue
             or _early_report_args.scan_open_predictions
             or _early_report_args.strong_rejections
-            or _early_report_args.backfill_lineage_scars
             or _early_report_args.review_recent
         )
         and _early_report_args.limit is not None
@@ -2917,7 +2911,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --backfill-lineage-scars, --mark-salvaged, or --dismiss-strong-rejection."
+            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
         )
         sys.exit(1)
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
@@ -2956,12 +2950,11 @@ if __name__ == "__main__":
         and not _early_report_args.evidence_review_queue
         and not _early_report_args.scan_open_predictions
         and not _early_report_args.strong_rejections
-        and not _early_report_args.backfill_lineage_scars
         and not _early_report_args.review_recent
         and not _early_report_args.apply_suggested_grades
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --backfill-lineage-scars, --review-recent, or --apply-suggested-grades."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --review-recent, or --apply-suggested-grades."
         )
         sys.exit(1)
     if (
@@ -3048,7 +3041,6 @@ if __name__ == "__main__":
         or _early_report_args.prediction is not None
         or _early_report_args.strong_rejections
         or _early_report_args.strong_rejection is not None
-        or _early_report_args.backfill_lineage_scars
         or _early_report_args.review_recent
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
@@ -3180,10 +3172,6 @@ if __name__ == "__main__":
             sys.exit(1)
         if _early_report_args.strong_rejections:
             _print_strong_rejections_list(limit=_early_report_args.limit or 20)
-        if _early_report_args.backfill_lineage_scars:
-            _print_lineage_backfill_report(
-                _backfill_lineage_scars(limit=_early_report_args.limit)
-            )
         if (
             _early_report_args.strong_rejection is not None
             and not _print_strong_rejection_detail(_early_report_args.strong_rejection)
