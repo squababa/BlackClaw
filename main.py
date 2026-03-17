@@ -42,7 +42,9 @@ from store import (
     get_transmission_feedback_context,
     get_transmission_lineage_metadata,
     get_strong_rejection_lineage_metadata,
+    get_lineage_backfill_completion_counts,
     save_transmission_dive,
+    save_transmission_lineage_metadata,
     increment_llm_calls,
     list_predictions,
     list_prediction_outcomes,
@@ -70,10 +72,13 @@ from store import (
     update_prediction_evidence_review_status,
     list_prediction_evidence_review_queue,
     get_prediction_evidence_review_stats,
+    list_transmissions_for_lineage_backfill,
     list_strong_rejections,
+    list_strong_rejections_for_lineage_backfill,
     get_strong_rejection,
     update_strong_rejection_status,
     save_strong_rejection,
+    save_strong_rejection_lineage_metadata,
     populate_passive_strong_rejection_scars,
     list_recent_review_items,
     resolve_candidate_lineage_metadata,
@@ -350,6 +355,10 @@ def _parse_report_only_args():
         type=int,
         default=None,
         metavar="ID",
+    )
+    parser.add_argument(
+        "--backfill-lineage-scars",
+        action="store_true",
     )
     parser.add_argument(
         "--mark-salvaged",
@@ -2059,6 +2068,17 @@ def _print_passive_scar_population_report(report: dict):
         )
 
 
+def _print_lineage_backfill_report(report: dict):
+    """Render one concise operator summary for the historical lineage/scar backfill."""
+    print(
+        f"[LineageBackfill] transmissions_backfilled={int(report.get('transmissions_backfilled', 0) or 0)} | "
+        f"strong_rejections_backfilled={int(report.get('strong_rejections_backfilled', 0) or 0)} | "
+        f"lineage_roots_created={int(report.get('lineage_roots_created', 0) or 0)} | "
+        f"scars_created={int(report.get('scars_created', 0) or 0)} | "
+        f"rows_skipped={int(report.get('rows_skipped', 0) or 0)}"
+    )
+
+
 def _print_transmission_lineage(transmission_number: int) -> bool:
     """Render concise lineage metadata for one transmission."""
     row = get_transmission_lineage_metadata(transmission_number)
@@ -2813,6 +2833,7 @@ if __name__ == "__main__":
         [
             _early_report_args.strong_rejections,
             _early_report_args.strong_rejection is not None,
+            _early_report_args.backfill_lineage_scars,
             _early_report_args.mark_salvaged is not None,
             _early_report_args.dismiss_strong_rejection is not None,
         ]
@@ -2853,6 +2874,7 @@ if __name__ == "__main__":
             or _early_report_args.evidence_review_queue
             or _early_report_args.scan_open_predictions
             or _early_report_args.strong_rejections
+            or _early_report_args.backfill_lineage_scars
             or _early_report_args.review_recent
         )
         and _early_report_args.limit is not None
@@ -2895,7 +2917,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
+            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --backfill-lineage-scars, --mark-salvaged, or --dismiss-strong-rejection."
         )
         sys.exit(1)
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
@@ -2934,11 +2956,12 @@ if __name__ == "__main__":
         and not _early_report_args.evidence_review_queue
         and not _early_report_args.scan_open_predictions
         and not _early_report_args.strong_rejections
+        and not _early_report_args.backfill_lineage_scars
         and not _early_report_args.review_recent
         and not _early_report_args.apply_suggested_grades
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --review-recent, or --apply-suggested-grades."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --backfill-lineage-scars, --review-recent, or --apply-suggested-grades."
         )
         sys.exit(1)
     if (
@@ -3025,6 +3048,7 @@ if __name__ == "__main__":
         or _early_report_args.prediction is not None
         or _early_report_args.strong_rejections
         or _early_report_args.strong_rejection is not None
+        or _early_report_args.backfill_lineage_scars
         or _early_report_args.review_recent
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
@@ -3156,6 +3180,10 @@ if __name__ == "__main__":
             sys.exit(1)
         if _early_report_args.strong_rejections:
             _print_strong_rejections_list(limit=_early_report_args.limit or 20)
+        if _early_report_args.backfill_lineage_scars:
+            _print_lineage_backfill_report(
+                _backfill_lineage_scars(limit=_early_report_args.limit)
+            )
         if (
             _early_report_args.strong_rejection is not None
             and not _print_strong_rejection_detail(_early_report_args.strong_rejection)
@@ -3442,7 +3470,7 @@ def parse_args():
         type=int,
         default=None,
         metavar="N",
-        help="Optional limit for scan, evidence-list, review-recent, outcome-review-queue, evidence-review-queue, or strong-rejection list commands",
+        help="Optional limit for scan, evidence-list, review-recent, outcome-review-queue, evidence-review-queue, strong-rejection list, or lineage backfill commands",
     )
     parser.add_argument(
         "--star",
@@ -3660,6 +3688,11 @@ def parse_args():
         default=None,
         metavar="ID",
         help="Show concise lineage/scar metadata for a stored strong rejection id and exit",
+    )
+    parser.add_argument(
+        "--backfill-lineage-scars",
+        action="store_true",
+        help="Offline repair pass: backfill historical Phase 5 lineage/scar metadata and exit",
     )
     parser.add_argument(
         "--populate-scar-summaries",
@@ -4616,6 +4649,279 @@ def _build_strong_rejection_scar_summary(
             scar_summary["summary"] = parent_summary
 
     return scar_summary
+
+
+def _lineage_payload(row: dict | None) -> dict:
+    """Extract only the persisted lineage fields from one row payload."""
+    payload = row if isinstance(row, dict) else {}
+    return {
+        "lineage_root_id": payload.get("lineage_root_id"),
+        "parent_transmission_number": payload.get("parent_transmission_number"),
+        "parent_strong_rejection_id": payload.get("parent_strong_rejection_id"),
+        "lineage_change": payload.get("lineage_change"),
+    }
+
+
+def _lineage_has_parent(row: dict | None) -> bool:
+    """Return whether a row already points at a saved lineage parent."""
+    payload = row if isinstance(row, dict) else {}
+    return (
+        payload.get("parent_transmission_number") is not None
+        or payload.get("parent_strong_rejection_id") is not None
+    )
+
+
+def _lineage_metadata_complete(row: dict | None) -> bool:
+    """Treat root-only rows as complete and require lineage_change for linked rows."""
+    payload = row if isinstance(row, dict) else {}
+    lineage_root_id = payload.get("lineage_root_id")
+    if not isinstance(lineage_root_id, str) or not lineage_root_id.strip():
+        return False
+    if _lineage_has_parent(payload):
+        return isinstance(payload.get("lineage_change"), dict)
+    return True
+
+
+def _merge_missing_lineage_metadata(existing: dict | None, resolved: dict | None) -> dict | None:
+    """Fill only missing lineage fields, skipping conservative conflicts."""
+    current = _lineage_payload(existing)
+    candidate = _lineage_payload(resolved)
+    if not any(value is not None for value in candidate.values()):
+        return None
+
+    merged = dict(current)
+    changed = False
+    for key in (
+        "lineage_root_id",
+        "parent_transmission_number",
+        "parent_strong_rejection_id",
+    ):
+        existing_value = current.get(key)
+        resolved_value = candidate.get(key)
+        if existing_value is not None and resolved_value is not None and existing_value != resolved_value:
+            return None
+        if existing_value is None and resolved_value is not None:
+            merged[key] = resolved_value
+            changed = True
+
+    existing_change = current.get("lineage_change")
+    resolved_change = candidate.get("lineage_change")
+    if (
+        existing_change is None
+        and isinstance(resolved_change, dict)
+        and resolved_change
+    ):
+        merged["lineage_change"] = resolved_change
+        changed = True
+
+    return merged if changed else None
+
+
+def _historical_strong_rejection_candidate(row: dict | None) -> dict | None:
+    """Rebuild the narrow candidate fields needed for conservative scar extraction."""
+    payload = row if isinstance(row, dict) else {}
+    try:
+        total_score = float(payload.get("total_score"))
+    except (TypeError, ValueError):
+        return None
+
+    validation = payload.get("validation") if isinstance(payload.get("validation"), dict) else {}
+    connection_payload = (
+        payload.get("connection_payload")
+        if isinstance(payload.get("connection_payload"), dict)
+        else {}
+    )
+    claim_provenance = (
+        validation.get("claim_provenance")
+        if isinstance(validation.get("claim_provenance"), dict)
+        else {}
+    )
+    prediction_quality = (
+        validation.get("prediction_quality")
+        if isinstance(validation.get("prediction_quality"), dict)
+        else {}
+    )
+    rejection_reasons = [
+        str(reason).strip()
+        for reason in (payload.get("rejection_reasons") or [])
+        if str(reason).strip()
+    ]
+    if not rejection_reasons and not claim_provenance and not prediction_quality:
+        return None
+
+    mechanism_typing = (
+        payload.get("mechanism_typing")
+        if isinstance(payload.get("mechanism_typing"), dict)
+        else None
+    ) or (
+        validation.get("mechanism_typing")
+        if isinstance(validation.get("mechanism_typing"), dict)
+        else None
+    )
+    if mechanism_typing is None and connection_payload:
+        mechanism_typing = normalize_mechanism_typing(connection_payload)
+    if mechanism_typing is None:
+        mechanism_typing = {
+            "mechanism_type": _clean_inline_text(payload.get("mechanism_type"))
+            or "legacy_unknown",
+            "mechanism_type_confidence": 1.0,
+        }
+
+    return {
+        "total_score": total_score,
+        "should_transmit": False,
+        "passes_threshold": True,
+        "semantic_duplicate": False,
+        "boring": False,
+        "white_detected": False,
+        "distance_ok": True,
+        "adversarial_ok": True,
+        "invariance_ok": True,
+        "prediction_quality_ok": prediction_quality.get("passes"),
+        "validation_reasons": rejection_reasons,
+        "stage_failures": rejection_reasons,
+        "claim_provenance": claim_provenance,
+        "mechanism_typing": mechanism_typing,
+        "prediction_quality": prediction_quality,
+    }
+
+
+def _backfill_lineage_scars(limit: int | None = None) -> dict:
+    """Run a narrow offline repair pass for historical Phase 5 lineage/scar metadata."""
+    before_counts = get_lineage_backfill_completion_counts()
+    report = {
+        "transmissions_backfilled": 0,
+        "strong_rejections_backfilled": 0,
+        "lineage_roots_created": 0,
+        "scars_created": 0,
+        "rows_skipped": 0,
+    }
+
+    for row in list_transmissions_for_lineage_backfill(limit=limit):
+        if _lineage_metadata_complete(row):
+            report["rows_skipped"] += 1
+            continue
+        mechanism_signature = (row.get("mechanism_signature") or "").strip()
+        source_domain = _clean_inline_text(row.get("source_domain"))
+        if (
+            not mechanism_signature
+            or source_domain is None
+            or _clean_inline_text(row.get("timestamp")) is None
+        ):
+            report["rows_skipped"] += 1
+            continue
+        merged_lineage = _merge_missing_lineage_metadata(
+            row,
+            resolve_candidate_lineage_metadata(
+                source_domain=source_domain,
+                target_domain=_clean_inline_text(row.get("target_domain")),
+                mechanism_signature=mechanism_signature,
+                record_kind="transmission",
+                before_timestamp=row.get("timestamp"),
+                before_transmission_number=row.get("transmission_number"),
+            ),
+        )
+        if merged_lineage is None:
+            report["rows_skipped"] += 1
+            continue
+        if save_transmission_lineage_metadata(
+            int(row["transmission_number"]),
+            lineage_root_id=merged_lineage.get("lineage_root_id"),
+            parent_transmission_number=merged_lineage.get(
+                "parent_transmission_number"
+            ),
+            parent_strong_rejection_id=merged_lineage.get(
+                "parent_strong_rejection_id"
+            ),
+            lineage_change=merged_lineage.get("lineage_change"),
+            scar_summary=row.get("scar_summary"),
+        ):
+            report["transmissions_backfilled"] += 1
+        else:
+            report["rows_skipped"] += 1
+
+    for row in list_strong_rejections_for_lineage_backfill(limit=limit):
+        lineage_payload = _lineage_payload(row)
+        scar_summary = row.get("scar_summary")
+        row_updated = False
+
+        if not _lineage_metadata_complete(row):
+            connection_payload = (
+                row.get("connection_payload")
+                if isinstance(row.get("connection_payload"), dict)
+                else None
+            )
+            source_domain = _clean_inline_text(row.get("seed_domain"))
+            mechanism_signature = (
+                build_mechanism_signature(connection_payload)
+                if isinstance(connection_payload, dict)
+                else ""
+            )
+            if (
+                mechanism_signature
+                and source_domain is not None
+                and _clean_inline_text(row.get("timestamp")) is not None
+            ):
+                merged_lineage = _merge_missing_lineage_metadata(
+                    row,
+                    resolve_candidate_lineage_metadata(
+                        source_domain=source_domain,
+                        target_domain=_clean_inline_text(row.get("target_domain")),
+                        mechanism_signature=mechanism_signature,
+                        record_kind="strong_rejection",
+                        before_timestamp=row.get("timestamp"),
+                        before_strong_rejection_id=row.get("id"),
+                    ),
+                )
+                if merged_lineage is not None:
+                    lineage_payload = merged_lineage
+                    row_updated = True
+
+        if scar_summary is None:
+            candidate = _historical_strong_rejection_candidate(row)
+            if candidate is not None:
+                analysis = _strong_rejection_analysis(candidate)
+                if analysis.get("eligible"):
+                    built_scar_summary = _build_strong_rejection_scar_summary(
+                        candidate,
+                        analysis,
+                        lineage_payload,
+                    )
+                    if isinstance(built_scar_summary, dict) and built_scar_summary:
+                        scar_summary = built_scar_summary
+                        row_updated = True
+
+        if not row_updated:
+            report["rows_skipped"] += 1
+            continue
+        if save_strong_rejection_lineage_metadata(
+            int(row["id"]),
+            lineage_root_id=lineage_payload.get("lineage_root_id"),
+            parent_transmission_number=lineage_payload.get(
+                "parent_transmission_number"
+            ),
+            parent_strong_rejection_id=lineage_payload.get(
+                "parent_strong_rejection_id"
+            ),
+            lineage_change=lineage_payload.get("lineage_change"),
+            scar_summary=scar_summary,
+        ):
+            report["strong_rejections_backfilled"] += 1
+        else:
+            report["rows_skipped"] += 1
+
+    after_counts = get_lineage_backfill_completion_counts()
+    report["lineage_roots_created"] = max(
+        0,
+        int(after_counts.get("distinct_lineage_roots", 0) or 0)
+        - int(before_counts.get("distinct_lineage_roots", 0) or 0),
+    )
+    report["scars_created"] = max(
+        0,
+        int(after_counts.get("strong_rejection_scars", 0) or 0)
+        - int(before_counts.get("strong_rejection_scars", 0) or 0),
+    )
+    return report
 
 
 def _handle_convergence(
@@ -5679,6 +5985,7 @@ def main():
             args.strong_rejections,
             args.strong_rejection is not None,
             args.strong_rejection_lineage is not None,
+            args.backfill_lineage_scars,
             args.populate_scar_summaries,
             args.mark_salvaged is not None,
             args.dismiss_strong_rejection is not None,
@@ -5726,7 +6033,7 @@ def main():
         sys.exit(1)
     if strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one of --strong-rejections, --strong-rejection, --strong-rejection-lineage, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
+            "  [!] Use only one of --strong-rejections, --strong-rejection, --strong-rejection-lineage, --backfill-lineage-scars, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and (
@@ -5768,11 +6075,12 @@ def main():
         and not args.evidence_review_queue
         and not args.scan_open_predictions
         and not args.strong_rejections
+        and not args.backfill_lineage_scars
         and not args.review_recent
         and not args.apply_suggested_grades
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --review-recent, or --apply-suggested-grades."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --backfill-lineage-scars, --review-recent, or --apply-suggested-grades."
         )
         sys.exit(1)
     if (
@@ -5974,6 +6282,10 @@ def main():
     if args.strong_rejection_lineage is not None:
         if not _print_strong_rejection_lineage(args.strong_rejection_lineage):
             sys.exit(1)
+        return
+
+    if args.backfill_lineage_scars:
+        _print_lineage_backfill_report(_backfill_lineage_scars(limit=args.limit))
         return
 
     if args.populate_scar_summaries:

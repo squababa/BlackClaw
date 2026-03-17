@@ -5339,6 +5339,54 @@ def get_transmission_lineage_metadata(transmission_number: int) -> dict | None:
     return payload
 
 
+def _transmission_lineage_row_to_dict(row: sqlite3.Row | dict) -> dict:
+    """Normalize one transmission row for historical lineage backfill scans."""
+    payload = dict(row)
+    payload["timestamp"] = _clean_optional_text(payload.get("timestamp"))
+    payload["source_domain"] = _clean_optional_text(payload.get("source_domain"))
+    payload["target_domain"] = _clean_optional_text(payload.get("target_domain"))
+    payload["mechanism_signature"] = _clean_optional_text(
+        payload.get("mechanism_signature")
+    )
+    payload["lineage_root_id"] = _clean_optional_text(payload.get("lineage_root_id"))
+    payload["lineage_change"] = _normalize_lineage_change(
+        payload.get("lineage_change_json")
+    )
+    payload["scar_summary"] = _normalize_scar_summary(payload.get("scar_summary_json"))
+    payload.pop("lineage_change_json", None)
+    payload.pop("scar_summary_json", None)
+    return payload
+
+
+def list_transmissions_for_lineage_backfill(limit: int | None = None) -> list[dict]:
+    """List historical transmissions oldest-first for offline lineage backfill."""
+    conn = _connect()
+    query = """SELECT
+            t.id,
+            t.transmission_number,
+            t.timestamp,
+            t.mechanism_signature,
+            t.parent_transmission_number,
+            t.parent_strong_rejection_id,
+            t.lineage_root_id,
+            t.lineage_change_json,
+            t.scar_summary_json,
+            e.seed_domain AS source_domain,
+            e.jump_target_domain AS target_domain
+        FROM transmissions t
+        LEFT JOIN explorations e
+            ON e.id = t.exploration_id
+        ORDER BY t.transmission_number ASC, t.id ASC"""
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        safe_limit = max(1, int(limit))
+        query += "\n        LIMIT ?"
+        params = (safe_limit,)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [_transmission_lineage_row_to_dict(row) for row in rows]
+
+
 def save_strong_rejection_lineage_metadata(
     rejection_id: int,
     *,
@@ -5421,6 +5469,73 @@ def get_strong_rejection_lineage_metadata(rejection_id: int) -> dict | None:
     payload.pop("lineage_change_json", None)
     payload.pop("scar_summary_json", None)
     return payload
+
+
+def list_strong_rejections_for_lineage_backfill(limit: int | None = None) -> list[dict]:
+    """List historical strong rejections oldest-first for offline repair passes."""
+    conn = _connect()
+    query = """SELECT
+            id,
+            timestamp,
+            seed_domain,
+            target_domain,
+            total_score,
+            mechanism_type,
+            rejection_stage,
+            rejection_reasons_json,
+            connection_payload_json,
+            validation_json,
+            evidence_map_json,
+            mechanism_typing_json,
+            parent_transmission_number,
+            parent_strong_rejection_id,
+            lineage_root_id,
+            lineage_change_json,
+            scar_summary_json,
+            status,
+            notes
+        FROM strong_rejections
+        ORDER BY timestamp ASC, id ASC"""
+    params: tuple[object, ...] = ()
+    if limit is not None:
+        safe_limit = max(1, int(limit))
+        query += "\n        LIMIT ?"
+        params = (safe_limit,)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [_strong_rejection_row_to_dict(row) for row in rows]
+
+
+def get_lineage_backfill_completion_counts() -> dict:
+    """Return lightweight counters for offline lineage/scar backfill reporting."""
+    conn = _connect()
+    transmission_roots = conn.execute(
+        "SELECT lineage_root_id FROM transmissions"
+    ).fetchall()
+    rejection_rows = conn.execute(
+        "SELECT lineage_root_id, scar_summary_json FROM strong_rejections"
+    ).fetchall()
+    conn.close()
+
+    lineage_roots = {
+        clean_root
+        for clean_root in (
+            _clean_optional_text(row["lineage_root_id"]) for row in transmission_roots
+        )
+        if clean_root is not None
+    }
+    scar_count = 0
+    for row in rejection_rows:
+        clean_root = _clean_optional_text(row["lineage_root_id"])
+        if clean_root is not None:
+            lineage_roots.add(clean_root)
+        if _normalize_scar_summary(row["scar_summary_json"]) is not None:
+            scar_count += 1
+
+    return {
+        "distinct_lineage_roots": len(lineage_roots),
+        "strong_rejection_scars": scar_count,
+    }
 
 
 def save_transmission_dive(transmission_number: int, dive_result: str) -> bool:
@@ -5731,6 +5846,9 @@ def resolve_candidate_lineage_metadata(
     target_domain: str | None,
     mechanism_signature: str | None,
     record_kind: str,
+    before_timestamp: str | None = None,
+    before_transmission_number: int | None = None,
+    before_strong_rejection_id: int | None = None,
 ) -> dict:
     """Resolve parent/root lineage metadata for a not-yet-saved transmission or strong rejection."""
     if record_kind not in {"transmission", "strong_rejection"}:
@@ -5739,6 +5857,7 @@ def resolve_candidate_lineage_metadata(
     clean_source = _clean_optional_text(source_domain)
     clean_target = _clean_optional_text(target_domain)
     clean_signature = (mechanism_signature or "").strip()
+    historical_cutoff = _clean_optional_text(before_timestamp)
     if not clean_signature:
         return _empty_lineage_resolution()
 
@@ -5776,6 +5895,15 @@ def resolve_candidate_lineage_metadata(
         revisit_candidates: list[dict] = []
 
         for row in transmission_rows:
+            row_timestamp = _clean_optional_text(row["timestamp"])
+            if historical_cutoff is not None:
+                if row_timestamp is None or row_timestamp > historical_cutoff:
+                    continue
+                if row_timestamp == historical_cutoff:
+                    if before_transmission_number is None:
+                        continue
+                    if int(row["transmission_number"]) >= int(before_transmission_number):
+                        continue
             existing_signature = (row["mechanism_signature"] or "").strip()
             if not existing_signature:
                 continue
@@ -5812,6 +5940,15 @@ def resolve_candidate_lineage_metadata(
                 revisit_candidates.append(candidate)
 
         for row in rejection_rows:
+            row_timestamp = _clean_optional_text(row["timestamp"])
+            if historical_cutoff is not None:
+                if row_timestamp is None or row_timestamp > historical_cutoff:
+                    continue
+                if row_timestamp == historical_cutoff:
+                    if before_strong_rejection_id is None:
+                        continue
+                    if int(row["id"]) >= int(before_strong_rejection_id):
+                        continue
             payload = _json_object_or_empty(row["connection_payload_json"])
             if not payload:
                 continue
