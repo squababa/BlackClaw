@@ -1155,14 +1155,14 @@ def save_discovered_domain(
     queries_json = json.dumps(seed_queries or [])
     conn = _connect()
     try:
-        conn.execute(
+        cursor = conn.execute(
             """INSERT OR IGNORE INTO discovered_domains
             (name, category, seed_queries, source_transmission, source_domain, discovered_at)
             VALUES (?, ?, ?, ?, ?, ?)""",
             (normalized, category or "Discovered", queries_json, source_transmission, source_domain, _now()),
         )
         conn.commit()
-        return conn.total_changes > 0
+        return cursor.rowcount > 0
     finally:
         conn.close()
 
@@ -1221,12 +1221,12 @@ def set_discovered_domain_enabled(name: str, enabled: bool) -> bool:
     """Enable or disable a discovered domain. Returns True if the row existed."""
     normalized = " ".join((name or "").split()).title()
     conn = _connect()
-    conn.execute(
+    cursor = conn.execute(
         "UPDATE discovered_domains SET enabled = ? WHERE name = ?",
         (1 if enabled else 0, normalized),
     )
     conn.commit()
-    changed = conn.total_changes > 0
+    changed = cursor.rowcount > 0
     conn.close()
     return changed
 

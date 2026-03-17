@@ -5634,9 +5634,9 @@ def _get_builtin_domain_names() -> set[str]:
     return _BUILTIN_DOMAIN_NAMES
 
 
-def _maybe_discover_domain(connection: dict, transmission_number: int, source_domain: str) -> None:
-    """Extract target_domain from a transmitted connection and save it as a discovered domain."""
-    target = (connection.get("target_domain") or "").strip()
+def _maybe_discover_domain(target_domain: str, transmission_number: int, source_domain: str) -> None:
+    """Save a lateral-jump target as a discovered domain for future seeding."""
+    target = (target_domain or "").strip()
     if not target:
         return
 
@@ -5831,7 +5831,7 @@ def _score_store_and_transmit(
         print_transmission(formatted)
         transmitted = True
         try:
-            _maybe_discover_domain(connection, tx_num, source_domain)
+            _maybe_discover_domain(target_domain, tx_num, source_domain)
         except Exception:
             pass
 
