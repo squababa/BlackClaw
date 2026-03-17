@@ -1541,6 +1541,11 @@ def _prediction_row_to_dict(row: sqlite3.Row | dict) -> dict:
     )
     payload["last_scan_error"] = _clean_optional_text(payload.get("last_scan_error"))
     payload["needs_review"] = bool(_normalize_bool_flag(payload.get("needs_review")))
+    payload["lineage_root_id"] = _clean_optional_text(payload.get("lineage_root_id"))
+    payload["parent_transmission_number"] = payload.get("parent_transmission_number")
+    payload["parent_strong_rejection_id"] = payload.get(
+        "parent_strong_rejection_id"
+    )
     payload["prediction_json"] = parsed_prediction
     payload["prediction_quality"] = parsed_quality if parsed_quality else None
     payload.pop("prediction_quality_json", None)
@@ -3538,29 +3543,34 @@ def get_prediction(id: int) -> dict | None:
     conn = _connect()
     row = conn.execute(
         """SELECT
-            id,
-            transmission_number,
-            prediction,
-            test,
-            metric,
-            prediction_json,
-            prediction_quality_json,
-            prediction_quality_score,
-            status,
-            outcome_status,
-            validation_source,
-            validation_note,
-            validated_at,
-            utility_class,
-            last_scanned_at,
-            last_scan_status,
-            last_scan_error,
-            needs_review,
-            notes,
-            created_at,
-            updated_at
-        FROM predictions
-        WHERE id = ?
+            p.id,
+            p.transmission_number,
+            p.prediction,
+            p.test,
+            p.metric,
+            p.prediction_json,
+            p.prediction_quality_json,
+            p.prediction_quality_score,
+            p.status,
+            p.outcome_status,
+            p.validation_source,
+            p.validation_note,
+            p.validated_at,
+            p.utility_class,
+            p.last_scanned_at,
+            p.last_scan_status,
+            p.last_scan_error,
+            p.needs_review,
+            p.notes,
+            p.created_at,
+            p.updated_at,
+            t.parent_transmission_number,
+            t.parent_strong_rejection_id,
+            t.lineage_root_id
+        FROM predictions p
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        WHERE p.id = ?
         LIMIT 1""",
         (id,),
     ).fetchone()
@@ -3594,6 +3604,9 @@ def list_open_predictions_for_evidence_scan(limit: int | None = 10) -> list[dict
             p.created_at,
             p.updated_at,
             t.mechanism_typing_json,
+            t.parent_transmission_number,
+            t.parent_strong_rejection_id,
+            t.lineage_root_id,
             e.seed_domain AS source_domain,
             e.jump_target_domain AS target_domain,
             e.depth_score,
@@ -3809,6 +3822,12 @@ def _prediction_evidence_row_to_dict(row: sqlite3.Row | dict) -> dict:
     payload["notes"] = _clean_optional_text(payload.get("notes"))
     payload["created_at"] = _clean_optional_text(payload.get("created_at"))
     payload["updated_at"] = _clean_optional_text(payload.get("updated_at"))
+    payload["lineage_root_id"] = _clean_optional_text(payload.get("lineage_root_id"))
+    payload["transmission_number"] = payload.get("transmission_number")
+    payload["parent_transmission_number"] = payload.get("parent_transmission_number")
+    payload["parent_strong_rejection_id"] = payload.get(
+        "parent_strong_rejection_id"
+    )
     score = _coerce_optional_float(payload.get("score"))
     payload["score"] = round(score, 3) if score is not None else None
     return payload
@@ -3821,26 +3840,34 @@ def list_prediction_evidence_hits(
     """List stored evidence hits newest-first, optionally filtered to one prediction."""
     conn = _connect()
     query = """SELECT
-            id,
-            prediction_id,
-            scan_timestamp,
-            source_type,
-            title,
-            url,
-            snippet,
-            classification,
-            score,
-            query_used,
-            review_status,
-            notes,
-            created_at,
-            updated_at
-        FROM prediction_evidence_hits"""
+            h.id,
+            h.prediction_id,
+            p.transmission_number,
+            h.scan_timestamp,
+            h.source_type,
+            h.title,
+            h.url,
+            h.snippet,
+            h.classification,
+            h.score,
+            h.query_used,
+            h.review_status,
+            h.notes,
+            h.created_at,
+            h.updated_at,
+            t.parent_transmission_number,
+            t.parent_strong_rejection_id,
+            t.lineage_root_id
+        FROM prediction_evidence_hits h
+        LEFT JOIN predictions p
+            ON p.id = h.prediction_id
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number"""
     params: list[object] = []
     if prediction_id is not None:
-        query += "\n        WHERE prediction_id = ?"
+        query += "\n        WHERE h.prediction_id = ?"
         params.append(int(prediction_id))
-    query += "\n        ORDER BY scan_timestamp DESC, id DESC"
+    query += "\n        ORDER BY h.scan_timestamp DESC, h.id DESC"
     if limit is not None:
         query += "\n        LIMIT ?"
         params.append(max(1, int(limit)))
@@ -3854,22 +3881,30 @@ def get_prediction_evidence_hit(id: int) -> dict | None:
     conn = _connect()
     row = conn.execute(
         """SELECT
-            id,
-            prediction_id,
-            scan_timestamp,
-            source_type,
-            title,
-            url,
-            snippet,
-            classification,
-            score,
-            query_used,
-            review_status,
-            notes,
-            created_at,
-            updated_at
-        FROM prediction_evidence_hits
-        WHERE id = ?
+            h.id,
+            h.prediction_id,
+            p.transmission_number,
+            h.scan_timestamp,
+            h.source_type,
+            h.title,
+            h.url,
+            h.snippet,
+            h.classification,
+            h.score,
+            h.query_used,
+            h.review_status,
+            h.notes,
+            h.created_at,
+            h.updated_at,
+            t.parent_transmission_number,
+            t.parent_strong_rejection_id,
+            t.lineage_root_id
+        FROM prediction_evidence_hits h
+        LEFT JOIN predictions p
+            ON p.id = h.prediction_id
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        WHERE h.id = ?
         LIMIT 1""",
         (id,),
     ).fetchone()
@@ -3927,30 +3962,38 @@ def list_prediction_evidence_review_queue(limit: int = 20) -> list[dict]:
     safe_limit = max(1, int(limit))
     rows = conn.execute(
         """SELECT
-            id,
-            prediction_id,
-            scan_timestamp,
-            source_type,
-            title,
-            url,
-            snippet,
-            classification,
-            score,
-            query_used,
-            review_status,
-            notes,
-            created_at,
-            updated_at
-        FROM prediction_evidence_hits
-        WHERE LOWER(COALESCE(review_status, '')) = 'unreviewed'
+            h.id,
+            h.prediction_id,
+            p.transmission_number,
+            h.scan_timestamp,
+            h.source_type,
+            h.title,
+            h.url,
+            h.snippet,
+            h.classification,
+            h.score,
+            h.query_used,
+            h.review_status,
+            h.notes,
+            h.created_at,
+            h.updated_at,
+            t.parent_transmission_number,
+            t.parent_strong_rejection_id,
+            t.lineage_root_id
+        FROM prediction_evidence_hits h
+        LEFT JOIN predictions p
+            ON p.id = h.prediction_id
+        LEFT JOIN transmissions t
+            ON t.transmission_number = p.transmission_number
+        WHERE LOWER(COALESCE(h.review_status, '')) = 'unreviewed'
         ORDER BY
-            CASE LOWER(COALESCE(classification, ''))
+            CASE LOWER(COALESCE(h.classification, ''))
                 WHEN 'possible_support' THEN 0
                 WHEN 'possible_contradiction' THEN 1
                 ELSE 2
             END ASC,
-            COALESCE(NULLIF(scan_timestamp, ''), created_at) DESC,
-            id DESC
+            COALESCE(NULLIF(h.scan_timestamp, ''), h.created_at) DESC,
+            h.id DESC
         LIMIT ?""",
         (safe_limit,),
     ).fetchall()
@@ -5866,6 +5909,64 @@ def resolve_candidate_lineage_metadata(
                 "details": details,
             },
         }
+    finally:
+        conn.close()
+
+
+def resolve_convergence_lineage_metadata(domain_a: str, domain_b: str) -> dict:
+    """Resolve conservative lineage inheritance for convergence transmissions."""
+    clean_a = _clean_optional_text(domain_a)
+    clean_b = _clean_optional_text(domain_b)
+    if clean_a is None or clean_b is None:
+        return _empty_lineage_resolution()
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT
+                t.transmission_number,
+                t.lineage_root_id
+            FROM transmissions t
+            LEFT JOIN explorations e ON e.id = t.exploration_id
+            WHERE (
+                LOWER(COALESCE(e.seed_domain, '')) = LOWER(?)
+                AND LOWER(COALESCE(e.jump_target_domain, '')) = LOWER(?)
+            )
+            OR (
+                LOWER(COALESCE(e.seed_domain, '')) = LOWER(?)
+                AND LOWER(COALESCE(e.jump_target_domain, '')) = LOWER(?)
+            )
+            ORDER BY t.transmission_number DESC, t.id DESC""",
+            (clean_a, clean_b, clean_b, clean_a),
+        ).fetchall()
+        for row in rows:
+            lineage_root_id = _clean_optional_text(row["lineage_root_id"])
+            if lineage_root_id is None:
+                continue
+            parent_transmission_number = int(row["transmission_number"])
+            return {
+                "parent_transmission_number": parent_transmission_number,
+                "parent_strong_rejection_id": None,
+                "lineage_root_id": lineage_root_id,
+                "lineage_change": {
+                    "event_types": ["domain_pair_revisit"],
+                    "summary": _lineage_summary_text(
+                        "transmission",
+                        "transmission",
+                        parent_transmission_number,
+                        "domain_pair_revisit",
+                        clean_a,
+                        clean_b,
+                    ),
+                    "details": {
+                        "match_type": "convergence_pair",
+                        "parent_kind": "transmission",
+                        "source_domain": clean_a,
+                        "target_domain": clean_b,
+                    },
+                },
+            }
+        return _empty_lineage_resolution()
     finally:
         conn.close()
 
