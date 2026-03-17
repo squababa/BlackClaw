@@ -4,6 +4,7 @@ Central provider entrypoint for all LLM calls.
 """
 import hashlib
 import math
+import os
 
 try:
     import anthropic
@@ -22,6 +23,8 @@ from config import (
     MODEL,
     OLLAMA_BASE_URL,
 )
+
+from embeddings import LocalEmbedder
 from llm_router import LLMRouter
 from store import record_llm_usage
 
@@ -132,7 +135,10 @@ class ClaudeClient:
         return self._ClaudeResponse(text)
 
     def embed_content(self, text: str) -> list[float]:
-        """Return a deterministic local embedding vector for semantic dedup checks."""
+        """Return a semantic embedding vector, falling back to hash if unavailable."""
+        result = LocalEmbedder.embed(text)
+        if result is not None:
+            return result
         return _local_dedup_embedding(text)
 
 
@@ -173,7 +179,27 @@ class OllamaClient:
         return self._OllamaResponse(text, payload)
 
     def embed_content(self, text: str) -> list[float]:
-        """Deterministic local fallback embedding for semantic dedup when using Ollama."""
+        """Semantic embedding for dedup: prefer Ollama model, then local transformer, then hash."""
+        ollama_model = os.environ.get("OLLAMA_EMBEDDING_MODEL")
+        if ollama_model:
+            try:
+                import requests
+
+                resp = requests.post(
+                    f"{self._router._base_url}/api/embeddings",
+                    json={"model": ollama_model, "prompt": text},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                embedding = resp.json().get("embedding")
+                if isinstance(embedding, list) and embedding:
+                    return [float(v) for v in embedding]
+            except Exception:
+                pass  # fall through to local model
+
+        result = LocalEmbedder.embed(text)
+        if result is not None:
+            return result
         return _local_dedup_embedding(text)
 
 
@@ -183,13 +209,19 @@ _CLIENT = None
 def get_provider_status() -> dict[str, object]:
     """Describe the active generation and semantic dedup embedding path."""
     if LLM_PROVIDER == "ollama":
-        embedding_provider = "local"
-        embedding_model = None
-        embedding_path = "OllamaClient.embed_content (deterministic hashed fallback)"
+        ollama_emb = os.environ.get("OLLAMA_EMBEDDING_MODEL")
+        if ollama_emb:
+            embedding_provider = "ollama"
+            embedding_model = ollama_emb
+            embedding_path = "OllamaClient.embed_content (Ollama /api/embeddings)"
+        else:
+            embedding_provider = "local"
+            embedding_model = "all-MiniLM-L6-v2"
+            embedding_path = "OllamaClient.embed_content (sentence-transformers)"
     elif LLM_PROVIDER == "claude":
         embedding_provider = "local"
-        embedding_model = None
-        embedding_path = "ClaudeClient.embed_content (deterministic hashed fallback)"
+        embedding_model = "all-MiniLM-L6-v2"
+        embedding_path = "ClaudeClient.embed_content (sentence-transformers)"
     else:
         embedding_provider = "gemini"
         embedding_model = EMBEDDING_MODEL
