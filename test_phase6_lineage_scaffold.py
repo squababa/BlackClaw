@@ -178,6 +178,40 @@ def _build_strong_rejection_candidate() -> dict:
     }
 
 
+def _save_legacy_strong_rejection(
+    db_path,
+    *,
+    seed_domain: str = "systems.test",
+    target_domain: str = "latency.test",
+    candidate: dict | None = None,
+) -> int:
+    candidate_payload = candidate or _build_strong_rejection_candidate()
+    analysis = main._strong_rejection_analysis(candidate_payload)
+    exploration_id = _insert_exploration(
+        db_path,
+        seed_domain=seed_domain,
+        target_domain=target_domain,
+    )
+    return store.save_strong_rejection(
+        exploration_id=exploration_id,
+        seed_domain=seed_domain,
+        target_domain=target_domain,
+        total_score=candidate_payload["total_score"],
+        novelty_score=candidate_payload["novelty_score"],
+        distance_score=candidate_payload["distance_score"],
+        depth_score=candidate_payload["depth_score"],
+        prediction_quality_score=candidate_payload["prediction_quality_score"],
+        mechanism_type=candidate_payload["prepared_connection"]["mechanism_type"],
+        rejection_stage=analysis["rejection_stage"],
+        rejection_reasons=candidate_payload["stage_failures"],
+        salvage_reason=main.summarize_strong_rejection_reason(candidate_payload),
+        connection_payload=candidate_payload["prepared_connection"],
+        validation=candidate_payload["validation_log"],
+        evidence_map=candidate_payload["prepared_connection"]["evidence_map"],
+        mechanism_typing=candidate_payload["prepared_connection"]["mechanism_typing"],
+    )
+
+
 def test_lineage_and_scar_payload_round_trip_for_transmission_and_rejection(temp_db) -> None:
     exploration_id = _insert_exploration(temp_db)
 
@@ -870,3 +904,153 @@ def test_score_store_and_transmit_increments_matching_parent_scar_count(
     assert scar_summary["summary"] == parent_scar_summary["summary"]
     assert scar_summary["details"]["failure_category"] == "provenance"
     assert child_row["parent_strong_rejection_id"] == parent_rejection_id
+
+
+def test_backfill_lineage_scars_repairs_legacy_transmission_chain(temp_db) -> None:
+    connection = _build_connection(
+        mechanism="queue pressure amplifies response latency",
+        variable_mapping={"queue pressure": "response latency"},
+        prediction="response latency rises when queue pressure stays elevated",
+    )
+    mechanism_signature = store.build_mechanism_signature(connection)
+    parent_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    child_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=parent_exploration_id,
+        formatted_output="legacy parent transmission",
+        mechanism_signature=mechanism_signature,
+    )
+    store.save_transmission(
+        transmission_number=2,
+        exploration_id=child_exploration_id,
+        formatted_output="legacy child transmission",
+        mechanism_signature=mechanism_signature,
+    )
+
+    report = main._backfill_lineage_scars()
+
+    assert report["transmissions_backfilled"] == 1
+    assert report["strong_rejections_backfilled"] == 0
+    assert report["lineage_roots_created"] == 1
+    assert report["scars_created"] == 0
+
+    assert store.get_transmission_lineage_metadata(1) == {
+        "transmission_number": 1,
+        "lineage_root_id": "root-tx-1",
+        "parent_transmission_number": None,
+        "parent_strong_rejection_id": None,
+        "lineage_change": None,
+        "scar_summary": None,
+    }
+    child_meta = store.get_transmission_lineage_metadata(2)
+    assert child_meta["lineage_root_id"] == "root-tx-1"
+    assert child_meta["parent_transmission_number"] == 1
+    assert child_meta["parent_strong_rejection_id"] is None
+    assert child_meta["lineage_change"]["event_types"] == ["mechanism_evolved"]
+    assert "transmission #1" in child_meta["lineage_change"]["summary"]
+
+
+def test_backfill_lineage_scars_repairs_legacy_strong_rejection_scar(temp_db) -> None:
+    parent_rejection_id = _save_legacy_strong_rejection(temp_db)
+    child_rejection_id = _save_legacy_strong_rejection(temp_db)
+
+    report = main._backfill_lineage_scars()
+
+    assert report["transmissions_backfilled"] == 0
+    assert report["strong_rejections_backfilled"] == 2
+    assert report["lineage_roots_created"] == 1
+    assert report["scars_created"] == 2
+
+    parent_meta = store.get_strong_rejection_lineage_metadata(parent_rejection_id)
+    child_meta = store.get_strong_rejection_lineage_metadata(child_rejection_id)
+    parent_row = store.get_strong_rejection(parent_rejection_id)
+    child_row = store.get_strong_rejection(child_rejection_id)
+
+    assert parent_meta == {
+        "id": parent_rejection_id,
+        "lineage_root_id": f"root-rj-{parent_rejection_id}",
+        "parent_transmission_number": None,
+        "parent_strong_rejection_id": None,
+        "lineage_change": None,
+        "scar_summary": parent_row["scar_summary"],
+    }
+    assert child_meta["lineage_root_id"] == f"root-rj-{parent_rejection_id}"
+    assert child_meta["parent_transmission_number"] is None
+    assert child_meta["parent_strong_rejection_id"] == parent_rejection_id
+    assert child_meta["lineage_change"]["event_types"] == ["mechanism_evolved"]
+    assert (
+        child_meta["lineage_change"]["summary"]
+        == f"Mechanism evolved from strong rejection #{parent_rejection_id}."
+    )
+    assert parent_row["scar_summary"]["count"] == 1
+    assert child_row["scar_summary"]["count"] == 2
+    assert child_row["scar_summary"]["summary"] == parent_row["scar_summary"]["summary"]
+
+
+def test_backfill_lineage_scars_is_idempotent_on_rerun(temp_db) -> None:
+    connection = _build_connection(
+        mechanism="queue pressure amplifies response latency",
+        variable_mapping={"queue pressure": "response latency"},
+        prediction="response latency rises when queue pressure stays elevated",
+    )
+    mechanism_signature = store.build_mechanism_signature(connection)
+    transmission_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    child_transmission_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=transmission_exploration_id,
+        formatted_output="legacy parent transmission",
+        mechanism_signature=mechanism_signature,
+    )
+    store.save_transmission(
+        transmission_number=2,
+        exploration_id=child_transmission_exploration_id,
+        formatted_output="legacy child transmission",
+        mechanism_signature=mechanism_signature,
+    )
+    parent_rejection_id = _save_legacy_strong_rejection(temp_db)
+    child_rejection_id = _save_legacy_strong_rejection(temp_db)
+
+    first_report = main._backfill_lineage_scars()
+    first_snapshot = {
+        "tx1": store.get_transmission_lineage_metadata(1),
+        "tx2": store.get_transmission_lineage_metadata(2),
+        "rj1": store.get_strong_rejection(parent_rejection_id),
+        "rj2": store.get_strong_rejection(child_rejection_id),
+    }
+
+    second_report = main._backfill_lineage_scars()
+    second_snapshot = {
+        "tx1": store.get_transmission_lineage_metadata(1),
+        "tx2": store.get_transmission_lineage_metadata(2),
+        "rj1": store.get_strong_rejection(parent_rejection_id),
+        "rj2": store.get_strong_rejection(child_rejection_id),
+    }
+
+    assert first_report["transmissions_backfilled"] == 1
+    assert first_report["strong_rejections_backfilled"] == 2
+    assert second_report == {
+        "transmissions_backfilled": 0,
+        "strong_rejections_backfilled": 0,
+        "lineage_roots_created": 0,
+        "scars_created": 0,
+        "rows_skipped": 4,
+    }
+    assert second_snapshot == first_snapshot
