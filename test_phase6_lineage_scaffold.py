@@ -610,6 +610,134 @@ def test_resolve_lineage_prefers_stronger_signature_parent_over_same_domain_pair
     assert store.get_transmission_lineage_metadata(2)["lineage_root_id"] == "root-tx-2"
 
 
+def test_predictions_and_evidence_hits_remain_traceable_to_transmission_lineage(
+    temp_db,
+) -> None:
+    exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=exploration_id,
+        formatted_output="lineaged transmission",
+        connection_payload=_build_connection(
+            mechanism="queue pressure amplifies response latency",
+            variable_mapping={"queue pressure": "response latency"},
+            prediction="response latency rises when queue pressure stays elevated",
+        ),
+        lineage_root_id="root-tx-7",
+        parent_transmission_number=7,
+        parent_strong_rejection_id=3,
+    )
+
+    prediction_row = store.get_prediction(1)
+    assert prediction_row is not None
+    assert prediction_row["transmission_number"] == 1
+    assert prediction_row["lineage_root_id"] == "root-tx-7"
+    assert prediction_row["parent_transmission_number"] == 7
+    assert prediction_row["parent_strong_rejection_id"] == 3
+
+    scan_row = store.list_open_predictions_for_evidence_scan(limit=1)[0]
+    assert scan_row["lineage_root_id"] == "root-tx-7"
+    assert scan_row["parent_transmission_number"] == 7
+    assert scan_row["parent_strong_rejection_id"] == 3
+
+    store.save_prediction_evidence_scan(
+        1,
+        hits=[
+            {
+                "title": "Latency evidence",
+                "url": "https://target.test/evidence",
+                "query_used": "queue pressure response latency",
+                "snippet": "Queue pressure increases response latency during overload.",
+                "classification": "possible_support",
+            }
+        ],
+    )
+
+    evidence_hit = store.get_prediction_evidence_hit(1)
+    assert evidence_hit is not None
+    assert evidence_hit["prediction_id"] == 1
+    assert evidence_hit["transmission_number"] == 1
+    assert evidence_hit["lineage_root_id"] == "root-tx-7"
+    assert evidence_hit["parent_transmission_number"] == 7
+    assert evidence_hit["parent_strong_rejection_id"] == 3
+
+
+def test_handle_convergence_inherits_existing_lineage_from_prior_transmission(
+    temp_db,
+    monkeypatch,
+) -> None:
+    parent_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=parent_exploration_id,
+        formatted_output="parent transmission",
+        lineage_root_id="root-tx-1",
+    )
+    child_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+
+    monkeypatch.setattr(
+        main,
+        "check_convergence",
+        lambda *args, **kwargs: {
+            "domain_a": "systems.test",
+            "domain_b": "latency.test",
+            "times_found": 2,
+            "source_seeds": ["queue pressure"],
+            "needs_deep_dive": True,
+        },
+    )
+    monkeypatch.setattr(main, "deep_dive_convergence", lambda *args, **kwargs: "Deep dive")
+    monkeypatch.setattr(main, "_embed_transmission_text", lambda text: [0.1, 0.2])
+    monkeypatch.setattr(
+        main,
+        "is_semantic_duplicate",
+        lambda *args, **kwargs: (False, 0.0),
+    )
+    monkeypatch.setattr(main, "print_transmission", lambda formatted: None)
+
+    assert main._handle_convergence(
+        domain_a="systems.test",
+        domain_b="latency.test",
+        source_seed="queue pressure",
+        connection_description="Queue pressure amplifies response latency.",
+        exploration_id=child_exploration_id,
+    )
+
+    tx_meta = store.get_transmission_lineage_metadata(2)
+    assert tx_meta == {
+        "transmission_number": 2,
+        "lineage_root_id": "root-tx-1",
+        "parent_transmission_number": 1,
+        "parent_strong_rejection_id": None,
+        "lineage_change": {
+            "event_types": ["domain_pair_revisit"],
+            "summary": (
+                "Domain-pair revisit for systems.test -> latency.test "
+                "linked to transmission #1."
+            ),
+            "details": {
+                "match_type": "convergence_pair",
+                "parent_kind": "transmission",
+                "source_domain": "systems.test",
+                "target_domain": "latency.test",
+            },
+        },
+        "scar_summary": None,
+    }
+
+
 def test_score_store_and_transmit_saves_extracted_scar_summary(
     temp_db,
     monkeypatch,

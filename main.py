@@ -77,6 +77,7 @@ from store import (
     populate_passive_strong_rejection_scars,
     list_recent_review_items,
     resolve_candidate_lineage_metadata,
+    resolve_convergence_lineage_metadata,
 )
 from seed import pick_seed, resolve_seed_choice
 
@@ -1472,6 +1473,8 @@ def _print_prediction_evidence_hits(
         )
         print(
             f"{row.get('id')}\tpred={row.get('prediction_id')}\t"
+            f"tx={row.get('transmission_number') or '—'}\t"
+            f"root={row.get('lineage_root_id') or '—'}\t"
             f"{row.get('classification')}\t{row.get('review_status')}\t"
             f"score={score_text}\t{_short_timestamp(row.get('scan_timestamp'))}"
         )
@@ -1563,8 +1566,8 @@ def _print_prediction_evidence_review_queue(limit: int = 20):
 
     print(f"[PredictionEvidenceReviewQueue] Recent {len(rows)} unreviewed hits")
     print(
-        "evidence_hit_id\tprediction_id\tclassification\tscore\tsource_type\t"
-        "title\tquery\tscan_timestamp"
+        "evidence_hit_id\tprediction_id\ttx\troot\tclassification\tscore\t"
+        "source_type\ttitle\tquery\tscan_timestamp"
     )
     for row in rows:
         score_text = (
@@ -1572,6 +1575,8 @@ def _print_prediction_evidence_review_queue(limit: int = 20):
         )
         print(
             f"{row.get('id')}\t{row.get('prediction_id')}\t"
+            f"{row.get('transmission_number') or '—'}\t"
+            f"{row.get('lineage_root_id') or '—'}\t"
             f"{row.get('classification')}\t{score_text}\t"
             f"{_truncate_text(row.get('source_type'), 20)}\t"
             f"{_truncate_text(row.get('title'), 56)}\t"
@@ -4655,11 +4660,23 @@ def _handle_convergence(
         source_seeds=convergence.get("source_seeds", []),
         deep_dive_result=deep_dive_result,
     )
+    convergence_lineage = resolve_convergence_lineage_metadata(
+        convergence["domain_a"],
+        convergence["domain_b"],
+    )
     save_transmission(
         tx_num,
         exploration_id,
         formatted,
         transmission_embedding=transmission_embedding,
+        parent_transmission_number=convergence_lineage.get(
+            "parent_transmission_number"
+        ),
+        parent_strong_rejection_id=convergence_lineage.get(
+            "parent_strong_rejection_id"
+        ),
+        lineage_root_id=convergence_lineage.get("lineage_root_id"),
+        lineage_change=convergence_lineage.get("lineage_change"),
     )
     print_transmission(formatted)
     return True
