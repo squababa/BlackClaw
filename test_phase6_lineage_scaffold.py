@@ -938,10 +938,12 @@ def test_backfill_lineage_scars_repairs_legacy_transmission_chain(temp_db) -> No
 
     report = main._backfill_lineage_scars()
 
-    assert report["transmissions_backfilled"] == 1
+    assert report["transmissions_backfilled"] == 2
     assert report["strong_rejections_backfilled"] == 0
     assert report["lineage_roots_created"] == 1
     assert report["scars_created"] == 0
+    assert report["rows_linked_to_parent"] == 1
+    assert report["rows_given_root_only_lineage"] == 1
 
     assert store.get_transmission_lineage_metadata(1) == {
         "transmission_number": 1,
@@ -969,6 +971,8 @@ def test_backfill_lineage_scars_repairs_legacy_strong_rejection_scar(temp_db) ->
     assert report["strong_rejections_backfilled"] == 2
     assert report["lineage_roots_created"] == 1
     assert report["scars_created"] == 2
+    assert report["rows_linked_to_parent"] == 1
+    assert report["rows_given_root_only_lineage"] == 1
 
     parent_meta = store.get_strong_rejection_lineage_metadata(parent_rejection_id)
     child_meta = store.get_strong_rejection_lineage_metadata(child_rejection_id)
@@ -994,6 +998,71 @@ def test_backfill_lineage_scars_repairs_legacy_strong_rejection_scar(temp_db) ->
     assert parent_row["scar_summary"]["count"] == 1
     assert child_row["scar_summary"]["count"] == 2
     assert child_row["scar_summary"]["summary"] == parent_row["scar_summary"]["summary"]
+
+
+def test_backfill_lineage_scars_gives_legacy_transmission_root_only_lineage(
+    temp_db,
+) -> None:
+    connection = _build_connection(
+        mechanism="retry storms amplify latency noise",
+        variable_mapping={"retry storms": "latency noise"},
+        prediction="latency noise rises when retry storms accumulate",
+    )
+    exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=exploration_id,
+        formatted_output="legacy standalone transmission",
+        mechanism_signature=store.build_mechanism_signature(connection),
+    )
+
+    report = main._backfill_lineage_scars()
+
+    assert report["transmissions_backfilled"] == 1
+    assert report["rows_linked_to_parent"] == 0
+    assert report["rows_given_root_only_lineage"] == 1
+    assert report["rows_skipped_missing_data"] == 0
+    assert store.get_transmission_lineage_metadata(1) == {
+        "transmission_number": 1,
+        "lineage_root_id": "root-tx-1",
+        "parent_transmission_number": None,
+        "parent_strong_rejection_id": None,
+        "lineage_change": None,
+        "scar_summary": None,
+    }
+
+
+def test_backfill_lineage_scars_gives_legacy_rejection_root_only_lineage(
+    temp_db,
+) -> None:
+    rejection_id = _save_legacy_strong_rejection(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+
+    report = main._backfill_lineage_scars()
+
+    assert report["strong_rejections_backfilled"] == 1
+    assert report["rows_linked_to_parent"] == 0
+    assert report["rows_given_root_only_lineage"] == 1
+    assert report["rows_skipped_missing_data"] == 0
+    meta = store.get_strong_rejection_lineage_metadata(rejection_id)
+    row = store.get_strong_rejection(rejection_id)
+
+    assert meta == {
+        "id": rejection_id,
+        "lineage_root_id": f"root-rj-{rejection_id}",
+        "parent_transmission_number": None,
+        "parent_strong_rejection_id": None,
+        "lineage_change": None,
+        "scar_summary": row["scar_summary"],
+    }
+    assert row["scar_summary"]["count"] == 1
 
 
 def test_backfill_lineage_scars_is_idempotent_on_rerun(temp_db) -> None:
@@ -1025,32 +1094,76 @@ def test_backfill_lineage_scars_is_idempotent_on_rerun(temp_db) -> None:
         formatted_output="legacy child transmission",
         mechanism_signature=mechanism_signature,
     )
+    standalone_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="ops.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=3,
+        exploration_id=standalone_exploration_id,
+        formatted_output="legacy standalone transmission",
+        mechanism_signature=store.build_mechanism_signature(
+            _build_connection(
+                mechanism="retry storms amplify latency noise",
+                variable_mapping={"retry storms": "latency noise"},
+                prediction="latency noise rises when retry storms accumulate",
+            )
+        ),
+    )
     parent_rejection_id = _save_legacy_strong_rejection(temp_db)
     child_rejection_id = _save_legacy_strong_rejection(temp_db)
+    standalone_candidate = _build_strong_rejection_candidate()
+    standalone_candidate["prepared_connection"]["mechanism"] = (
+        "cache churn amplifies queue jitter"
+    )
+    standalone_candidate["prepared_connection"]["variable_mapping"] = {
+        "cache churn": "queue jitter"
+    }
+    standalone_candidate["prepared_connection"]["prediction"] = (
+        "queue jitter rises when cache churn spikes"
+    )
+    standalone_rejection_id = _save_legacy_strong_rejection(
+        temp_db,
+        seed_domain="ops.test",
+        target_domain="queue.test",
+        candidate=standalone_candidate,
+    )
 
     first_report = main._backfill_lineage_scars()
     first_snapshot = {
         "tx1": store.get_transmission_lineage_metadata(1),
         "tx2": store.get_transmission_lineage_metadata(2),
+        "tx3": store.get_transmission_lineage_metadata(3),
         "rj1": store.get_strong_rejection(parent_rejection_id),
         "rj2": store.get_strong_rejection(child_rejection_id),
+        "rj3": store.get_strong_rejection(standalone_rejection_id),
     }
 
     second_report = main._backfill_lineage_scars()
     second_snapshot = {
         "tx1": store.get_transmission_lineage_metadata(1),
         "tx2": store.get_transmission_lineage_metadata(2),
+        "tx3": store.get_transmission_lineage_metadata(3),
         "rj1": store.get_strong_rejection(parent_rejection_id),
         "rj2": store.get_strong_rejection(child_rejection_id),
+        "rj3": store.get_strong_rejection(standalone_rejection_id),
     }
 
-    assert first_report["transmissions_backfilled"] == 1
-    assert first_report["strong_rejections_backfilled"] == 2
+    assert first_report["transmissions_backfilled"] == 3
+    assert first_report["strong_rejections_backfilled"] == 3
+    assert first_report["rows_linked_to_parent"] == 3
+    assert first_report["rows_given_root_only_lineage"] == 3
     assert second_report == {
         "transmissions_backfilled": 0,
         "strong_rejections_backfilled": 0,
         "lineage_roots_created": 0,
         "scars_created": 0,
-        "rows_skipped": 4,
+        "rows_skipped": 6,
+        "rows_linked_to_parent": 0,
+        "rows_given_root_only_lineage": 0,
+        "rows_skipped_missing_data": 0,
+        "rows_already_complete": 6,
+        "rows_skipped_other": 0,
     }
     assert second_snapshot == first_snapshot
