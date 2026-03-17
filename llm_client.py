@@ -4,7 +4,6 @@ Central provider entrypoint for all LLM calls.
 """
 import hashlib
 import math
-import os
 
 try:
     import anthropic
@@ -23,8 +22,6 @@ from config import (
     MODEL,
     OLLAMA_BASE_URL,
 )
-
-from embeddings import LocalEmbedder
 from llm_router import LLMRouter
 from store import record_llm_usage
 
@@ -53,6 +50,36 @@ def _local_dedup_embedding(text: str) -> list[float]:
     if norm == 0:
         return vector
     return [value / norm for value in vector]
+
+
+_OLLAMA_EMBED_WARNING_SHOWN = False
+
+
+def _ollama_embedding(text: str, base_url: str, model: str = "nomic-embed-text") -> list[float] | None:
+    """Try to get an embedding from Ollama. Returns None on failure."""
+    global _OLLAMA_EMBED_WARNING_SHOWN
+    try:
+        import requests
+        resp = requests.post(
+            f"{base_url.rstrip('/')}/api/embeddings",
+            json={"model": model, "prompt": text},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            if not _OLLAMA_EMBED_WARNING_SHOWN:
+                print(f"  [Dedup] Ollama embedding failed (status {resp.status_code}). "
+                      f"Pull the model: ollama pull {model}")
+                _OLLAMA_EMBED_WARNING_SHOWN = True
+            return None
+        embedding = resp.json().get("embedding")
+        if isinstance(embedding, list) and embedding:
+            return [float(v) for v in embedding]
+        return None
+    except Exception:
+        if not _OLLAMA_EMBED_WARNING_SHOWN:
+            print(f"  [Dedup] Ollama not reachable for embeddings. Falling back to hash dedup.")
+            _OLLAMA_EMBED_WARNING_SHOWN = True
+        return None
 
 
 class GeminiClient:
@@ -103,6 +130,7 @@ class ClaudeClient:
             )
         self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         self._model = model_name
+        self._ollama_base_url = OLLAMA_BASE_URL
 
     def generate_content(self, prompt: str, generation_config: dict | None = None):
         kwargs = {
@@ -135,8 +163,8 @@ class ClaudeClient:
         return self._ClaudeResponse(text)
 
     def embed_content(self, text: str) -> list[float]:
-        """Return a semantic embedding vector, falling back to hash if unavailable."""
-        result = LocalEmbedder.embed(text)
+        """Return an embedding vector for semantic dedup checks."""
+        result = _ollama_embedding(text, self._ollama_base_url)
         if result is not None:
             return result
         return _local_dedup_embedding(text)
@@ -179,25 +207,8 @@ class OllamaClient:
         return self._OllamaResponse(text, payload)
 
     def embed_content(self, text: str) -> list[float]:
-        """Semantic embedding for dedup: prefer Ollama model, then local transformer, then hash."""
-        ollama_model = os.environ.get("OLLAMA_EMBEDDING_MODEL")
-        if ollama_model:
-            try:
-                import requests
-
-                resp = requests.post(
-                    f"{self._router._base_url}/api/embeddings",
-                    json={"model": ollama_model, "prompt": text},
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                embedding = resp.json().get("embedding")
-                if isinstance(embedding, list) and embedding:
-                    return [float(v) for v in embedding]
-            except Exception:
-                pass  # fall through to local model
-
-        result = LocalEmbedder.embed(text)
+        """Return an embedding vector for semantic dedup checks."""
+        result = _ollama_embedding(text, self._router._base_url)
         if result is not None:
             return result
         return _local_dedup_embedding(text)
@@ -209,19 +220,13 @@ _CLIENT = None
 def get_provider_status() -> dict[str, object]:
     """Describe the active generation and semantic dedup embedding path."""
     if LLM_PROVIDER == "ollama":
-        ollama_emb = os.environ.get("OLLAMA_EMBEDDING_MODEL")
-        if ollama_emb:
-            embedding_provider = "ollama"
-            embedding_model = ollama_emb
-            embedding_path = "OllamaClient.embed_content (Ollama /api/embeddings)"
-        else:
-            embedding_provider = "local"
-            embedding_model = "all-MiniLM-L6-v2"
-            embedding_path = "OllamaClient.embed_content (sentence-transformers)"
+        embedding_provider = "ollama"
+        embedding_model = "nomic-embed-text"
+        embedding_path = "OllamaClient.embed_content (ollama nomic-embed-text, hash fallback)"
     elif LLM_PROVIDER == "claude":
-        embedding_provider = "local"
-        embedding_model = "all-MiniLM-L6-v2"
-        embedding_path = "ClaudeClient.embed_content (sentence-transformers)"
+        embedding_provider = "ollama"
+        embedding_model = "nomic-embed-text"
+        embedding_path = "ClaudeClient.embed_content (ollama nomic-embed-text, hash fallback)"
     else:
         embedding_provider = "gemini"
         embedding_model = EMBEDDING_MODEL
