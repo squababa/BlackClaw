@@ -702,6 +702,13 @@ def _get_domain_stats() -> list[dict]:
 
 def _extract_transmission_sections(formatted_output: str) -> dict[str, str]:
     section_names = {
+        "1) PRIMARY CLAIM": "primary_claim",
+        "2) PREDICTION": "prediction",
+        "3) OPERATOR TAKEAWAY": "operator_takeaway",
+        "4) TEST": "test",
+        "5) MECHANISM": "mechanism",
+        "7) VARIABLE MAPPING": "variable_mapping",
+        "11) OPTIONAL SUMMARY": "optional_summary",
         "3) VARIABLE MAPPING": "variable_mapping",
         "4) MECHANISM": "mechanism",
         "5) PREDICTION": "prediction",
@@ -818,39 +825,60 @@ def _format_test_line(test_text: str | None) -> str:
 def _build_transmission_markdown(row: dict) -> str:
     sections = _extract_transmission_sections(row.get("formatted_output") or "")
     mechanism_text = _collapse_whitespace(sections.get("mechanism"))
-    hook_text = _first_sentence(
-        sections.get("optional_summary")
+    claim_text = _first_sentence(
+        sections.get("primary_claim")
+        or sections.get("optional_summary")
         or row.get("connection_description")
         or sections.get("mechanism")
+    )
+    hook_text = _collapse_whitespace(
+        sections.get("optional_summary")
+        or row.get("connection_description")
     )
     prediction_text = _collapse_whitespace(sections.get("prediction"))
     mapping_lines = _format_mapping_lines(sections.get("variable_mapping"))
     test_line = _format_test_line(sections.get("test"))
+    takeaway_text = _collapse_whitespace(sections.get("operator_takeaway"))
+    if takeaway_text == "—":
+        takeaway_text = test_line if test_line != "—" else prediction_text
 
     lines = [
         f"## {row.get('seed_domain') or 'Unknown Seed'} ↔ {row.get('jump_target_domain') or 'Unknown Target'}",
         "",
-        f"**The hook:** {hook_text}",
-        "",
-        f"**The mechanism:** {mechanism_text}",
-        "",
-        "**Variable mapping:**",
-        mapping_lines,
+        f"**Primary claim:** {claim_text}",
         "",
         f"**Prediction:** {prediction_text}",
         "",
         f"**How to test it:** {test_line}",
         "",
-        (
-            "**Scores:** "
-            f"Novelty {_format_score(row.get('novelty_score'))} | "
-            f"Depth {_format_score(row.get('depth_score'))} | "
-            f"Distance {_format_score(row.get('distance_score'))} | "
-            f"Total {_format_score(row.get('total_score'))}"
-        ),
+        f"**Operator takeaway:** {takeaway_text}",
         "",
-        "*Found by BlackClaw — autonomous curiosity engine*",
+        f"**The mechanism:** {mechanism_text}",
+        "",
+        "**Variable mapping:**",
+        mapping_lines,
     ]
+    if hook_text != "—":
+        lines.extend(
+            [
+                "",
+                f"**Optional context:** {hook_text}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            (
+                "**Scores:** "
+                f"Novelty {_format_score(row.get('novelty_score'))} | "
+                f"Depth {_format_score(row.get('depth_score'))} | "
+                f"Distance {_format_score(row.get('distance_score'))} | "
+                f"Total {_format_score(row.get('total_score'))}"
+            ),
+            "",
+            "*Found by BlackClaw — autonomous curiosity engine*",
+        ]
+    )
     return "\n".join(lines)
 
 

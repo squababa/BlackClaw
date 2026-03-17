@@ -120,18 +120,32 @@ def format_transmission(
             return stripped or None
         return str(value)
 
-    def _first_nonempty(*values) -> str:
+    def _first_present(*values) -> str | None:
         for value in values:
             cleaned = _clean_text(value)
             if cleaned is not None:
                 return cleaned
-        return "—"
+        return None
+
+    def _first_nonempty(*values) -> str:
+        return _first_present(*values) or "—"
 
     def _format_score(value) -> str:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return f"{value:.2f}"
         cleaned = _clean_text(value)
         return cleaned if cleaned is not None else "—"
+
+    def _first_sentence(value) -> str | None:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return None
+        sentence_endings = [
+            index for index, char in enumerate(cleaned) if char in ".!?"
+        ]
+        if not sentence_endings:
+            return cleaned
+        return cleaned[: sentence_endings[0] + 1].strip()
 
     def _indent_block(value: str, prefix: str = "    ") -> str:
         return "\n".join(f"{prefix}{line}" for line in str(value).splitlines())
@@ -221,6 +235,58 @@ def format_transmission(
             )
         return "\n".join(lines)
 
+    def _build_operator_takeaway(
+        normalized_prediction_payload: dict,
+        test_payload: dict,
+    ) -> str:
+        measure = _first_present(
+            normalized_prediction_payload.get("observable"),
+            test_payload.get("metric"),
+            test_payload.get("metrics"),
+        )
+        horizon = _first_present(
+            normalized_prediction_payload.get("time_horizon"),
+            test_payload.get("horizon"),
+            test_payload.get("time_horizon"),
+            test_payload.get("timing"),
+        )
+        confirm = _first_present(
+            test_payload.get("confirm"),
+            test_payload.get("confirms"),
+            test_payload.get("confirmed_if"),
+            test_payload.get("supports"),
+        )
+        falsify = _first_present(
+            normalized_prediction_payload.get("falsification_condition"),
+            test_payload.get("falsify"),
+            test_payload.get("falsifies"),
+            test_payload.get("falsified_if"),
+            test_payload.get("refutes"),
+        )
+        utility = _first_present(normalized_prediction_payload.get("utility_rationale"))
+        who_benefits = _first_present(normalized_prediction_payload.get("who_benefits"))
+
+        lines: list[str] = []
+        if measure and horizon:
+            lines.append(f"Measure {measure} within {horizon}.")
+        elif measure:
+            lines.append(f"Measure {measure}.")
+
+        if confirm and falsify:
+            lines.append(
+                f"Use {confirm} as the confirmation signal and {falsify} as the stop condition."
+            )
+        elif confirm:
+            lines.append(f"Use {confirm} as the confirmation signal.")
+        elif falsify:
+            lines.append(f"Treat {falsify} as the stop condition.")
+
+        if not lines and utility:
+            lines.append(_first_sentence(utility) or utility)
+        if not lines and who_benefits:
+            lines.append(f"This informs decisions for {who_benefits}.")
+        return " ".join(lines) if lines else "—"
+
     source_data = connection.get("source")
     if not isinstance(source_data, dict):
         source_data = {}
@@ -288,6 +354,15 @@ def format_transmission(
         test_text = cleaned_test if cleaned_test is not None else "—"
 
     summary_text = _first_nonempty(connection.get("connection"))
+    primary_claim_text = _first_nonempty(
+        _first_sentence(connection.get("connection")),
+        connection.get("mechanism"),
+        normalized_prediction.get("statement"),
+    )
+    operator_takeaway_text = _build_operator_takeaway(
+        normalized_prediction,
+        test_data,
+    )
     scholarly_prior_art = _clean_text(scores.get("scholarly_prior_art_summary"))
     evidence_map_text = _format_evidence_map_block(connection.get("evidence_map"))
     mechanism_typing_text = _format_mechanism_typing_block(connection)
@@ -309,30 +384,36 @@ def format_transmission(
     lines.extend(
         [
             "",
-            "  1) SOURCE EVIDENCE",
+            "  1) PRIMARY CLAIM",
+            _indent_block(primary_claim_text),
+            "",
+            "  2) PREDICTION",
+            _indent_block(prediction_text),
+            "",
+            "  3) OPERATOR TAKEAWAY",
+            _indent_block(operator_takeaway_text),
+            "",
+            "  4) TEST",
+            _indent_block(test_text),
+            "",
+            "  5) MECHANISM",
+            _indent_block(mechanism_text),
+            "",
+            "  6) MECHANISM TYPING",
+            _indent_block(mechanism_typing_text),
+            "",
+            "  7) VARIABLE MAPPING",
+            _indent_block(variable_mapping_text),
+            "",
+            "  8) SOURCE EVIDENCE",
             f"    URL: {source_url}",
             f"    EXCERPT: {source_excerpt}",
             "",
-            "  2) TARGET EVIDENCE",
+            "  9) TARGET EVIDENCE",
             f"    URL: {target_url}",
             f"    EXCERPT: {target_excerpt}",
             "",
-            "  3) VARIABLE MAPPING",
-            _indent_block(variable_mapping_text),
-            "",
-            "  4) MECHANISM",
-            _indent_block(mechanism_text),
-            "",
-            "  5) MECHANISM TYPING",
-            _indent_block(mechanism_typing_text),
-            "",
-            "  6) PREDICTION",
-            _indent_block(prediction_text),
-            "",
-            "  7) TEST",
-            _indent_block(test_text),
-            "",
-            "  8) SCORES",
+            "  10) SCORES",
             (
                 "    "
                 f"NOVELTY: {_format_score(scores.get('novelty'))} | "
@@ -374,7 +455,7 @@ def format_transmission(
     lines.extend(
         [
             "",
-            "  9) OPTIONAL SUMMARY",
+            "  11) OPTIONAL SUMMARY",
             _indent_block(summary_text),
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ]
