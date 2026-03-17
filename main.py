@@ -95,6 +95,13 @@ LATE_STAGE_TIMING_LABELS = {
     "rewrite": "Rewrite",
     "semantic_dedup": "Semantic dedup",
 }
+NEAR_MISS_BUCKET_LABELS = {
+    "weak_grounding": "revisit: weak grounding/evidence",
+    "mechanism_packaging": "revisit: mechanism packaging fail",
+    "stress_test_fail": "revisit: adversarial/invariance fail",
+    "generic_weak": "noise: generic low-value failure",
+}
+NEAR_MISS_PACKAGING_CONFIDENCE_FLOOR = 0.75
 
 
 def _print_credibility_weighting_summary(score_label: str, scores: dict):
@@ -750,6 +757,194 @@ def _first_review_reason(values: object) -> str | None:
     return None
 
 
+def _review_reason_list(values: object) -> list[str]:
+    """Normalize review reasons into unique compact strings."""
+    if not isinstance(values, list):
+        return []
+    reasons: list[str] = []
+    for value in values:
+        cleaned = _clean_inline_text(value)
+        if cleaned is not None and cleaned not in reasons:
+            reasons.append(cleaned)
+    return reasons
+
+
+def _reason_looks_like_weak_grounding_failure(reason: object) -> bool:
+    """Detect evidence/provenance failures from existing review strings."""
+    text = _clean_inline_text(reason)
+    if text is None:
+        return False
+    lower = text.lower()
+    return any(
+        token in lower
+        for token in (
+            "evidence_map",
+            "provenance",
+            "claim_snippet_mismatch",
+            "missing support",
+            "missing evidence",
+            "missing source_reference",
+            "source_reference",
+        )
+    )
+
+
+def _reason_looks_like_mechanism_packaging_failure(reason: object) -> bool:
+    """Detect mechanism/prediction packaging failures from stored review strings."""
+    text = _clean_inline_text(reason)
+    if text is None:
+        return False
+    lower = text.lower()
+    return any(
+        token in lower
+        for token in (
+            "mechanism must",
+            "mechanism lacks",
+            "mechanism is too universal",
+            "mechanism typing",
+            "mechanism_type",
+            "mechanism_type_confidence",
+            "variable_mapping",
+            "required fields",
+            "prediction must",
+            "prediction should",
+            "falsification_condition",
+            "assumptions must",
+            "boundary_conditions",
+            "test must",
+        )
+    )
+
+
+def _near_miss_bucket_label(bucket_key: str | None) -> str | None:
+    """Map one bucket key onto a short operator-facing label."""
+    if bucket_key is None:
+        return None
+    return NEAR_MISS_BUCKET_LABELS.get(bucket_key)
+
+
+def _strong_rejection_bucket_key(
+    categories: list[str] | None,
+    rejection_stage: object = None,
+) -> str:
+    """Collapse repairable rejection categories into operator-facing buckets."""
+    stage = str(rejection_stage or "").strip().lower()
+    if stage in {"adversarial", "invariance"}:
+        return "stress_test_fail"
+
+    clean_categories = {
+        str(category).strip()
+        for category in (categories or [])
+        if str(category).strip()
+    }
+    if clean_categories & {"claim_provenance", "provenance"}:
+        return "weak_grounding"
+    if clean_categories & {
+        "mechanism_typing",
+        "prediction_quality",
+        "validation_packaging",
+    }:
+        return "mechanism_packaging"
+    return "generic_weak"
+
+
+def _strong_rejection_bucket_label(row: dict) -> str:
+    """Classify stored strong rejections into concise near-miss buckets."""
+    salvage_reason = _clean_inline_text(row.get("salvage_reason"))
+    if salvage_reason is not None:
+        salvage_lower = salvage_reason.lower()
+        if (
+            "weak grounding" in salvage_lower
+            or "provenance" in salvage_lower
+            or "evidence_map" in salvage_lower
+        ):
+            return NEAR_MISS_BUCKET_LABELS["weak_grounding"]
+        if (
+            "mechanism packaging" in salvage_lower
+            or "mechanism typing" in salvage_lower
+            or "prediction-quality" in salvage_lower
+            or "prediction quality" in salvage_lower
+            or "structured fields" in salvage_lower
+        ):
+            return NEAR_MISS_BUCKET_LABELS["mechanism_packaging"]
+        if "adversarial" in salvage_lower or "invariance" in salvage_lower:
+            return NEAR_MISS_BUCKET_LABELS["stress_test_fail"]
+        if "generic low-value" in salvage_lower:
+            return NEAR_MISS_BUCKET_LABELS["generic_weak"]
+
+    rejection_stage = str(row.get("rejection_stage") or "").strip().lower()
+    if rejection_stage in {"adversarial", "invariance"}:
+        return NEAR_MISS_BUCKET_LABELS["stress_test_fail"]
+
+    reasons = _review_reason_list(row.get("rejection_reasons"))
+    validation = row.get("validation") if isinstance(row.get("validation"), dict) else {}
+    claim_provenance = (
+        validation.get("claim_provenance")
+        if isinstance(validation.get("claim_provenance"), dict)
+        else {}
+    )
+    claim_issues = _review_reason_list(claim_provenance.get("issues"))
+    if claim_issues or any(
+        _reason_looks_like_weak_grounding_failure(reason) for reason in reasons
+    ):
+        return NEAR_MISS_BUCKET_LABELS["weak_grounding"]
+    if any(
+        _reason_looks_like_mechanism_packaging_failure(reason)
+        for reason in reasons
+    ):
+        return NEAR_MISS_BUCKET_LABELS["mechanism_packaging"]
+    return NEAR_MISS_BUCKET_LABELS["generic_weak"]
+
+
+def _review_near_miss_bucket_label(row: dict) -> str | None:
+    """Bucket recent rejected explorations into concise operator-facing classes."""
+    if row.get("transmitted"):
+        return None
+
+    suggested_grade = str(row.get("suggested_grade") or "").strip().lower()
+    try:
+        suggested_confidence = (
+            float(row.get("suggested_confidence"))
+            if row.get("suggested_confidence") is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        suggested_confidence = None
+
+    bucket_key: str | None = None
+    if suggested_grade == "provenance_fail":
+        bucket_key = "weak_grounding"
+    elif suggested_grade == "validation_packaging_fail":
+        if (
+            suggested_confidence is not None
+            and suggested_confidence >= NEAR_MISS_PACKAGING_CONFIDENCE_FLOOR
+        ):
+            bucket_key = "mechanism_packaging"
+    elif suggested_grade == "adversarial_or_invariance_fail":
+        bucket_key = "stress_test_fail"
+    elif suggested_grade in {"score_gate_fail", "jump_stage_fail", "no_patterns"}:
+        bucket_key = "generic_weak"
+
+    reasons = _review_reason_list(row.get("rejection_reasons"))
+    if bucket_key is None:
+        rejection_stage = str(row.get("rejection_stage") or "").strip().lower()
+        if rejection_stage in {"adversarial", "invariance"}:
+            bucket_key = "stress_test_fail"
+        elif row.get("provenance_failure_details") or any(
+            _reason_looks_like_weak_grounding_failure(reason) for reason in reasons
+        ):
+            bucket_key = "weak_grounding"
+        elif any(
+            _reason_looks_like_mechanism_packaging_failure(reason)
+            for reason in reasons
+        ):
+            bucket_key = "mechanism_packaging"
+        else:
+            bucket_key = "generic_weak"
+
+    return _near_miss_bucket_label(bucket_key)
+
+
 def _recent_review_late_gate_lines(row: dict) -> list[str]:
     """Render compact late-gate failure details for review surfaces."""
     rejection_stage = row.get("rejection_stage")
@@ -875,6 +1070,9 @@ def _print_recent_review_items(limit: int = 20):
             f"total_score={total_text} | "
             f"mechanism_type={row.get('mechanism_type') or '—'}"
         )
+        near_miss_bucket = _review_near_miss_bucket_label(row)
+        if near_miss_bucket is not None:
+            print(f"  near_miss_bucket={near_miss_bucket}")
         print(
             f"  rejection_stage={row.get('rejection_stage') or '—'} | "
             f"reasons={reason_text}"
@@ -1747,7 +1945,9 @@ def _strong_rejection_reasons_text(row: dict, limit: int = 110) -> str:
         if text and text not in reasons:
             reasons.append(text)
     if not reasons and row.get("salvage_reason"):
-        reasons.append(str(row.get("salvage_reason")).strip())
+        salvage_reason = str(row.get("salvage_reason")).strip()
+        if salvage_reason not in NEAR_MISS_BUCKET_LABELS.values():
+            reasons.append(salvage_reason)
     return _truncate_text("; ".join(reasons[:2]) or "—", limit)
 
 
@@ -1759,11 +1959,12 @@ def _print_strong_rejections_list(limit: int = 20):
         return
 
     print(f"[StrongRejections] Recent {len(rows)} strong rejections")
-    print("id\tstatus\ttotal\tmechanism\tdomains\treasons\ttimestamp")
+    print("id\tstatus\ttotal\tmechanism\tbucket\tdomains\treasons\ttimestamp")
     for row in rows:
         total_score = row.get("total_score")
         total_text = f"{float(total_score):.3f}" if total_score is not None else "—"
         mechanism_type = row.get("mechanism_type") or "unknown"
+        bucket_label = _strong_rejection_bucket_label(row)
         domains = (
             f"{row.get('seed_domain') or 'Unknown'} → "
             f"{row.get('target_domain') or 'Unknown'}"
@@ -1771,6 +1972,7 @@ def _print_strong_rejections_list(limit: int = 20):
         print(
             f"{row.get('id')}\t{row.get('status')}\t{total_text}\t"
             f"{_truncate_text(mechanism_type, 24)}\t"
+            f"{_truncate_text(bucket_label, 36)}\t"
             f"{_truncate_text(domains, 44)}\t"
             f"{_strong_rejection_reasons_text(row)}\t"
             f"{_short_timestamp(row.get('timestamp'))}"
@@ -4089,6 +4291,14 @@ def _strong_rejection_analysis(candidate: dict | None) -> dict:
         "eligible": bool(deduped_categories),
         "categories": deduped_categories,
         "rejection_stage": rejection_stage,
+        "near_miss_bucket": (
+            _strong_rejection_bucket_key(
+                deduped_categories,
+                rejection_stage=rejection_stage,
+            )
+            if deduped_categories
+            else None
+        ),
     }
 
 
@@ -4100,19 +4310,8 @@ def should_save_strong_rejection(candidate: dict | None) -> bool:
 def summarize_strong_rejection_reason(candidate: dict | None) -> str:
     """Summarize the repairable rejection reason for CLI and storage."""
     analysis = _strong_rejection_analysis(candidate)
-    labels = {
-        "claim_provenance": "incomplete evidence_map coverage",
-        "provenance": "missing provenance packaging",
-        "mechanism_typing": "missing mechanism typing",
-        "prediction_quality": "prediction-quality gate failed",
-        "validation_packaging": "missing structured fields",
-    }
-    parts = [
-        labels[key]
-        for key in analysis.get("categories") or []
-        if key in labels
-    ]
-    return "; ".join(parts[:3]) if parts else "repairable validation rejection"
+    bucket_label = _near_miss_bucket_label(analysis.get("near_miss_bucket"))
+    return bucket_label or "repairable validation rejection"
 
 
 def _handle_convergence(
