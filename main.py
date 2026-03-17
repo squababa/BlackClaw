@@ -76,6 +76,7 @@ from store import (
     save_strong_rejection,
     populate_passive_strong_rejection_scars,
     list_recent_review_items,
+    resolve_candidate_lineage_metadata,
 )
 from seed import pick_seed, resolve_seed_choice
 
@@ -5012,7 +5013,14 @@ def _score_store_and_transmit(
         transmitted=candidate["should_transmit"],
     )
     strong_rejection_analysis = _strong_rejection_analysis(candidate)
+    mechanism_signature = build_mechanism_signature(candidate["prepared_connection"])
     if should_save_strong_rejection(candidate):
+        strong_rejection_lineage = resolve_candidate_lineage_metadata(
+            source_domain=source_domain,
+            target_domain=target_domain,
+            mechanism_signature=mechanism_signature,
+            record_kind="strong_rejection",
+        )
         save_strong_rejection(
             exploration_id=exploration_id,
             seed_domain=source_domain,
@@ -5032,6 +5040,14 @@ def _score_store_and_transmit(
             validation=candidate["validation_log"],
             evidence_map=candidate["prepared_connection"].get("evidence_map"),
             mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
+            parent_transmission_number=strong_rejection_lineage.get(
+                "parent_transmission_number"
+            ),
+            parent_strong_rejection_id=strong_rejection_lineage.get(
+                "parent_strong_rejection_id"
+            ),
+            lineage_root_id=strong_rejection_lineage.get("lineage_root_id"),
+            lineage_change=strong_rejection_lineage.get("lineage_change"),
         )
 
     transmitted = False
@@ -5055,17 +5071,30 @@ def _score_store_and_transmit(
             scores=candidate["scores"],
             exploration_path=exploration_path,
         )
-        signature = build_mechanism_signature(tx_connection)
+        transmission_lineage = resolve_candidate_lineage_metadata(
+            source_domain=source_domain,
+            target_domain=target_domain,
+            mechanism_signature=mechanism_signature,
+            record_kind="transmission",
+        )
         save_transmission(
             tx_num,
             exploration_id,
             formatted,
             transmission_embedding=candidate["transmission_embedding"],
-            mechanism_signature=signature,
+            mechanism_signature=mechanism_signature,
             connection_payload=tx_connection,
             prediction_quality=candidate["prediction_quality"],
             evidence_map=tx_connection.get("evidence_map"),
             mechanism_typing=tx_connection.get("mechanism_typing"),
+            parent_transmission_number=transmission_lineage.get(
+                "parent_transmission_number"
+            ),
+            parent_strong_rejection_id=transmission_lineage.get(
+                "parent_strong_rejection_id"
+            ),
+            lineage_root_id=transmission_lineage.get("lineage_root_id"),
+            lineage_change=transmission_lineage.get("lineage_change"),
         )
         print_transmission(formatted)
         transmitted = True

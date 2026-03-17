@@ -135,7 +135,13 @@ LINEAGE_CHANGE_TYPES = (
     "prediction_changed",
     "evidence_changed",
     "adjudication_changed",
+    "mechanism_evolved",
+    "domain_pair_revisit",
+    "transmission_from_prior_rejection",
+    "rejection_from_prior_transmission",
 )
+LINEAGE_STRONG_SIGNATURE_THRESHOLD = 0.80
+LINEAGE_DOMAIN_PAIR_REVISIT_THRESHOLD = 0.60
 PREDICTION_OUTCOME_BY_STATUS = {
     "open": "open",
     "unknown": "open",
@@ -5462,6 +5468,52 @@ def _cluster_id_for_row(row: sqlite3.Row) -> str:
     return f"SIG{int(row['id']):04d}"
 
 
+def _find_signature_convergence_match(
+    conn: sqlite3.Connection,
+    signature: str,
+) -> dict:
+    """Preview the closest stored signature convergence match without mutating state."""
+    clean_signature = (signature or "").strip()
+    if not clean_signature:
+        return {
+            "best_row": None,
+            "similarity": 0.0,
+            "cluster_id": None,
+            "is_same_discovery": False,
+        }
+
+    rows = conn.execute(
+        """SELECT id, signature, cluster_id, times_found
+        FROM signature_convergences"""
+    ).fetchall()
+    if not rows:
+        return {
+            "best_row": None,
+            "similarity": 0.0,
+            "cluster_id": None,
+            "is_same_discovery": False,
+        }
+
+    best_row = None
+    best_score = -1.0
+    for row in rows:
+        score = _signature_similarity(clean_signature, row["signature"] or "")
+        if score > best_score:
+            best_score = score
+            best_row = row
+
+    cluster_id = None
+    if best_row is not None and best_score >= LINEAGE_STRONG_SIGNATURE_THRESHOLD:
+        cluster_id = _cluster_id_for_row(best_row)
+
+    return {
+        "best_row": best_row,
+        "similarity": max(0.0, best_score),
+        "cluster_id": cluster_id,
+        "is_same_discovery": best_score > 0.92,
+    }
+
+
 def _record_signature_convergence(conn: sqlite3.Connection, signature: str) -> dict:
     """
     Compare against past mechanism signatures.
@@ -5469,11 +5521,12 @@ def _record_signature_convergence(conn: sqlite3.Connection, signature: str) -> d
     0.80-0.92 => same cluster (reuse cluster_id)
     """
     now = _now()
-    rows = conn.execute(
-        """SELECT id, signature, cluster_id, times_found
-        FROM signature_convergences"""
-    ).fetchall()
-    if not rows:
+    match = _find_signature_convergence_match(conn, signature)
+    best_row = match.get("best_row")
+    best_score = float(match.get("similarity") or 0.0)
+    cluster_id = _clean_optional_text(match.get("cluster_id"))
+
+    if best_row is None:
         conn.execute(
             """INSERT INTO signature_convergences
             (signature, cluster_id, times_found, first_found, last_found)
@@ -5482,16 +5535,7 @@ def _record_signature_convergence(conn: sqlite3.Connection, signature: str) -> d
         )
         return {"cluster_id": None, "similarity": 0.0, "is_same_discovery": False}
 
-    best_row = None
-    best_score = -1.0
-    for row in rows:
-        score = _signature_similarity(signature, row["signature"] or "")
-        if score > best_score:
-            best_score = score
-            best_row = row
-
     if best_row is not None and best_score > 0.92:
-        cluster_id = _cluster_id_for_row(best_row)
         conn.execute(
             """UPDATE signature_convergences
             SET times_found = times_found + 1,
@@ -5507,7 +5551,6 @@ def _record_signature_convergence(conn: sqlite3.Connection, signature: str) -> d
         }
 
     if best_row is not None and 0.80 <= best_score <= 0.92:
-        cluster_id = _cluster_id_for_row(best_row)
         if not (best_row["cluster_id"] or "").strip():
             conn.execute(
                 "UPDATE signature_convergences SET cluster_id = ? WHERE id = ?",
@@ -5532,6 +5575,299 @@ def _record_signature_convergence(conn: sqlite3.Connection, signature: str) -> d
         (signature, now, now),
     )
     return {"cluster_id": None, "similarity": max(0.0, best_score), "is_same_discovery": False}
+
+
+def _empty_lineage_resolution() -> dict:
+    """Return a consistent empty lineage-resolution payload."""
+    return {
+        "parent_transmission_number": None,
+        "parent_strong_rejection_id": None,
+        "lineage_root_id": None,
+        "lineage_change": None,
+    }
+
+
+def _lineage_parent_label(parent_kind: str, parent_reference: int) -> str:
+    """Render a compact label for a resolved lineage parent."""
+    if parent_kind == "transmission":
+        return f"transmission #{int(parent_reference)}"
+    return f"strong rejection #{int(parent_reference)}"
+
+
+def _generate_lineage_root_id(parent_kind: str, parent_reference: int) -> str:
+    """Create a stable lineage root id anchored to the chosen parent."""
+    if parent_kind == "transmission":
+        return f"root-tx-{int(parent_reference)}"
+    return f"root-rj-{int(parent_reference)}"
+
+
+def _lineage_event_type(
+    record_kind: str,
+    parent_kind: str,
+    match_type: str,
+) -> str:
+    """Choose one narrow lineage event type for the resolved parent link."""
+    if match_type == "domain_pair_revisit":
+        return "domain_pair_revisit"
+    if record_kind == "transmission" and parent_kind == "strong_rejection":
+        return "transmission_from_prior_rejection"
+    if record_kind == "strong_rejection" and parent_kind == "transmission":
+        return "rejection_from_prior_transmission"
+    return "mechanism_evolved"
+
+
+def _lineage_summary_text(
+    record_kind: str,
+    parent_kind: str,
+    parent_reference: int,
+    match_type: str,
+    source_domain: str | None,
+    target_domain: str | None,
+) -> str:
+    """Build a short operator-readable lineage summary."""
+    parent_label = _lineage_parent_label(parent_kind, parent_reference)
+    if match_type == "domain_pair_revisit":
+        if source_domain and target_domain:
+            return (
+                f"Domain-pair revisit for {source_domain} -> {target_domain} "
+                f"linked to {parent_label}."
+            )
+        return f"Domain-pair revisit linked to {parent_label}."
+    if record_kind == "transmission" and parent_kind == "strong_rejection":
+        return (
+            f"Transmission linked to prior strong rejection #{int(parent_reference)} "
+            "via related mechanism signature."
+        )
+    if record_kind == "strong_rejection" and parent_kind == "transmission":
+        return (
+            f"Strong rejection linked to prior transmission #{int(parent_reference)} "
+            "via related mechanism signature."
+        )
+    return f"Mechanism evolved from {parent_label}."
+
+
+def _lineage_candidate_sort_key(candidate: dict) -> tuple:
+    """Prefer strong lineage evidence first, then same-pair preference and recency."""
+    return (
+        1 if candidate.get("cluster_match") else 0,
+        float(candidate.get("similarity") or 0.0),
+        1 if candidate.get("same_domain_pair") else 0,
+        candidate.get("timestamp") or "",
+        int(candidate.get("parent_reference") or 0),
+    )
+
+
+def _backfill_lineage_root(
+    conn: sqlite3.Connection,
+    parent_kind: str,
+    parent_reference: int,
+    lineage_root_id: str,
+) -> None:
+    """Persist a generated lineage root onto the chosen parent without touching other fields."""
+    if parent_kind == "transmission":
+        conn.execute(
+            """UPDATE transmissions
+            SET lineage_root_id = ?
+            WHERE transmission_number = ?
+              AND COALESCE(TRIM(lineage_root_id), '') = ''""",
+            (lineage_root_id, int(parent_reference)),
+        )
+        return
+    conn.execute(
+        """UPDATE strong_rejections
+        SET lineage_root_id = ?
+        WHERE id = ?
+          AND COALESCE(TRIM(lineage_root_id), '') = ''""",
+        (lineage_root_id, int(parent_reference)),
+    )
+
+
+def resolve_candidate_lineage_metadata(
+    *,
+    source_domain: str,
+    target_domain: str | None,
+    mechanism_signature: str | None,
+    record_kind: str,
+) -> dict:
+    """Resolve parent/root lineage metadata for a not-yet-saved transmission or strong rejection."""
+    if record_kind not in {"transmission", "strong_rejection"}:
+        raise ValueError("record_kind must be 'transmission' or 'strong_rejection'")
+
+    clean_source = _clean_optional_text(source_domain)
+    clean_target = _clean_optional_text(target_domain)
+    clean_signature = (mechanism_signature or "").strip()
+    if not clean_signature:
+        return _empty_lineage_resolution()
+
+    conn = _connect()
+    try:
+        convergence_match = _find_signature_convergence_match(conn, clean_signature)
+        prospective_cluster_id = _clean_optional_text(convergence_match.get("cluster_id"))
+
+        transmission_rows = conn.execute(
+            """SELECT
+                t.transmission_number,
+                t.timestamp,
+                t.mechanism_signature,
+                t.signature_cluster_id,
+                t.lineage_root_id,
+                e.seed_domain AS source_domain,
+                e.jump_target_domain AS target_domain
+            FROM transmissions t
+            LEFT JOIN explorations e ON e.id = t.exploration_id
+            ORDER BY t.transmission_number DESC"""
+        ).fetchall()
+        rejection_rows = conn.execute(
+            """SELECT
+                id,
+                timestamp,
+                seed_domain,
+                target_domain,
+                connection_payload_json,
+                lineage_root_id
+            FROM strong_rejections
+            ORDER BY id DESC"""
+        ).fetchall()
+
+        strong_candidates: list[dict] = []
+        revisit_candidates: list[dict] = []
+
+        for row in transmission_rows:
+            existing_signature = (row["mechanism_signature"] or "").strip()
+            if not existing_signature:
+                continue
+            similarity = _signature_similarity(clean_signature, existing_signature)
+            row_cluster_id = _clean_optional_text(row["signature_cluster_id"])
+            same_domain_pair = (
+                clean_source is not None
+                and clean_target is not None
+                and clean_source == _clean_optional_text(row["source_domain"])
+                and clean_target == _clean_optional_text(row["target_domain"])
+            )
+            cluster_match = bool(
+                prospective_cluster_id
+                and row_cluster_id
+                and prospective_cluster_id == row_cluster_id
+            )
+            candidate = {
+                "parent_kind": "transmission",
+                "parent_reference": int(row["transmission_number"]),
+                "lineage_root_id": _clean_optional_text(row["lineage_root_id"]),
+                "same_domain_pair": same_domain_pair,
+                "cluster_match": cluster_match,
+                "similarity": similarity,
+                "timestamp": _clean_optional_text(row["timestamp"]),
+                "cluster_id": row_cluster_id or prospective_cluster_id,
+            }
+            if cluster_match or similarity >= LINEAGE_STRONG_SIGNATURE_THRESHOLD:
+                strong_candidates.append(candidate)
+            elif (
+                same_domain_pair
+                and LINEAGE_DOMAIN_PAIR_REVISIT_THRESHOLD < similarity
+                and similarity < LINEAGE_STRONG_SIGNATURE_THRESHOLD
+            ):
+                revisit_candidates.append(candidate)
+
+        for row in rejection_rows:
+            payload = _json_object_or_empty(row["connection_payload_json"])
+            if not payload:
+                continue
+            existing_signature = build_mechanism_signature(payload)
+            if not existing_signature:
+                continue
+            similarity = _signature_similarity(clean_signature, existing_signature)
+            same_domain_pair = (
+                clean_source is not None
+                and clean_target is not None
+                and clean_source == _clean_optional_text(row["seed_domain"])
+                and clean_target == _clean_optional_text(row["target_domain"])
+            )
+            candidate = {
+                "parent_kind": "strong_rejection",
+                "parent_reference": int(row["id"]),
+                "lineage_root_id": _clean_optional_text(row["lineage_root_id"]),
+                "same_domain_pair": same_domain_pair,
+                "cluster_match": similarity >= LINEAGE_STRONG_SIGNATURE_THRESHOLD,
+                "similarity": similarity,
+                "timestamp": _clean_optional_text(row["timestamp"]),
+                "cluster_id": prospective_cluster_id,
+            }
+            if similarity >= LINEAGE_STRONG_SIGNATURE_THRESHOLD:
+                strong_candidates.append(candidate)
+            elif (
+                same_domain_pair
+                and LINEAGE_DOMAIN_PAIR_REVISIT_THRESHOLD < similarity
+                and similarity < LINEAGE_STRONG_SIGNATURE_THRESHOLD
+            ):
+                revisit_candidates.append(candidate)
+
+        match_type = "cluster"
+        candidates = strong_candidates
+        if not candidates:
+            candidates = revisit_candidates
+            match_type = "domain_pair_revisit"
+        if not candidates:
+            return _empty_lineage_resolution()
+
+        parent = max(candidates, key=_lineage_candidate_sort_key)
+        lineage_root_id = _clean_optional_text(parent.get("lineage_root_id"))
+        if lineage_root_id is None:
+            lineage_root_id = _generate_lineage_root_id(
+                str(parent["parent_kind"]),
+                int(parent["parent_reference"]),
+            )
+            _backfill_lineage_root(
+                conn,
+                str(parent["parent_kind"]),
+                int(parent["parent_reference"]),
+                lineage_root_id,
+            )
+            conn.commit()
+
+        event_type = _lineage_event_type(
+            record_kind,
+            str(parent["parent_kind"]),
+            match_type,
+        )
+        details = {
+            "match_type": match_type,
+            "parent_kind": parent["parent_kind"],
+            "similarity": round(float(parent["similarity"] or 0.0), 3),
+        }
+        cluster_id = _clean_optional_text(parent.get("cluster_id"))
+        if cluster_id is not None:
+            details["cluster_id"] = cluster_id
+        if match_type == "domain_pair_revisit" and clean_source and clean_target:
+            details["source_domain"] = clean_source
+            details["target_domain"] = clean_target
+
+        return {
+            "parent_transmission_number": (
+                int(parent["parent_reference"])
+                if parent["parent_kind"] == "transmission"
+                else None
+            ),
+            "parent_strong_rejection_id": (
+                int(parent["parent_reference"])
+                if parent["parent_kind"] == "strong_rejection"
+                else None
+            ),
+            "lineage_root_id": lineage_root_id,
+            "lineage_change": {
+                "event_types": [event_type],
+                "summary": _lineage_summary_text(
+                    record_kind,
+                    str(parent["parent_kind"]),
+                    int(parent["parent_reference"]),
+                    match_type,
+                    clean_source,
+                    clean_target,
+                ),
+                "details": details,
+            },
+        }
+    finally:
+        conn.close()
 
 
 def export_transmissions(path: str = "transmissions_export.json") -> int:
