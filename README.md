@@ -66,16 +66,18 @@ Typical current configurations:
   * `BLACKCLAW_MODEL=qwen3:8b`
   * `OLLAMA_BASE_URL=http://localhost:11434`
 
-Note: semantic dedup embeddings are Gemini-backed only when `LLM_PROVIDER=gemini`.
-Claude and Ollama use the local deterministic hashed fallback for semantic dedup.
+Note: semantic dedup embeddings use Gemini embeddings when `LLM_PROVIDER=gemini`.
+Claude and Ollama providers use Ollama's `nomic-embed-text` model for semantic dedup
+(run `ollama pull nomic-embed-text` to enable). Falls back to a deterministic hash
+if Ollama is not reachable.
 
 Current live path audit:
 
 * Generation path: `main.py` and `transmit.py` call `get_llm_client().generate_content(...)`, so generation follows `LLM_PROVIDER` + `BLACKCLAW_MODEL`.
 * Embeddings/dedup path: `main.py` computes candidate embeddings with `_embed_transmission_text()` → `get_llm_client().embed_content(...)`, then compares them in `store.is_semantic_duplicate(...)`.
 * Gemini provider: generation uses the configured Gemini model, and semantic dedup uses Gemini embeddings via `google.generativeai.embed_content(model="models/gemini-embedding-001")`.
-* Claude provider: generation uses the configured Claude model, and semantic dedup uses the local deterministic hashed fallback in `ClaudeClient.embed_content(...)`.
-* Ollama provider: generation uses the configured Ollama model, and semantic dedup uses the local deterministic hashed fallback in `OllamaClient.embed_content(...)` rather than a remote embedding API.
+* Claude provider: generation uses the configured Claude model, and semantic dedup uses Ollama `nomic-embed-text` embeddings (hash fallback if Ollama unavailable).
+* Ollama provider: generation uses the configured Ollama model, and semantic dedup uses Ollama `nomic-embed-text` embeddings (hash fallback if unavailable).
 * Semantic dedup is enabled in standard candidate evaluation. Eval runs currently disable dedup by passing `dedup_enabled=False`.
 
 For an operator-visible snapshot of the current runtime selection, run:
