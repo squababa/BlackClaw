@@ -1112,6 +1112,25 @@ def init_db():
             ELSE 'open'
         END"""
     )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS discovered_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL DEFAULT 'Discovered',
+            seed_queries TEXT NOT NULL,
+            source_transmission INTEGER,
+            source_domain TEXT,
+            discovered_at TEXT NOT NULL,
+            times_used_as_seed INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_discovered_domains_name ON discovered_domains(name)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_discovered_domains_enabled ON discovered_domains(enabled)"
+    )
     conn.commit()
     conn.close()
 def _now() -> str:
@@ -1120,6 +1139,96 @@ def _now() -> str:
 def _today() -> str:
     """Current UTC date as YYYY-MM-DD."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def save_discovered_domain(
+    name: str,
+    category: str = "Discovered",
+    seed_queries: list[str] | None = None,
+    source_transmission: int | None = None,
+    source_domain: str | None = None,
+) -> bool:
+    """Persist a newly discovered domain. Returns True if inserted, False if already exists."""
+    normalized = " ".join((name or "").split()).title()
+    if not normalized:
+        return False
+    queries_json = json.dumps(seed_queries or [])
+    conn = _connect()
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO discovered_domains
+            (name, category, seed_queries, source_transmission, source_domain, discovered_at)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (normalized, category or "Discovered", queries_json, source_transmission, source_domain, _now()),
+        )
+        conn.commit()
+        return conn.total_changes > 0
+    finally:
+        conn.close()
+
+
+def get_discovered_domains(limit: int = 50) -> list[dict]:
+    """Return enabled discovered domains ordered by least-recently used, then discovery date."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT name, category, seed_queries
+        FROM discovered_domains
+        WHERE enabled = 1
+        ORDER BY times_used_as_seed ASC, discovered_at ASC
+        LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        try:
+            queries = json.loads(row["seed_queries"])
+        except (json.JSONDecodeError, TypeError):
+            queries = []
+        result.append({
+            "name": row["name"],
+            "category": row["category"],
+            "seed_queries": queries,
+        })
+    return result
+
+
+def increment_discovered_domain_usage(name: str) -> None:
+    """Bump usage counter when a discovered domain is picked as a seed."""
+    conn = _connect()
+    conn.execute(
+        "UPDATE discovered_domains SET times_used_as_seed = times_used_as_seed + 1 WHERE name = ?",
+        (name,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_all_discovered_domains() -> list[dict]:
+    """Return all discovered domains with full metadata for the CLI listing."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT name, category, source_domain, discovered_at,
+                  times_used_as_seed, enabled
+        FROM discovered_domains
+        ORDER BY discovered_at DESC"""
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def set_discovered_domain_enabled(name: str, enabled: bool) -> bool:
+    """Enable or disable a discovered domain. Returns True if the row existed."""
+    normalized = " ".join((name or "").split()).title()
+    conn = _connect()
+    conn.execute(
+        "UPDATE discovered_domains SET enabled = ? WHERE name = ?",
+        (1 if enabled else 0, normalized),
+    )
+    conn.commit()
+    changed = conn.total_changes > 0
+    conn.close()
+    return changed
 
 
 def compute_similarity(vec_a: list[float], vec_b: list[float]) -> float:

@@ -160,17 +160,32 @@ def pick_seed() -> dict:
     """
     Pick a seed domain for the next exploration cycle.
     Logic:
-    1. Load all domains
+    1. Load all built-in domains + enabled discovered domains
     2. Get recently explored domains (last N cycles)
     3. Exclude recently explored from candidates
     4. If exclusion empties the list, use all domains (fallback)
-    5. Weight boost for never-visited domains
+    5. Weight boost: 3x never-visited built-in, 2x discovered, 1x recently-seen
     6. Return: {"name": str, "category": str, "seed_queries": list[str]}
     """
     from config import PERSONALIZATION, SEED_EXCLUSION_WINDOW
-    from store import get_feedback_seed_metrics, get_recent_domains
+    from store import (
+        get_feedback_seed_metrics,
+        get_recent_domains,
+        get_discovered_domains,
+        increment_discovered_domain_usage,
+    )
 
     domains = _load_domains()
+    builtin_names = {d["name"] for d in domains}
+
+    # Merge discovered domains into the pool (before exclusion filter)
+    discovered = get_discovered_domains(limit=50)
+    discovered_names = set()
+    for dd in discovered:
+        if dd["name"] not in builtin_names:
+            domains.append(dd)
+            discovered_names.add(dd["name"])
+
     recent = set(get_recent_domains(SEED_EXCLUSION_WINDOW))
     # Filter out recently explored
     candidates = [d for d in domains if d["name"] not in recent]
@@ -180,11 +195,16 @@ def pick_seed() -> dict:
 
     feedback_metrics = get_feedback_seed_metrics() if PERSONALIZATION else {}
 
-    # Weight: never-visited domains get 3x weight
+    # Weight: never-visited built-in = 3x, discovered = 2x, recently-seen = 1x
     weights = []
     reasons_by_domain: dict[str, str] = {}
     for d in candidates:
-        base_weight = 3.0 if d["name"] not in recent else 1.0
+        if d["name"] in discovered_names:
+            base_weight = 2.0
+        elif d["name"] not in recent:
+            base_weight = 3.0
+        else:
+            base_weight = 1.0
         weight = base_weight
         reason = "baseline weighting"
         if PERSONALIZATION:
@@ -210,5 +230,14 @@ def pick_seed() -> dict:
             reason = reasons_by_domain.get(selected["name"], "weighted feedback signal")
             print(f"  [Seed] Personalization reason: {reason}")
 
-    return _domain_to_seed(selected)
+    seed = _domain_to_seed(selected)
+
+    # Track usage for discovered domains
+    if seed["name"] in discovered_names:
+        try:
+            increment_discovered_domain_usage(seed["name"])
+        except Exception:
+            pass
+
+    return seed
 

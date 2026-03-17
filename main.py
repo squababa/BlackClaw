@@ -83,6 +83,9 @@ from store import (
     list_recent_review_items,
     resolve_candidate_lineage_metadata,
     resolve_convergence_lineage_metadata,
+    save_discovered_domain,
+    list_all_discovered_domains,
+    set_discovered_domain_enabled,
 )
 from seed import pick_seed, resolve_seed_choice
 
@@ -3782,6 +3785,25 @@ def parse_args():
         metavar="ID",
         help="Mark a prediction as unknown and exit",
     )
+    parser.add_argument(
+        "--discovered-domains",
+        action="store_true",
+        help="List all discovered domains with usage stats and exit",
+    )
+    parser.add_argument(
+        "--disable-discovered-domain",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Disable a discovered domain by name and exit",
+    )
+    parser.add_argument(
+        "--enable-discovered-domain",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Re-enable a discovered domain by name and exit",
+    )
     return parser.parse_args()
 
 
@@ -5586,6 +5608,89 @@ def _run_eval_batch(
     return stored_rows
 
 
+_GENERIC_DOMAIN_BLOCKLIST = frozenset({
+    "science", "engineering", "technology", "systems", "research",
+    "mathematics", "physics", "biology", "chemistry", "medicine",
+    "analysis", "design", "management", "theory", "method",
+    "process", "structure", "data", "model", "network",
+})
+
+_BUILTIN_DOMAIN_NAMES: set[str] | None = None
+
+
+def _get_builtin_domain_names() -> set[str]:
+    """Lazily load and cache normalized built-in domain names from domains.json."""
+    global _BUILTIN_DOMAIN_NAMES
+    if _BUILTIN_DOMAIN_NAMES is None:
+        try:
+            path = Path(__file__).parent / "domains.json"
+            with open(path, "r") as f:
+                data = json.load(f)
+            _BUILTIN_DOMAIN_NAMES = {
+                " ".join(d["name"].split()).lower() for d in data.get("domains", [])
+            }
+        except Exception:
+            _BUILTIN_DOMAIN_NAMES = set()
+    return _BUILTIN_DOMAIN_NAMES
+
+
+def _maybe_discover_domain(connection: dict, transmission_number: int, source_domain: str) -> None:
+    """Extract target_domain from a transmitted connection and save it as a discovered domain."""
+    target = (connection.get("target_domain") or "").strip()
+    if not target:
+        return
+
+    normalized = " ".join(target.split()).lower()
+
+    # Skip if already a built-in domain
+    if normalized in _get_builtin_domain_names():
+        return
+
+    # Skip if too generic (fewer than 2 words or matches blocklist)
+    words = normalized.split()
+    if len(words) < 2:
+        return
+    if normalized in _GENERIC_DOMAIN_BLOCKLIST:
+        return
+
+    # Generate seed queries via LLM
+    try:
+        llm_client = get_llm_client()
+        prompt = (
+            f'Generate exactly 2 search queries for exploring the domain '
+            f'"{target}" to find transferable mechanisms and structural '
+            f'patterns. Return ONLY JSON: {{"queries": ["query1", "query2"]}}'
+        )
+        response = llm_client.generate_content(
+            prompt,
+            generation_config={"max_output_tokens": 200},
+        )
+        increment_llm_calls(1)
+        raw = response.text if getattr(response, "text", None) else ""
+        # Extract JSON from response (may be wrapped in markdown)
+        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not json_match:
+            return
+        parsed = json.loads(json_match.group())
+        queries = parsed.get("queries", [])
+        if not isinstance(queries, list) or len(queries) < 2:
+            return
+        seed_queries = [str(q).strip() for q in queries[:2] if str(q).strip()]
+        if len(seed_queries) < 2:
+            return
+    except Exception:
+        return
+
+    saved = save_discovered_domain(
+        name=target,
+        seed_queries=seed_queries,
+        source_transmission=transmission_number,
+        source_domain=source_domain,
+    )
+    if saved:
+        print(f"  [Discovery] New domain added to pool: {' '.join(target.split()).title()}")
+
+
 def _score_store_and_transmit(
     score_label: str,
     source_domain: str,
@@ -5725,6 +5830,10 @@ def _score_store_and_transmit(
         )
         print_transmission(formatted)
         transmitted = True
+        try:
+            _maybe_discover_domain(connection, tx_num, source_domain)
+        except Exception:
+            pass
 
     return transmitted, float(candidate["total_score"] or 0.0)
 
@@ -5931,6 +6040,40 @@ def main():
         return
 
     init_db()
+
+    if args.discovered_domains:
+        rows = list_all_discovered_domains()
+        if not rows:
+            print("[Discovered] No discovered domains yet.")
+            return
+        print("name\tcategory\tsource\tdiscovered\tused\tenabled")
+        for row in rows:
+            print(
+                f"{row.get('name')}\t{row.get('category')}\t"
+                f"{row.get('source_domain') or '-'}\t"
+                f"{(row.get('discovered_at') or '')[:10]}\t"
+                f"{row.get('times_used_as_seed')}\t"
+                f"{'yes' if row.get('enabled') else 'no'}"
+            )
+        return
+
+    if args.disable_discovered_domain is not None:
+        if set_discovered_domain_enabled(args.disable_discovered_domain, False):
+            normalized = " ".join(args.disable_discovered_domain.split()).title()
+            print(f"[Discovered] Disabled domain: {normalized}")
+        else:
+            print(f"  [!] Discovered domain not found: {args.disable_discovered_domain}")
+            sys.exit(1)
+        return
+
+    if args.enable_discovered_domain is not None:
+        if set_discovered_domain_enabled(args.enable_discovered_domain, True):
+            normalized = " ".join(args.enable_discovered_domain.split()).title()
+            print(f"[Discovered] Enabled domain: {normalized}")
+        else:
+            print(f"  [!] Discovered domain not found: {args.enable_discovered_domain}")
+            sys.exit(1)
+        return
 
     if args.rut_report:
         _print_rut_report(rut_report(window=args.rut_window))
