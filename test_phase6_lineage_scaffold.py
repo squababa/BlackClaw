@@ -14,19 +14,37 @@ def temp_db(monkeypatch, tmp_path):
     return db_path
 
 
-def _insert_exploration(db_path, seed_domain: str = "seed.test") -> int:
+def _insert_exploration(
+    db_path,
+    seed_domain: str = "seed.test",
+    target_domain: str | None = None,
+) -> int:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys=ON")
     cursor = conn.execute(
         """INSERT INTO explorations (
-            timestamp, seed_domain, seed_category, transmitted
-        ) VALUES (?, ?, ?, ?)""",
-        ("2026-03-10T12:00:00+00:00", seed_domain, "test", 0),
+            timestamp, seed_domain, seed_category, jump_target_domain, transmitted
+        ) VALUES (?, ?, ?, ?, ?)""",
+        ("2026-03-10T12:00:00+00:00", seed_domain, "test", target_domain, 0),
     )
     exploration_id = int(cursor.lastrowid)
     conn.commit()
     conn.close()
     return exploration_id
+
+
+def _build_connection(
+    *,
+    mechanism: str,
+    variable_mapping: dict[str, str],
+    prediction: str,
+) -> dict:
+    return {
+        "mechanism": mechanism,
+        "variable_mapping": variable_mapping,
+        "prediction": prediction,
+        "test": "Measure the predicted shift after applying the mechanism.",
+    }
 
 
 def test_lineage_and_scar_payload_round_trip_for_transmission_and_rejection(temp_db) -> None:
@@ -210,3 +228,252 @@ def test_empty_lineage_payloads_do_not_break_report_helpers(temp_db, capsys) -> 
         capsys.readouterr().out.strip()
         == f"[Lineage] Strong rejection #{rejection_id}: no lineage data stored."
     )
+
+
+def test_resolve_lineage_links_child_transmission_to_prior_transmission_cluster(
+    temp_db,
+) -> None:
+    parent_connection = _build_connection(
+        mechanism="queue pressure amplifies response latency",
+        variable_mapping={"queue pressure": "response latency"},
+        prediction="response latency rises when queue pressure stays elevated",
+    )
+    parent_signature = store.build_mechanism_signature(parent_connection)
+    parent_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=parent_exploration_id,
+        formatted_output="parent transmission",
+        mechanism_signature=parent_signature,
+    )
+
+    resolved = store.resolve_candidate_lineage_metadata(
+        source_domain="systems.test",
+        target_domain="latency.test",
+        mechanism_signature=parent_signature,
+        record_kind="transmission",
+    )
+
+    child_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=2,
+        exploration_id=child_exploration_id,
+        formatted_output="child transmission",
+        mechanism_signature=parent_signature,
+        parent_transmission_number=resolved["parent_transmission_number"],
+        parent_strong_rejection_id=resolved["parent_strong_rejection_id"],
+        lineage_root_id=resolved["lineage_root_id"],
+        lineage_change=resolved["lineage_change"],
+    )
+
+    assert resolved["parent_transmission_number"] == 1
+    assert resolved["parent_strong_rejection_id"] is None
+    assert resolved["lineage_root_id"] == "root-tx-1"
+    assert resolved["lineage_change"]["event_types"] == ["mechanism_evolved"]
+    assert "transmission #1" in resolved["lineage_change"]["summary"]
+    assert store.get_transmission_lineage_metadata(1)["lineage_root_id"] == "root-tx-1"
+    assert store.get_transmission_lineage_metadata(2) == {
+        "transmission_number": 2,
+        "lineage_root_id": "root-tx-1",
+        "parent_transmission_number": 1,
+        "parent_strong_rejection_id": None,
+        "lineage_change": resolved["lineage_change"],
+        "scar_summary": None,
+    }
+
+
+def test_resolve_lineage_links_child_transmission_to_prior_strong_rejection(
+    temp_db,
+) -> None:
+    parent_connection = _build_connection(
+        mechanism="burst debt destabilizes refill recovery",
+        variable_mapping={"burst debt": "recovery delay"},
+        prediction="recovery delay grows after repeated burst debt accumulation",
+    )
+    parent_signature = store.build_mechanism_signature(parent_connection)
+    parent_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="traffic.test",
+        target_domain="recovery.test",
+    )
+    rejection_id = store.save_strong_rejection(
+        exploration_id=parent_exploration_id,
+        seed_domain="traffic.test",
+        target_domain="recovery.test",
+        connection_payload=parent_connection,
+    )
+
+    resolved = store.resolve_candidate_lineage_metadata(
+        source_domain="traffic.test",
+        target_domain="recovery.test",
+        mechanism_signature=parent_signature,
+        record_kind="transmission",
+    )
+
+    child_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="traffic.test",
+        target_domain="recovery.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=child_exploration_id,
+        formatted_output="recovered transmission",
+        mechanism_signature=parent_signature,
+        parent_transmission_number=resolved["parent_transmission_number"],
+        parent_strong_rejection_id=resolved["parent_strong_rejection_id"],
+        lineage_root_id=resolved["lineage_root_id"],
+        lineage_change=resolved["lineage_change"],
+    )
+
+    assert resolved["parent_transmission_number"] is None
+    assert resolved["parent_strong_rejection_id"] == rejection_id
+    assert resolved["lineage_root_id"] == f"root-rj-{rejection_id}"
+    assert resolved["lineage_change"]["event_types"] == [
+        "transmission_from_prior_rejection"
+    ]
+    assert (
+        store.get_strong_rejection_lineage_metadata(rejection_id)["lineage_root_id"]
+        == f"root-rj-{rejection_id}"
+    )
+    assert store.get_transmission_lineage_metadata(1)["lineage_root_id"] == (
+        f"root-rj-{rejection_id}"
+    )
+
+
+def test_resolve_lineage_uses_domain_pair_revisit_fallback_for_child_rejection(
+    temp_db,
+) -> None:
+    parent_connection = _build_connection(
+        mechanism="queue latency feedback",
+        variable_mapping={"queue depth": "latency response"},
+        prediction="latency rises under overload",
+    )
+    child_connection = _build_connection(
+        mechanism="queue latency coupling",
+        variable_mapping={"queue depth": "latency drift"},
+        prediction="latency rises under overload",
+    )
+    parent_signature = store.build_mechanism_signature(parent_connection)
+    child_signature = store.build_mechanism_signature(child_connection)
+    similarity = store._signature_similarity(parent_signature, child_signature)
+
+    assert 0.60 < similarity < 0.80
+
+    parent_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="ops.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=parent_exploration_id,
+        formatted_output="baseline transmission",
+        mechanism_signature=parent_signature,
+    )
+
+    resolved = store.resolve_candidate_lineage_metadata(
+        source_domain="ops.test",
+        target_domain="latency.test",
+        mechanism_signature=child_signature,
+        record_kind="strong_rejection",
+    )
+
+    rejection_id = store.save_strong_rejection(
+        exploration_id=_insert_exploration(
+            temp_db,
+            seed_domain="ops.test",
+            target_domain="latency.test",
+        ),
+        seed_domain="ops.test",
+        target_domain="latency.test",
+        connection_payload=child_connection,
+        parent_transmission_number=resolved["parent_transmission_number"],
+        parent_strong_rejection_id=resolved["parent_strong_rejection_id"],
+        lineage_root_id=resolved["lineage_root_id"],
+        lineage_change=resolved["lineage_change"],
+    )
+
+    assert resolved["parent_transmission_number"] == 1
+    assert resolved["parent_strong_rejection_id"] is None
+    assert resolved["lineage_root_id"] == "root-tx-1"
+    assert resolved["lineage_change"]["event_types"] == ["domain_pair_revisit"]
+    assert "Domain-pair revisit" in resolved["lineage_change"]["summary"]
+    assert store.get_transmission_lineage_metadata(1)["lineage_root_id"] == "root-tx-1"
+    assert store.get_strong_rejection_lineage_metadata(rejection_id) == {
+        "id": rejection_id,
+        "lineage_root_id": "root-tx-1",
+        "parent_transmission_number": 1,
+        "parent_strong_rejection_id": None,
+        "lineage_change": resolved["lineage_change"],
+        "scar_summary": None,
+    }
+
+
+def test_resolve_lineage_prefers_stronger_signature_parent_over_same_domain_pair_match(
+    temp_db,
+) -> None:
+    same_domain_connection = _build_connection(
+        mechanism="queue pressure amplifies response latency under stress load",
+        variable_mapping={"queue pressure": "response latency"},
+        prediction="response latency rises under sustained queue pressure",
+    )
+    stronger_parent_connection = _build_connection(
+        mechanism="queue pressure amplifies response latency under burst load",
+        variable_mapping={"queue pressure": "response latency"},
+        prediction="response latency rises under sustained queue pressure",
+    )
+    same_domain_signature = store.build_mechanism_signature(same_domain_connection)
+    stronger_parent_signature = store.build_mechanism_signature(stronger_parent_connection)
+    similarity = store._signature_similarity(
+        same_domain_signature,
+        stronger_parent_signature,
+    )
+
+    assert 0.80 <= similarity < 0.92
+
+    same_domain_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="ops.test",
+        target_domain="latency.test",
+    )
+    store.save_transmission(
+        transmission_number=1,
+        exploration_id=same_domain_exploration_id,
+        formatted_output="same-domain strong candidate",
+        mechanism_signature=same_domain_signature,
+    )
+
+    stronger_parent_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="reliability.test",
+    )
+    store.save_transmission(
+        transmission_number=2,
+        exploration_id=stronger_parent_exploration_id,
+        formatted_output="stronger signature parent",
+        mechanism_signature=stronger_parent_signature,
+    )
+
+    resolved = store.resolve_candidate_lineage_metadata(
+        source_domain="ops.test",
+        target_domain="latency.test",
+        mechanism_signature=stronger_parent_signature,
+        record_kind="transmission",
+    )
+
+    assert resolved["parent_transmission_number"] == 2
+    assert resolved["parent_strong_rejection_id"] is None
+    assert resolved["lineage_root_id"] == "root-tx-2"
+    assert resolved["lineage_change"]["event_types"] == ["mechanism_evolved"]
+    assert "transmission #2" in resolved["lineage_change"]["summary"]
+    assert store.get_transmission_lineage_metadata(2)["lineage_root_id"] == "root-tx-2"
