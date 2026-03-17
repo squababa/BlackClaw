@@ -47,6 +47,137 @@ def _build_connection(
     }
 
 
+def _build_strong_rejection_candidate() -> dict:
+    connection = _build_connection(
+        mechanism="queue pressure amplifies response latency",
+        variable_mapping={
+            "queue pressure": "response latency",
+            "burst debt": "recovery delay",
+            "retry storms": "error rate",
+        },
+        prediction="response latency rises when queue pressure stays elevated",
+    )
+    mechanism_typing = {
+        "mechanism_type": "feedback_loop",
+        "mechanism_type_confidence": 0.92,
+        "secondary_mechanism_types": [],
+    }
+    evidence_map = {
+        "variable_mappings": [],
+        "mechanism_assertions": [],
+    }
+    claim_provenance = {
+        "passes": False,
+        "evidence_map": evidence_map,
+        "critical_mapping_count": 3,
+        "supported_critical_mapping_count": 2,
+        "required_mechanism_assertion_count": 1,
+        "supported_mechanism_assertion_count": 0,
+        "missing_critical_mappings": [
+            {
+                "source_variable": "queue pressure",
+                "target_variable": "response latency",
+            }
+        ],
+        "failure_details": [
+            {
+                "kind": "variable_mapping",
+                "source_variable": "queue pressure",
+                "target_variable": "response latency",
+                "message": (
+                    "evidence_map missing support for variable mapping "
+                    "'queue pressure' -> 'response latency'"
+                ),
+                "reason_codes": ["claim_snippet_mismatch"],
+            },
+            {
+                "kind": "mechanism_assertion",
+                "mechanism_claim": "Queue pressure slows response handling",
+                "message": "mechanism assertion missing source_reference",
+                "reason_codes": ["missing_source_reference"],
+            },
+        ],
+        "issues": [
+            (
+                "evidence_map missing support for variable mapping "
+                "'queue pressure' -> 'response latency'"
+            ),
+            "mechanism assertion missing source_reference",
+        ],
+    }
+    prediction_quality = {
+        "passes": True,
+        "score": 0.88,
+        "missing_fields": [],
+        "blocking_reasons": [],
+        "issues": [],
+    }
+    prepared_connection = {
+        **connection,
+        "connection": "Queue pressure amplifies response latency.",
+        "mechanism_typing": mechanism_typing,
+        "mechanism_type": mechanism_typing["mechanism_type"],
+        "evidence_map": evidence_map,
+        "seed_url": "https://seed.test/article",
+        "seed_excerpt": "Queue pressure accumulates during overload windows.",
+    }
+    validation_reasons = [
+        (
+            "evidence_map missing support for variable mapping "
+            "'queue pressure' -> 'response latency'"
+        ),
+        "mechanism assertion missing source_reference",
+    ]
+    return {
+        "total_score": 0.94,
+        "novelty_score": 0.81,
+        "distance_score": 0.74,
+        "depth_score": 0.79,
+        "passes_threshold": True,
+        "should_transmit": False,
+        "validation_ok": False,
+        "validation_reasons": validation_reasons,
+        "validation_log": {
+            "passed": False,
+            "rejection_reasons": validation_reasons,
+            "prediction_quality": prediction_quality,
+            "claim_provenance": claim_provenance,
+            "mechanism_typing": mechanism_typing,
+        },
+        "prediction_quality_ok": True,
+        "prediction_quality": prediction_quality,
+        "prediction_quality_score": prediction_quality["score"],
+        "claim_provenance": claim_provenance,
+        "adversarial_ok": True,
+        "adversarial_rubric": None,
+        "invariance_ok": True,
+        "invariance_result": None,
+        "boring": False,
+        "semantic_duplicate": False,
+        "transmission_embedding": None,
+        "seed_url": "https://seed.test/article",
+        "seed_excerpt": "Queue pressure accumulates during overload windows.",
+        "target_url": "https://target.test/article",
+        "target_excerpt": "Response latency spikes during queue buildup.",
+        "provenance_ok": False,
+        "distance_ok": True,
+        "white_detected": False,
+        "rewritten_description": "Queue pressure amplifies response latency.",
+        "scholarly_prior_art_summary": "Prior work partially overlaps but lacks this framing.",
+        "prepared_connection": prepared_connection,
+        "stage_failures": [
+            (
+                "validation:evidence_map missing support for variable mapping "
+                "'queue pressure' -> 'response latency'"
+            ),
+            "claim_provenance:mechanism assertion missing source_reference",
+            "provenance:incomplete",
+        ],
+        "late_stage_timing": {"stages": {"validation": {"duration_ms": 12.0}}},
+        "actual_target": "latency.test",
+    }
+
+
 def test_lineage_and_scar_payload_round_trip_for_transmission_and_rejection(temp_db) -> None:
     exploration_id = _insert_exploration(temp_db)
 
@@ -477,3 +608,137 @@ def test_resolve_lineage_prefers_stronger_signature_parent_over_same_domain_pair
     assert resolved["lineage_change"]["event_types"] == ["mechanism_evolved"]
     assert "transmission #2" in resolved["lineage_change"]["summary"]
     assert store.get_transmission_lineage_metadata(2)["lineage_root_id"] == "root-tx-2"
+
+
+def test_score_store_and_transmit_saves_extracted_scar_summary(
+    temp_db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "_evaluate_connection_candidate",
+        lambda **kwargs: _build_strong_rejection_candidate(),
+    )
+    monkeypatch.setattr(main, "_handle_convergence", lambda **kwargs: False)
+    monkeypatch.setattr(
+        main,
+        "resolve_candidate_lineage_metadata",
+        lambda **kwargs: {
+            "parent_transmission_number": None,
+            "parent_strong_rejection_id": None,
+            "lineage_root_id": None,
+            "lineage_change": None,
+        },
+    )
+
+    transmitted, total_score = main._score_store_and_transmit(
+        score_label="Test",
+        source_domain="systems.test",
+        source_category="ops",
+        root_seed_name="queue pressure",
+        patterns_payload=[{"pattern_name": "Queue feedback"}],
+        connection={"target_domain": "latency.test"},
+        target_domain="latency.test",
+        chain_path=["systems.test"],
+        exploration_path=["systems.test", "latency.test"],
+        threshold=0.6,
+    )
+
+    row = store.list_strong_rejections(limit=1)[0]
+    scar_summary = row["scar_summary"]
+
+    assert transmitted is False
+    assert total_score == pytest.approx(0.94)
+    assert scar_summary["count"] == 1
+    assert scar_summary["summary"].startswith("Provenance failure:")
+    assert scar_summary["details"]["failure_category"] == "provenance"
+    assert scar_summary["details"]["failed_variable_mappings"] == [
+        "queue pressure -> response latency"
+    ]
+    assert scar_summary["details"]["failed_mechanism_assertions"] == [
+        "Queue pressure slows response handling"
+    ]
+    assert scar_summary["details"]["provenance_failure_codes"] == [
+        "claim_snippet_mismatch",
+        "missing_source_reference",
+    ]
+
+
+def test_score_store_and_transmit_increments_matching_parent_scar_count(
+    temp_db,
+    monkeypatch,
+) -> None:
+    parent_candidate = _build_strong_rejection_candidate()
+    parent_analysis = main._strong_rejection_analysis(parent_candidate)
+    parent_scar_summary = main._build_strong_rejection_scar_summary(
+        parent_candidate,
+        parent_analysis,
+    )
+    parent_exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    parent_rejection_id = store.save_strong_rejection(
+        exploration_id=parent_exploration_id,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+        total_score=parent_candidate["total_score"],
+        novelty_score=parent_candidate["novelty_score"],
+        distance_score=parent_candidate["distance_score"],
+        depth_score=parent_candidate["depth_score"],
+        prediction_quality_score=parent_candidate["prediction_quality_score"],
+        mechanism_type=parent_candidate["prepared_connection"]["mechanism_type"],
+        rejection_stage=parent_analysis["rejection_stage"],
+        rejection_reasons=parent_candidate["stage_failures"],
+        salvage_reason=main.summarize_strong_rejection_reason(parent_candidate),
+        connection_payload=parent_candidate["prepared_connection"],
+        validation=parent_candidate["validation_log"],
+        evidence_map=parent_candidate["prepared_connection"]["evidence_map"],
+        mechanism_typing=parent_candidate["prepared_connection"]["mechanism_typing"],
+        scar_summary=parent_scar_summary,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_evaluate_connection_candidate",
+        lambda **kwargs: _build_strong_rejection_candidate(),
+    )
+    monkeypatch.setattr(main, "_handle_convergence", lambda **kwargs: False)
+    monkeypatch.setattr(
+        main,
+        "resolve_candidate_lineage_metadata",
+        lambda **kwargs: {
+            "parent_transmission_number": None,
+            "parent_strong_rejection_id": parent_rejection_id,
+            "lineage_root_id": f"root-rj-{parent_rejection_id}",
+            "lineage_change": {
+                "summary": (
+                    f"Mechanism evolved from strong rejection #{parent_rejection_id}."
+                ),
+                "event_types": ["mechanism_evolved"],
+            },
+        },
+    )
+
+    main._score_store_and_transmit(
+        score_label="Test",
+        source_domain="systems.test",
+        source_category="ops",
+        root_seed_name="queue pressure",
+        patterns_payload=[{"pattern_name": "Queue feedback"}],
+        connection={"target_domain": "latency.test"},
+        target_domain="latency.test",
+        chain_path=["systems.test"],
+        exploration_path=["systems.test", "latency.test"],
+        threshold=0.6,
+    )
+
+    rows = store.list_strong_rejections(limit=5)
+    child_row = next(row for row in rows if row["id"] != parent_rejection_id)
+    scar_summary = child_row["scar_summary"]
+
+    assert scar_summary["count"] == 2
+    assert scar_summary["summary"] == parent_scar_summary["summary"]
+    assert scar_summary["details"]["failure_category"] == "provenance"
+    assert child_row["parent_strong_rejection_id"] == parent_rejection_id
