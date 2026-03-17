@@ -4315,6 +4315,304 @@ def summarize_strong_rejection_reason(candidate: dict | None) -> str:
     return bucket_label or "repairable validation rejection"
 
 
+def _clean_strong_rejection_reason_text(reason: object) -> str | None:
+    """Normalize one stored rejection reason for operator-readable scar summaries."""
+    text = _clean_inline_text(reason)
+    if text is None:
+        return None
+    for prefix in ("validation:", "claim_provenance:", "provenance:"):
+        if not text.startswith(prefix):
+            continue
+        if prefix == "provenance:" and text == "provenance:incomplete":
+            return "provenance incomplete"
+        return _clean_inline_text(text.split(":", 1)[1])
+    return text
+
+
+def _strong_rejection_reason_list_for_scar(values: object) -> list[str]:
+    """Collect unique cleaned rejection reasons for scar extraction."""
+    if not isinstance(values, list):
+        return []
+    reasons: list[str] = []
+    for value in values:
+        cleaned = _clean_strong_rejection_reason_text(value)
+        if cleaned is not None and cleaned not in reasons:
+            reasons.append(cleaned)
+    return reasons
+
+
+def _strong_rejection_failure_category(analysis: dict | None) -> str:
+    """Collapse strong-rejection analysis into a small operator-facing failure family."""
+    payload = analysis if isinstance(analysis, dict) else {}
+    categories = {
+        str(category).strip()
+        for category in (payload.get("categories") or [])
+        if str(category).strip()
+    }
+    stage = str(payload.get("rejection_stage") or "").strip().lower()
+
+    if categories & {"claim_provenance", "provenance"} or stage in {
+        "claim_provenance",
+        "provenance",
+    }:
+        return "provenance"
+    if "prediction_quality" in categories and not categories & {
+        "mechanism_typing",
+        "validation_packaging",
+    }:
+        return "prediction_quality"
+    if categories & {"mechanism_typing", "validation_packaging"} or stage in {
+        "mechanism_typing",
+        "validation",
+    }:
+        return "mechanism_packaging"
+    if "prediction_quality" in categories:
+        return "prediction_quality"
+    return stage or "validation"
+
+
+def _resolved_parent_scar_summary(lineage: dict | None) -> dict | None:
+    """Fetch the resolved parent scar summary, if any."""
+    payload = lineage if isinstance(lineage, dict) else {}
+    parent_transmission_number = payload.get("parent_transmission_number")
+    if parent_transmission_number is not None:
+        parent_row = get_transmission_lineage_metadata(int(parent_transmission_number))
+        if isinstance(parent_row, dict) and isinstance(parent_row.get("scar_summary"), dict):
+            return parent_row.get("scar_summary")
+    parent_strong_rejection_id = payload.get("parent_strong_rejection_id")
+    if parent_strong_rejection_id is not None:
+        parent_row = get_strong_rejection_lineage_metadata(int(parent_strong_rejection_id))
+        if isinstance(parent_row, dict) and isinstance(parent_row.get("scar_summary"), dict):
+            return parent_row.get("scar_summary")
+    return None
+
+
+def _strong_rejection_scar_signature(scar_summary: dict | None) -> tuple | None:
+    """Build a conservative signature used to detect recurring scar patterns."""
+    payload = scar_summary if isinstance(scar_summary, dict) else {}
+    if not payload:
+        return None
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+
+    def _clean_list(values: object) -> tuple[str, ...]:
+        if not isinstance(values, list):
+            return ()
+        items: list[str] = []
+        for value in values:
+            cleaned = _clean_inline_text(value)
+            if cleaned is not None and cleaned not in items:
+                items.append(cleaned)
+        return tuple(sorted(items))
+
+    failure_category = _clean_inline_text(details.get("failure_category"))
+    failed_variable_mappings = _clean_list(details.get("failed_variable_mappings"))
+    failed_mechanism_assertions = _clean_list(
+        details.get("failed_mechanism_assertions")
+    )
+    provenance_failure_codes = _clean_list(details.get("provenance_failure_codes"))
+    prediction_missing_fields = _clean_list(details.get("prediction_missing_fields"))
+    validation_reasons = _clean_list(details.get("validation_reasons"))
+    if (
+        failure_category is not None
+        or failed_variable_mappings
+        or failed_mechanism_assertions
+        or provenance_failure_codes
+        or prediction_missing_fields
+        or validation_reasons
+    ):
+        return (
+            failure_category or "",
+            failed_variable_mappings,
+            failed_mechanism_assertions,
+            provenance_failure_codes,
+            prediction_missing_fields,
+            validation_reasons,
+        )
+    summary = _clean_inline_text(payload.get("summary"))
+    if summary is not None:
+        return ("summary", summary)
+    return None
+
+
+def _build_strong_rejection_scar_summary(
+    candidate: dict | None,
+    analysis: dict | None,
+    lineage: dict | None = None,
+) -> dict | None:
+    """Extract a compact structured scar summary for a saved strong rejection."""
+    payload = candidate if isinstance(candidate, dict) else {}
+    analysis_payload = analysis if isinstance(analysis, dict) else {}
+    claim_provenance = (
+        payload.get("claim_provenance")
+        if isinstance(payload.get("claim_provenance"), dict)
+        else {}
+    )
+    prediction_quality = (
+        payload.get("prediction_quality")
+        if isinstance(payload.get("prediction_quality"), dict)
+        else {}
+    )
+    validation_reasons = _strong_rejection_reason_list_for_scar(
+        payload.get("validation_reasons")
+    )
+    scar_reasons = _strong_rejection_reason_list_for_scar(
+        payload.get("stage_failures") or payload.get("validation_reasons")
+    )
+    failure_category = _strong_rejection_failure_category(analysis_payload)
+
+    failed_variable_mappings: list[str] = []
+    failed_mechanism_assertions: list[str] = []
+    provenance_failure_codes: list[str] = []
+    for detail in claim_provenance.get("failure_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        source_variable = _clean_inline_text(detail.get("source_variable"))
+        target_variable = _clean_inline_text(detail.get("target_variable"))
+        if (
+            str(detail.get("kind") or "").strip() == "variable_mapping"
+            and source_variable
+            and target_variable
+        ):
+            pair = f"{source_variable} -> {target_variable}"
+            if pair not in failed_variable_mappings:
+                failed_variable_mappings.append(pair)
+        if str(detail.get("kind") or "").strip() == "mechanism_assertion":
+            mechanism_text = _clean_inline_text(
+                detail.get("mechanism_claim")
+            ) or _clean_inline_text(detail.get("message"))
+            if mechanism_text is not None and mechanism_text not in failed_mechanism_assertions:
+                failed_mechanism_assertions.append(mechanism_text)
+        for code in detail.get("reason_codes") or []:
+            clean_code = _clean_inline_text(code)
+            if clean_code is not None and clean_code not in provenance_failure_codes:
+                provenance_failure_codes.append(clean_code)
+
+    for mapping in claim_provenance.get("missing_critical_mappings") or []:
+        if not isinstance(mapping, dict):
+            continue
+        source_variable = _clean_inline_text(mapping.get("source_variable"))
+        target_variable = _clean_inline_text(mapping.get("target_variable"))
+        if not source_variable or not target_variable:
+            continue
+        pair = f"{source_variable} -> {target_variable}"
+        if pair not in failed_variable_mappings:
+            failed_variable_mappings.append(pair)
+
+    prediction_missing_fields = []
+    for field in prediction_quality.get("missing_fields") or []:
+        clean_field = _clean_inline_text(field)
+        if clean_field is not None and clean_field not in prediction_missing_fields:
+            prediction_missing_fields.append(clean_field)
+
+    summary: str
+    if failure_category == "provenance":
+        summary_bits = []
+        if failed_variable_mappings:
+            summary_bits.append(
+                "unsupported mappings: "
+                + ", ".join(failed_variable_mappings[:2])
+            )
+        if failed_mechanism_assertions:
+            mechanism_text = failed_mechanism_assertions[0]
+            if mechanism_text.lower() == "mechanism assertion":
+                summary_bits.append("weak mechanism assertion support")
+            else:
+                summary_bits.append(f"weak mechanism support: {mechanism_text}")
+        if provenance_failure_codes:
+            summary_bits.append(
+                "codes: " + ", ".join(provenance_failure_codes[:2])
+            )
+        if not summary_bits and scar_reasons:
+            summary_bits.append(scar_reasons[0])
+        summary = (
+            "Provenance failure: " + "; ".join(summary_bits)
+            if summary_bits
+            else "Provenance failure"
+        )
+    elif failure_category == "prediction_quality":
+        if prediction_missing_fields:
+            summary = (
+                "Prediction quality failure: missing "
+                + ", ".join(prediction_missing_fields[:3])
+            )
+        else:
+            summary_reason = _first_review_reason(
+                prediction_quality.get("blocking_reasons") or prediction_quality.get("issues")
+            ) or _first_review_reason(validation_reasons)
+            summary = (
+                f"Prediction quality failure: {summary_reason}"
+                if summary_reason
+                else "Prediction quality failure"
+            )
+    elif failure_category == "mechanism_packaging":
+        packaging_reason = next(
+            (
+                reason
+                for reason in validation_reasons
+                if _reason_looks_like_mechanism_packaging_failure(reason)
+            ),
+            None,
+        ) or _first_review_reason(validation_reasons)
+        summary = (
+            f"Mechanism packaging failure: {packaging_reason}"
+            if packaging_reason
+            else "Mechanism packaging failure"
+        )
+    else:
+        fallback_reason = _first_review_reason(scar_reasons)
+        summary = (
+            f"Validation failure: {fallback_reason}"
+            if fallback_reason
+            else "Validation failure"
+        )
+
+    clean_categories = []
+    for category in analysis_payload.get("categories") or []:
+        text = _clean_inline_text(category)
+        if text is not None and text not in clean_categories:
+            clean_categories.append(text)
+
+    details: dict[str, object] = {
+        "failure_category": failure_category,
+        "rejection_stage": _clean_inline_text(analysis_payload.get("rejection_stage"))
+        or failure_category,
+    }
+    if clean_categories:
+        details["categories"] = clean_categories
+    if failed_variable_mappings:
+        details["failed_variable_mappings"] = failed_variable_mappings
+    if failed_mechanism_assertions:
+        details["failed_mechanism_assertions"] = failed_mechanism_assertions
+    if provenance_failure_codes:
+        details["provenance_failure_codes"] = provenance_failure_codes
+    if prediction_missing_fields:
+        details["prediction_missing_fields"] = prediction_missing_fields
+    if validation_reasons:
+        details["validation_reasons"] = validation_reasons[:3]
+
+    scar_summary: dict[str, object] = {
+        "summary": summary,
+        "count": 1,
+        "details": details,
+    }
+
+    parent_scar_summary = _resolved_parent_scar_summary(lineage)
+    if (
+        _strong_rejection_scar_signature(parent_scar_summary)
+        == _strong_rejection_scar_signature(scar_summary)
+    ):
+        try:
+            parent_count = max(1, int((parent_scar_summary or {}).get("count") or 1))
+        except (TypeError, ValueError):
+            parent_count = 1
+        parent_summary = _clean_inline_text((parent_scar_summary or {}).get("summary"))
+        scar_summary["count"] = parent_count + 1
+        if parent_summary is not None:
+            scar_summary["summary"] = parent_summary
+
+    return scar_summary
+
+
 def _handle_convergence(
     domain_a: str,
     domain_b: str,
@@ -5021,6 +5319,11 @@ def _score_store_and_transmit(
             mechanism_signature=mechanism_signature,
             record_kind="strong_rejection",
         )
+        strong_rejection_scar_summary = _build_strong_rejection_scar_summary(
+            candidate,
+            strong_rejection_analysis,
+            strong_rejection_lineage,
+        )
         save_strong_rejection(
             exploration_id=exploration_id,
             seed_domain=source_domain,
@@ -5048,6 +5351,7 @@ def _score_store_and_transmit(
             ),
             lineage_root_id=strong_rejection_lineage.get("lineage_root_id"),
             lineage_change=strong_rejection_lineage.get("lineage_change"),
+            scar_summary=strong_rejection_scar_summary,
         )
 
     transmitted = False
