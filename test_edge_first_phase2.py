@@ -222,6 +222,44 @@ def test_usefulness_gate_rejects_misaligned_cheap_test_metric() -> None:
     assert "usefulness:missing_cheap_test" in result["reasons"]
 
 
+def test_usefulness_gate_accepts_concrete_underexploitedness() -> None:
+    payload = _build_edge_first_payload()
+    claim_provenance = summarize_evidence_map_provenance(payload)
+
+    result = main._evaluate_usefulness_proof_gate(
+        payload,
+        prediction_quality=None,
+        claim_provenance=claim_provenance,
+    )
+
+    assert result["underexploited_ok"] is True
+    assert result["known_or_obvious"] is False
+    assert "usefulness:missing_underexploitedness" not in result["reasons"]
+    assert "usefulness:known_or_obvious" not in result["reasons"]
+
+
+def test_usefulness_gate_rejects_known_or_obvious_candidate() -> None:
+    payload = _build_edge_first_payload()
+    payload["edge_analysis"]["why_missed"] = (
+        "This is already standard practice in the target domain and widely known in scheduling literature."
+    )
+    payload["edge_analysis"]["expected_asymmetry"] = (
+        "The lever is commonly used and already established in standard practice."
+    )
+    claim_provenance = summarize_evidence_map_provenance(payload)
+
+    result = main._evaluate_usefulness_proof_gate(
+        payload,
+        prediction_quality=None,
+        claim_provenance=claim_provenance,
+    )
+
+    assert result["passes"] is False
+    assert result["underexploited_ok"] is False
+    assert result["known_or_obvious"] is True
+    assert "usefulness:known_or_obvious" in result["reasons"]
+
+
 def test_format_transmission_is_problem_first() -> None:
     payload = _build_edge_first_payload()
     output = transmit.format_transmission(

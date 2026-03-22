@@ -4929,6 +4929,69 @@ def _usefulness_overlap(text: object, terms: set[str]) -> int:
     return len(_usefulness_terms(text) & terms)
 
 
+USEFULNESS_GENERIC_UNDEREXPLOITED_PHRASES = (
+    "people may miss this",
+    "people might miss this",
+    "not often noticed",
+    "rarely noticed",
+    "underexplored",
+    "under explored",
+    "hidden opportunity",
+    "interesting cross-domain insight",
+    "this may create an edge",
+    "this could create an edge",
+)
+
+USEFULNESS_KNOWNNESS_MARKERS = (
+    "well known",
+    "widely known",
+    "already known",
+    "already established",
+    "standard practice",
+    "common practice",
+    "commonly used",
+    "widely used",
+    "routine practice",
+    "textbook",
+    "already explicit",
+    "already recommended",
+)
+
+USEFULNESS_UNDEREXPLOITED_HINTS = (
+    "cross-silo",
+    "cross silo",
+    "rarely searched",
+    "framed together",
+    "retrieval",
+    "search",
+    "query",
+    "silo",
+    "workflow",
+    "benchmark",
+    "default",
+    "measurement blind spot",
+    "indexing",
+    "discipline",
+    "literature",
+    "tooling",
+    "pipeline",
+    "naming mismatch",
+    "taxonomy",
+    "operator habit",
+    "screened out",
+    "underused",
+    "underexploited",
+)
+
+
+def _usefulness_contains_phrase(text: object, phrases: tuple[str, ...]) -> bool:
+    cleaned = _clean_inline_text(text)
+    if cleaned is None:
+        return False
+    lowered = cleaned.lower()
+    return any(phrase in lowered for phrase in phrases)
+
+
 def _usefulness_evidence_candidates(evidence_map: object) -> list[dict]:
     """Flatten claim-level evidence_map entries into compact alignment candidates."""
     payload = evidence_map if isinstance(evidence_map, dict) else {}
@@ -5357,6 +5420,10 @@ def _evaluate_usefulness_proof_gate(
     edge_problem = _usefulness_first_present(edge_analysis.get("problem_statement"))
     edge_lever = _usefulness_first_present(edge_analysis.get("actionable_lever"))
     edge_advantage = _usefulness_first_present(edge_analysis.get("edge_if_right"))
+    why_missed = _usefulness_first_present(edge_analysis.get("why_missed"))
+    expected_asymmetry = _usefulness_first_present(
+        edge_analysis.get("expected_asymmetry")
+    )
     edge_primary_operator = _usefulness_first_present(
         edge_analysis.get("primary_operator")
     )
@@ -5404,6 +5471,18 @@ def _evaluate_usefulness_proof_gate(
         "improve performance",
         "optimize performance",
     )
+    underexploited_anchor_terms = (
+        edge_problem_terms
+        | edge_lever_terms
+        | claim_anchor_terms
+        | mechanism_terms
+        | observable_terms
+    )
+    known_or_obvious = _usefulness_contains_phrase(
+        why_missed, USEFULNESS_KNOWNNESS_MARKERS
+    ) or _usefulness_contains_phrase(
+        expected_asymmetry, USEFULNESS_KNOWNNESS_MARKERS
+    )
 
     target_problem_ok = bool(observable and utility)
     operator_decision_ok = bool(observable and time_horizon and (confirm or falsify))
@@ -5440,6 +5519,31 @@ def _evaluate_usefulness_proof_gate(
             and any(term in edge_advantage.lower() for term in generic_advantage_terms)
         )
     )
+    why_missed_ok = bool(why_missed) and not (
+        _usefulness_contains_phrase(
+            why_missed, USEFULNESS_GENERIC_UNDEREXPLOITED_PHRASES
+        )
+        or _usefulness_contains_phrase(why_missed, USEFULNESS_KNOWNNESS_MARKERS)
+    ) and (
+        _usefulness_contains_phrase(why_missed, USEFULNESS_UNDEREXPLOITED_HINTS)
+        or _usefulness_overlap(why_missed, underexploited_anchor_terms) >= 1
+    )
+    expected_asymmetry_ok = bool(expected_asymmetry) and not (
+        _usefulness_contains_phrase(
+            expected_asymmetry, USEFULNESS_GENERIC_UNDEREXPLOITED_PHRASES
+        )
+        or _usefulness_contains_phrase(
+            expected_asymmetry, USEFULNESS_KNOWNNESS_MARKERS
+        )
+    ) and (
+        _usefulness_contains_phrase(
+            expected_asymmetry, USEFULNESS_UNDEREXPLOITED_HINTS
+        )
+        or _usefulness_overlap(expected_asymmetry, underexploited_anchor_terms) >= 1
+    )
+    underexploited_ok = not known_or_obvious and (
+        why_missed_ok or expected_asymmetry_ok
+    )
     edge_layer_aligned = (
         (not edge_problem_terms or _usefulness_overlap(edge_problem, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
         and (not edge_lever_terms or _usefulness_overlap(edge_lever, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
@@ -5463,6 +5567,10 @@ def _evaluate_usefulness_proof_gate(
         reasons.append("usefulness:edge_layer_misaligned")
     if not edge_advantage_ok:
         reasons.append("usefulness:missing_edge_advantage")
+    if known_or_obvious:
+        reasons.append("usefulness:known_or_obvious")
+    elif not underexploited_ok:
+        reasons.append("usefulness:missing_underexploitedness")
 
     return {
         "passes": not [
@@ -5479,6 +5587,10 @@ def _evaluate_usefulness_proof_gate(
         "actionable_lever_ok": actionable_lever_ok,
         "cheap_test_ok": cheap_test_ok,
         "edge_advantage_ok": edge_advantage_ok,
+        "why_missed_ok": why_missed_ok,
+        "expected_asymmetry_ok": expected_asymmetry_ok,
+        "underexploited_ok": underexploited_ok,
+        "known_or_obvious": known_or_obvious,
         "edge_layer_aligned": edge_layer_aligned,
         "claim_anchor": claim_anchor,
         "best_claim_overlap": best_claim_overlap,
