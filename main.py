@@ -12,6 +12,7 @@ import sys
 import time
 from prediction_enforcement import (
     evaluate_prediction_quality,
+    normalize_prediction_payload,
     prediction_quality_label,
     prediction_summary_text,
     prediction_test_text,
@@ -4817,6 +4818,259 @@ def _historical_strong_rejection_candidate(row: dict | None) -> dict | None:
     }
 
 
+USEFULNESS_ALIGNMENT_STOPWORDS = {
+    "about",
+    "across",
+    "after",
+    "against",
+    "also",
+    "baseline",
+    "before",
+    "between",
+    "both",
+    "claim",
+    "claims",
+    "condition",
+    "conditions",
+    "control",
+    "controls",
+    "decision",
+    "decisions",
+    "domain",
+    "domains",
+    "evidence",
+    "for",
+    "from",
+    "fusion",
+    "higher",
+    "increase",
+    "increases",
+    "lower",
+    "measure",
+    "measurable",
+    "mechanism",
+    "mechanisms",
+    "metric",
+    "metrics",
+    "model",
+    "models",
+    "multi",
+    "multiple",
+    "operator",
+    "operators",
+    "over",
+    "problem",
+    "problems",
+    "process",
+    "processes",
+    "redundancy",
+    "remains",
+    "same",
+    "sensor",
+    "sensors",
+    "signal",
+    "signals",
+    "single",
+    "source",
+    "sources",
+    "statistically",
+    "system",
+    "systems",
+    "target",
+    "targets",
+    "test",
+    "tests",
+    "than",
+    "that",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "through",
+    "under",
+    "using",
+    "when",
+    "where",
+    "which",
+    "while",
+    "with",
+}
+
+
+def _usefulness_first_present(*values: object) -> str | None:
+    """Return the first compact non-empty text value."""
+    for value in values:
+        cleaned = _clean_inline_text(value)
+        if cleaned is not None:
+            return cleaned
+    return None
+
+
+def _usefulness_terms(value: object) -> set[str]:
+    """Extract a narrow set of alignment terms from free text."""
+    cleaned = _clean_inline_text(value)
+    if cleaned is None:
+        return set()
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", cleaned.lower())
+        if len(token) >= 4 and token not in USEFULNESS_ALIGNMENT_STOPWORDS
+    }
+
+
+def _usefulness_overlap(text: object, terms: set[str]) -> int:
+    """Count shared alignment terms between one text and a target term set."""
+    if not terms:
+        return 0
+    return len(_usefulness_terms(text) & terms)
+
+
+def _usefulness_evidence_candidates(evidence_map: object) -> list[dict]:
+    """Flatten claim-level evidence_map entries into compact alignment candidates."""
+    payload = evidence_map if isinstance(evidence_map, dict) else {}
+    candidates: list[dict] = []
+
+    variable_entries = payload.get("variable_mappings")
+    if isinstance(variable_entries, list):
+        for entry in variable_entries:
+            if not isinstance(entry, dict):
+                continue
+            combined_text = " ".join(
+                part
+                for part in (
+                    _clean_inline_text(entry.get("claim")),
+                    _clean_inline_text(entry.get("evidence_snippet")),
+                    _clean_inline_text(entry.get("source_reference")),
+                )
+                if part
+            )
+            if combined_text:
+                candidates.append({"kind": "variable_mapping", "text": combined_text})
+
+    mechanism_entries = payload.get("mechanism_assertions")
+    if isinstance(mechanism_entries, list):
+        for entry in mechanism_entries:
+            if not isinstance(entry, dict):
+                continue
+            combined_text = " ".join(
+                part
+                for part in (
+                    _clean_inline_text(entry.get("mechanism_claim")),
+                    _clean_inline_text(entry.get("evidence_snippet")),
+                    _clean_inline_text(entry.get("source_reference")),
+                )
+                if part
+            )
+            if combined_text:
+                candidates.append({"kind": "mechanism_assertion", "text": combined_text})
+
+    return candidates
+
+
+def _evaluate_usefulness_proof_gate(
+    connection: dict | None,
+    prediction_quality: dict | None,
+    claim_provenance: dict | None,
+) -> dict:
+    """
+    Apply a narrow pre-transmit usefulness/proof gate using existing payload fields.
+    """
+    payload = connection if isinstance(connection, dict) else {}
+    prediction_payload = (
+        prediction_quality.get("prediction")
+        if isinstance(prediction_quality, dict)
+        and isinstance(prediction_quality.get("prediction"), dict)
+        else normalize_prediction_payload(payload)
+    )
+    test_payload = payload.get("test") if isinstance(payload.get("test"), dict) else {}
+    evidence_map = (
+        claim_provenance.get("evidence_map")
+        if isinstance(claim_provenance, dict)
+        and isinstance(claim_provenance.get("evidence_map"), dict)
+        else normalize_evidence_map(payload.get("evidence_map"))
+    )
+
+    observable = _usefulness_first_present(
+        prediction_payload.get("observable"),
+        test_payload.get("metric"),
+        test_payload.get("metrics"),
+    )
+    time_horizon = _usefulness_first_present(
+        prediction_payload.get("time_horizon"),
+        test_payload.get("horizon"),
+        test_payload.get("time_horizon"),
+        test_payload.get("timing"),
+    )
+    confirm = _usefulness_first_present(
+        test_payload.get("confirm"),
+        test_payload.get("confirms"),
+        test_payload.get("confirmed_if"),
+        test_payload.get("supports"),
+    )
+    falsify = _usefulness_first_present(
+        prediction_payload.get("falsification_condition"),
+        test_payload.get("falsify"),
+        test_payload.get("falsifies"),
+        test_payload.get("falsified_if"),
+        test_payload.get("refutes"),
+    )
+    utility = _usefulness_first_present(
+        prediction_payload.get("utility_rationale"),
+        prediction_payload.get("who_benefits"),
+    )
+    claim_anchor = _usefulness_first_present(
+        prediction_payload.get("statement"),
+        confirm,
+        prediction_payload.get("magnitude"),
+        observable,
+    )
+    mechanism_text = _usefulness_first_present(payload.get("mechanism"))
+
+    claim_anchor_terms = _usefulness_terms(claim_anchor)
+    mechanism_terms = _usefulness_terms(mechanism_text)
+    evidence_candidates = _usefulness_evidence_candidates(evidence_map)
+    best_claim_overlap = max(
+        (_usefulness_overlap(item.get("text"), claim_anchor_terms) for item in evidence_candidates),
+        default=0,
+    )
+    best_mechanism_overlap = max(
+        (
+            _usefulness_overlap(item.get("text"), mechanism_terms)
+            for item in evidence_candidates
+            if item.get("kind") == "mechanism_assertion"
+        ),
+        default=0,
+    )
+
+    target_problem_ok = bool(observable and utility)
+    operator_decision_ok = bool(observable and time_horizon and (confirm or falsify))
+    claim_alignment_ok = bool(claim_anchor_terms) and best_claim_overlap >= 3
+    mechanism_alignment_ok = not mechanism_terms or best_mechanism_overlap >= 2
+
+    reasons: list[str] = []
+    if not target_problem_ok:
+        reasons.append("usefulness:missing_target_problem")
+    if not operator_decision_ok:
+        reasons.append("usefulness:missing_operator_decision")
+    if not (claim_alignment_ok and mechanism_alignment_ok):
+        reasons.append("usefulness:weak_claim_evidence_alignment")
+
+    return {
+        "passes": not reasons,
+        "reasons": reasons,
+        "target_problem_ok": target_problem_ok,
+        "operator_decision_ok": operator_decision_ok,
+        "claim_alignment_ok": claim_alignment_ok,
+        "mechanism_alignment_ok": mechanism_alignment_ok,
+        "claim_anchor": claim_anchor,
+        "best_claim_overlap": best_claim_overlap,
+        "best_mechanism_overlap": best_mechanism_overlap,
+    }
+
+
 def _backfill_lineage_scars(limit: int | None = None) -> dict:
     """Run a narrow offline repair pass for historical Phase 5 lineage/scar metadata."""
     before_counts = get_lineage_backfill_completion_counts()
@@ -5109,6 +5363,8 @@ def _evaluate_connection_candidate(
     validation_reasons: list[str] = []
     validation_log = None
     claim_provenance_ok = bool(claim_provenance.get("passes"))
+    usefulness_ok = True
+    usefulness_proof = None
     prediction_quality_ok = True
     adversarial_ok = True
     adversarial_rubric = None
@@ -5147,7 +5403,27 @@ def _evaluate_connection_candidate(
             for reason in validation_reasons:
                 print(f"  [Validation] - {reason}")
 
-    if passes_threshold and validation_ok:
+    if passes_threshold and validation_ok and claim_provenance_ok:
+        usefulness_proof = _evaluate_usefulness_proof_gate(
+            connection=connection,
+            prediction_quality=prediction_quality,
+            claim_provenance=claim_provenance,
+        )
+        usefulness_ok = bool(usefulness_proof.get("passes"))
+        if validation_log is not None:
+            validation_log["usefulness_proof"] = usefulness_proof
+        if not usefulness_ok:
+            for reason in usefulness_proof.get("reasons") or []:
+                if reason and reason not in validation_reasons:
+                    validation_reasons.append(reason)
+            if validation_log is not None:
+                validation_log["passed"] = False
+                validation_log["rejection_reasons"] = validation_reasons
+            print("  [Usefulness] Blocked transmission - skipping transmission")
+            for reason in usefulness_proof.get("reasons") or []:
+                print(f"  [Usefulness] - {reason}")
+
+    if passes_threshold and validation_ok and usefulness_ok:
         adversarial_started = time.monotonic()
         adversarial_ok, adversarial_rubric = run_adversarial_rubric(
             connection,
@@ -5162,7 +5438,7 @@ def _evaluate_connection_candidate(
             for reason in adversarial_rubric.get("kill_reasons", []):
                 print(f"  [Adversarial] - {reason}")
 
-    if passes_threshold and validation_ok and adversarial_ok:
+    if passes_threshold and validation_ok and usefulness_ok and adversarial_ok:
         invariance_started = time.monotonic()
         invariance_ok, invariance_result = run_invariance_check(
             connection,
@@ -5178,7 +5454,13 @@ def _evaluate_connection_candidate(
                 f"{invariance_result.get('invariance_score', 0.0):.3f}"
             )
 
-    if passes_threshold and validation_ok and adversarial_ok and invariance_ok:
+    if (
+        passes_threshold
+        and validation_ok
+        and usefulness_ok
+        and adversarial_ok
+        and invariance_ok
+    ):
         rewrite_started = time.monotonic()
         rewrite = rewrite_transmission(
             source_domain=source_domain,
@@ -5197,6 +5479,7 @@ def _evaluate_connection_candidate(
     if (
         passes_threshold
         and validation_ok
+        and usefulness_ok
         and adversarial_ok
         and invariance_ok
         and not boring
@@ -5291,6 +5574,7 @@ def _evaluate_connection_candidate(
     should_transmit = (
         passes_threshold
         and validation_ok
+        and usefulness_ok
         and adversarial_ok
         and invariance_ok
         and not boring
@@ -5312,6 +5596,12 @@ def _evaluate_connection_candidate(
     if not validation_ok:
         stage_failures.extend(
             f"validation:{reason}" for reason in validation_reasons if reason
+        )
+    if not usefulness_ok:
+        stage_failures.extend(
+            reason
+            for reason in (usefulness_proof or {}).get("reasons", [])
+            if reason
         )
     if not adversarial_ok:
         for reason in (adversarial_rubric or {}).get("kill_reasons", []):
@@ -5352,6 +5642,8 @@ def _evaluate_connection_candidate(
         "prediction_quality": prediction_quality,
         "prediction_quality_score": prediction_quality.get("score"),
         "claim_provenance": claim_provenance,
+        "usefulness_ok": usefulness_ok,
+        "usefulness_proof": usefulness_proof,
         "adversarial_ok": adversarial_ok,
         "adversarial_rubric": adversarial_rubric,
         "invariance_ok": invariance_ok,
