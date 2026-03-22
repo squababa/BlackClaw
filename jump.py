@@ -179,7 +179,11 @@ Requirements:
 - `edge_analysis.cheap_test` must include setup, metric, confirm, falsify, and optional time_to_signal. It must be a fast realistic validation path, not a multi-month research program by default.
 - `edge_analysis.edge_if_right` must state one concrete operator advantage if the test confirms the claim. Keep it contingent and scoped to the retrieved evidence.
 - `edge_analysis.primary_operator` must name the specific operator who would use the lever.
-- Optional `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, and `edge_analysis.deployment_scope` should explain why the opportunity may be underexploited without claiming certainty or exclusive novelty.
+- `edge_analysis.why_missed` must explain one concrete search, framing, workflow, metric, or discipline-boundary reason the target-domain problem or lever may be undernoticed.
+- `edge_analysis.expected_asymmetry` must explain why the lever is plausibly underused rather than already standard target-domain wisdom.
+- `edge_analysis.deployment_scope` should name where to try it first.
+- If the retrieved target-domain snippets already state the problem and lever in normal target-domain language as standard practice, best practice, or obvious operator guidance, return `no_connection` instead of wrapping it in cross-domain language.
+- Keep underexploitedness claims retrieval-scoped and honest. `rarely searched`, `cross-silo`, `hidden by default workflow`, or `screened out by standard framing` are acceptable. `nobody knows this` or `unpublished` are not.
 - Good problem statements name one concrete hidden failure mode tied to the same metric or observable. Examples:
   - `Dense periodic schedulers may miss collision-free non-sequential offset assignments, inflating collision rate at high utilization.`
   - `Doorway-capacity models may overestimate marginal throughput above the saturation threshold, distorting dwell-time planning.`
@@ -206,10 +210,22 @@ Requirements:
 - Bad edge advantages are generic usefulness claims. Examples:
   - `This could be useful.`
   - `This may provide an edge.`
+- Good `why_missed` explanations name one concrete reason the idea may be undernoticed. Examples:
+  - `Scheduling teams usually search scheduling heuristics within scheduling literature, not combinatorial juggling notation, so this filter is cross-silo.`
+  - `Doorway planning workflows often assume smooth throughput scaling and may not explicitly test for a plateau regime.`
+- Bad `why_missed` explanations are generic or evasive. Examples:
+  - `People may miss this.`
+  - `This is underexplored.`
+- Good `expected_asymmetry` explanations justify why the lever is underused. Examples:
+  - `The lever is plausibly underused because siteswap validity constraints are rarely framed as scheduling candidate filters in real-time systems tooling.`
+  - `The edge comes from testing a threshold regime that standard dwell-time planning treats as linear.`
+- Bad `expected_asymmetry` explanations either sound generic or admit the idea is already standard. Examples:
+  - `This could create an edge.`
+  - `This is already standard practice in the target domain.`
 - Do not write generic edge language such as `this could help researchers`, `investigate further`, `monitor this`, or `this may provide an edge`.
 - Do not claim `nobody knows this`, `this is unpublished`, or similar novelty claims as fact.
 - If you cannot supply a specific problem, actionable lever, cheap test, and contingent edge without unsupported extrapolation, return `no_connection`.
-- If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, or the first 3 critical evidence snippets are only generic placeholders, rewrite them concretely or return `no_connection`.
+- If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, or the first 3 critical evidence snippets are only generic placeholders, rewrite them concretely or return `no_connection`.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
 Return ONLY valid JSON. No markdown.
@@ -368,6 +384,34 @@ GENERIC_EDGE_ADVANTAGE_FILLERS = (
     "useful to explore",
 )
 
+GENERIC_UNDEREXPLOITED_FILLERS = (
+    "people may miss this",
+    "people might miss this",
+    "not often noticed",
+    "rarely noticed",
+    "underexplored",
+    "under explored",
+    "hidden opportunity",
+    "interesting cross-domain insight",
+    "this may create an edge",
+    "this could create an edge",
+)
+
+KNOWNNESS_MARKERS = (
+    "well known",
+    "widely known",
+    "already known",
+    "already established",
+    "standard practice",
+    "common practice",
+    "commonly used",
+    "widely used",
+    "routine practice",
+    "textbook",
+    "already explicit",
+    "already recommended",
+)
+
 GENERIC_TEST_DECISION_FILLERS = (
     "the effect happens",
     "the hypothesis is supported",
@@ -439,6 +483,32 @@ EDGE_ADVANTAGE_HINTS = (
     "error",
     "risk",
     "yield",
+)
+
+UNDEREXPLOITEDNESS_HINTS = (
+    "cross-silo",
+    "cross silo",
+    "rarely searched",
+    "framed together",
+    "retrieval",
+    "search",
+    "query",
+    "silo",
+    "workflow",
+    "benchmark",
+    "default",
+    "measurement blind spot",
+    "indexing",
+    "discipline",
+    "literature",
+    "tooling",
+    "pipeline",
+    "naming mismatch",
+    "taxonomy",
+    "operator habit",
+    "screened out",
+    "underused",
+    "underexploited",
 )
 
 GENERIC_QUERY_TOKENS = {
@@ -817,6 +887,21 @@ def _missing_required_fields(data: dict) -> list[str]:
             return True
         return False
 
+    def _underexploitedness_needs_repair(text: object) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return True
+        lower = value.lower()
+        if _contains_any_phrase(lower, KNOWNNESS_MARKERS):
+            return True
+        if _contains_any_phrase(lower, GENERIC_UNDEREXPLOITED_FILLERS):
+            return True
+        if len(value.split()) < 5:
+            return True
+        if not any(hint in lower for hint in UNDEREXPLOITEDNESS_HINTS):
+            return True
+        return False
+
     def _critical_evidence_snippets_need_repair(evidence_map: dict) -> bool:
         variable_mappings = (
             evidence_map.get("variable_mappings")
@@ -921,6 +1006,10 @@ def _missing_required_fields(data: dict) -> list[str]:
         missing.append("edge_analysis.actionable_lever")
     if _edge_advantage_needs_repair(edge_analysis.get("edge_if_right")):
         missing.append("edge_analysis.edge_if_right")
+    if _underexploitedness_needs_repair(edge_analysis.get("why_missed")):
+        missing.append("edge_analysis.why_missed")
+    if _underexploitedness_needs_repair(edge_analysis.get("expected_asymmetry")):
+        missing.append("edge_analysis.expected_asymmetry")
     if _assumptions_count(data.get("assumptions")) < 2:
         missing.append("assumptions")
     if not _is_non_empty(data.get("boundary_conditions")):
@@ -962,6 +1051,14 @@ def _repair_guidance_for_missing_fields(missing_fields: list[str]) -> str:
     if "edge_analysis.edge_if_right" in missing_fields:
         guidance.append(
             "- Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain such as lower collision rate, earlier warning, lower cost, higher throughput, or reduced false positives. Reject generic usefulness language."
+        )
+    if "edge_analysis.why_missed" in missing_fields:
+        guidance.append(
+            "- Rewrite `edge_analysis.why_missed` so it names one concrete search, framing, workflow, metric, or discipline-boundary reason this problem or lever may be undernoticed. Reject lines like `people may miss this`."
+        )
+    if "edge_analysis.expected_asymmetry" in missing_fields:
+        guidance.append(
+            "- Rewrite `edge_analysis.expected_asymmetry` so it explains why the lever is plausibly underused rather than already standard target-domain wisdom. Reject `widely known`, `standard practice`, or generic novelty claims."
         )
     if "evidence_map.variable_mappings" in missing_fields:
         guidance.append(

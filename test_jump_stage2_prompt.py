@@ -99,8 +99,10 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Good test metrics name one concrete literature-facing quantity" in prompt
     assert "Good confirm/falsify wording names the metric directly" in prompt
     assert "Good edge advantages name one concrete operator gain" in prompt
+    assert "`edge_analysis.why_missed` must explain one concrete search, framing, workflow, metric, or discipline-boundary reason" in prompt
+    assert "`edge_analysis.expected_asymmetry` must explain why the lever is plausibly underused rather than already standard target-domain wisdom." in prompt
     assert "For the first 3 critical mappings, the evidence_snippet must be specific enough to stand on its own" in prompt
-    assert "If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, or the first 3 critical evidence snippets are only generic placeholders" in prompt
+    assert "If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, or the first 3 critical evidence snippets are only generic placeholders" in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
@@ -112,6 +114,8 @@ def test_missing_required_fields_requests_repair_for_generic_generation() -> Non
     payload["edge_analysis"]["problem_statement"] = "Complex systems may hide inefficiencies."
     payload["edge_analysis"]["actionable_lever"] = "Investigate further."
     payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+    payload["edge_analysis"]["why_missed"] = "People may miss this."
+    payload["edge_analysis"]["expected_asymmetry"] = "This is already standard practice in the target domain."
     payload["evidence_map"]["variable_mappings"][0]["evidence_snippet"] = "General background context only."
 
     missing = jump._missing_required_fields(payload)
@@ -123,6 +127,8 @@ def test_missing_required_fields_requests_repair_for_generic_generation() -> Non
     assert "edge_analysis.problem_statement" in missing
     assert "edge_analysis.actionable_lever" in missing
     assert "edge_analysis.edge_if_right" in missing
+    assert "edge_analysis.why_missed" in missing
+    assert "edge_analysis.expected_asymmetry" in missing
     assert "evidence_map.variable_mappings" in missing
 
 
@@ -138,6 +144,8 @@ def test_build_repair_prompt_includes_targeted_guidance() -> None:
             "edge_analysis.problem_statement",
             "edge_analysis.actionable_lever",
             "edge_analysis.edge_if_right",
+            "edge_analysis.why_missed",
+            "edge_analysis.expected_asymmetry",
             "evidence_map.variable_mappings",
         ],
     )
@@ -148,4 +156,6 @@ def test_build_repair_prompt_includes_targeted_guidance() -> None:
     assert "Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode" in repair_prompt
     assert "Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action" in repair_prompt
     assert "Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain" in repair_prompt
+    assert "Rewrite `edge_analysis.why_missed` so it names one concrete search, framing, workflow, metric, or discipline-boundary reason" in repair_prompt
+    assert "Rewrite `edge_analysis.expected_asymmetry` so it explains why the lever is plausibly underused rather than already standard target-domain wisdom" in repair_prompt
     assert "Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause" in repair_prompt
