@@ -6355,6 +6355,75 @@ def get_feedback_seed_metrics() -> dict:
         "category_counts": category_counts,
         "domain_cluster_penalty": domain_cluster_penalty,
     }
+
+
+def get_recent_seed_selection_context(n: int = 40) -> dict:
+    """Summarize recent seed history for lightweight diversity balancing."""
+    conn = _connect()
+    rows = conn.execute(
+        """WITH recent_explorations AS (
+            SELECT id, seed_domain, seed_category, transmitted, timestamp
+            FROM explorations
+            ORDER BY timestamp DESC
+            LIMIT ?
+        )
+        SELECT
+            e.id,
+            e.seed_domain,
+            e.seed_category,
+            e.transmitted,
+            COALESCE(
+                MAX(CASE WHEN t.user_rating = 'starred' THEN 1 ELSE 0 END),
+                0
+            ) AS has_star
+        FROM recent_explorations e
+        LEFT JOIN transmissions t ON t.exploration_id = e.id
+        GROUP BY e.id, e.seed_domain, e.seed_category, e.transmitted, e.timestamp
+        ORDER BY e.timestamp DESC""",
+        (n,),
+    ).fetchall()
+    conn.close()
+
+    recent_domains: list[str] = []
+    recent_categories: list[str] = []
+    domain_recent_counts: dict[str, int] = {}
+    category_recent_counts: dict[str, int] = {}
+    domain_last_seen: dict[str, int] = {}
+    category_last_seen: dict[str, int] = {}
+    domain_low_yield_counts: dict[str, int] = {}
+
+    for idx, row in enumerate(rows):
+        domain = (row["seed_domain"] or "").strip()
+        category = (row["seed_category"] or "").strip()
+        good_outcome = bool(row["transmitted"]) or bool(row["has_star"])
+
+        if domain:
+            recent_domains.append(domain)
+            domain_recent_counts[domain] = domain_recent_counts.get(domain, 0) + 1
+            domain_last_seen.setdefault(domain, idx)
+            if not good_outcome:
+                domain_low_yield_counts[domain] = (
+                    domain_low_yield_counts.get(domain, 0) + 1
+                )
+
+        if category:
+            recent_categories.append(category)
+            category_recent_counts[category] = (
+                category_recent_counts.get(category, 0) + 1
+            )
+            category_last_seen.setdefault(category, idx)
+
+    return {
+        "recent_domains": recent_domains,
+        "recent_categories": recent_categories,
+        "domain_recent_counts": domain_recent_counts,
+        "category_recent_counts": category_recent_counts,
+        "domain_last_seen": domain_last_seen,
+        "category_last_seen": category_last_seen,
+        "domain_low_yield_counts": domain_low_yield_counts,
+    }
+
+
 def get_connection_key(domain_a: str, domain_b: str) -> str:
     """Create a normalized key from two domain names (sorted alphabetically)."""
     pair = sorted(
