@@ -19,6 +19,7 @@ from prediction_enforcement import (
 )
 from hypothesis_validation import (
     mechanism_typing_summary_text,
+    normalize_edge_analysis,
     normalize_evidence_map,
     normalize_mechanism_typing,
     summarize_evidence_map_provenance,
@@ -5316,6 +5317,7 @@ def _evaluate_usefulness_proof_gate(
         and isinstance(claim_provenance.get("evidence_map"), dict)
         else normalize_evidence_map(payload.get("evidence_map"))
     )
+    edge_analysis = normalize_edge_analysis(payload)
 
     observable = _usefulness_first_present(
         prediction_payload.get("observable"),
@@ -5352,9 +5354,25 @@ def _evaluate_usefulness_proof_gate(
         observable,
     )
     mechanism_text = _usefulness_first_present(payload.get("mechanism"))
+    edge_problem = _usefulness_first_present(edge_analysis.get("problem_statement"))
+    edge_lever = _usefulness_first_present(edge_analysis.get("actionable_lever"))
+    edge_advantage = _usefulness_first_present(edge_analysis.get("edge_if_right"))
+    edge_primary_operator = _usefulness_first_present(
+        edge_analysis.get("primary_operator")
+    )
+    cheap_test = (
+        edge_analysis.get("cheap_test")
+        if isinstance(edge_analysis.get("cheap_test"), dict)
+        else {}
+    )
+    cheap_setup = _usefulness_first_present(cheap_test.get("setup"))
+    cheap_metric = _usefulness_first_present(cheap_test.get("metric"))
+    cheap_confirm = _usefulness_first_present(cheap_test.get("confirm"))
+    cheap_falsify = _usefulness_first_present(cheap_test.get("falsify"))
 
     claim_anchor_terms = _usefulness_terms(claim_anchor)
     mechanism_terms = _usefulness_terms(mechanism_text)
+    observable_terms = _usefulness_terms(observable)
     evidence_candidates = _usefulness_evidence_candidates(evidence_map)
     best_claim_overlap = max(
         (_usefulness_overlap(item.get("text"), claim_anchor_terms) for item in evidence_candidates),
@@ -5368,11 +5386,65 @@ def _evaluate_usefulness_proof_gate(
         ),
         default=0,
     )
+    edge_problem_terms = _usefulness_terms(edge_problem)
+    edge_lever_terms = _usefulness_terms(edge_lever)
+    edge_metric_terms = _usefulness_terms(cheap_metric)
+    generic_edge_phrases = (
+        "investigate further",
+        "monitor this",
+        "study this",
+        "help researchers",
+        "new perspective",
+        "could be useful",
+        "may provide an edge",
+    )
+    generic_advantage_terms = (
+        "useful",
+        "advantage",
+        "improve performance",
+        "optimize performance",
+    )
 
     target_problem_ok = bool(observable and utility)
     operator_decision_ok = bool(observable and time_horizon and (confirm or falsify))
     claim_alignment_ok = bool(claim_anchor_terms) and best_claim_overlap >= 3
     mechanism_alignment_ok = not mechanism_terms or best_mechanism_overlap >= 2
+    edge_problem_ok = bool(edge_problem) and (
+        _usefulness_overlap(edge_problem, observable_terms) >= 1
+        or _usefulness_overlap(edge_problem, claim_anchor_terms) >= 1
+        or _usefulness_overlap(edge_problem, mechanism_terms) >= 1
+    )
+    actionable_lever_ok = bool(edge_lever) and not any(
+        phrase in edge_lever.lower() for phrase in generic_edge_phrases
+    ) and (
+        _usefulness_overlap(edge_lever, mechanism_terms) >= 1
+        or _usefulness_overlap(edge_lever, claim_anchor_terms) >= 1
+        or _usefulness_overlap(edge_lever, observable_terms) >= 1
+    )
+    cheap_metric_aligned = (
+        _usefulness_overlap(cheap_metric, _usefulness_terms(test_payload.get("metric"))) >= 1
+        or _usefulness_overlap(cheap_metric, observable_terms) >= 1
+    )
+    cheap_test_ok = (
+        all((cheap_setup, cheap_metric, cheap_confirm, cheap_falsify))
+        and cheap_metric_aligned
+        and (
+            _usefulness_overlap(cheap_confirm, edge_problem_terms | observable_terms) >= 1
+            or _usefulness_overlap(cheap_falsify, edge_problem_terms | observable_terms) >= 1
+        )
+    )
+    edge_advantage_ok = bool(edge_advantage) and bool(edge_primary_operator) and not (
+        any(phrase in edge_advantage.lower() for phrase in generic_edge_phrases)
+        or (
+            len(edge_advantage.split()) < 6
+            and any(term in edge_advantage.lower() for term in generic_advantage_terms)
+        )
+    )
+    edge_layer_aligned = (
+        (not edge_problem_terms or _usefulness_overlap(edge_problem, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
+        and (not edge_lever_terms or _usefulness_overlap(edge_lever, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
+        and (not edge_metric_terms or _usefulness_overlap(cheap_metric, _usefulness_terms(test_payload.get("metric")) | observable_terms) >= 1)
+    )
 
     reasons: list[str] = []
     if not target_problem_ok:
@@ -5381,14 +5453,33 @@ def _evaluate_usefulness_proof_gate(
         reasons.append("usefulness:missing_operator_decision")
     if not (claim_alignment_ok and mechanism_alignment_ok):
         reasons.append("usefulness:weak_claim_evidence_alignment")
+    if not edge_problem_ok:
+        reasons.append("usefulness:missing_edge_problem")
+    if not actionable_lever_ok:
+        reasons.append("usefulness:missing_actionable_lever")
+    if not cheap_test_ok:
+        reasons.append("usefulness:missing_cheap_test")
+    if not edge_layer_aligned:
+        reasons.append("usefulness:edge_layer_misaligned")
+    if not edge_advantage_ok:
+        reasons.append("usefulness:missing_edge_advantage")
 
     return {
-        "passes": not reasons,
+        "passes": not [
+            reason
+            for reason in reasons
+            if reason != "usefulness:missing_edge_advantage"
+        ],
         "reasons": reasons,
         "target_problem_ok": target_problem_ok,
         "operator_decision_ok": operator_decision_ok,
         "claim_alignment_ok": claim_alignment_ok,
         "mechanism_alignment_ok": mechanism_alignment_ok,
+        "edge_problem_ok": edge_problem_ok,
+        "actionable_lever_ok": actionable_lever_ok,
+        "cheap_test_ok": cheap_test_ok,
+        "edge_advantage_ok": edge_advantage_ok,
+        "edge_layer_aligned": edge_layer_aligned,
         "claim_anchor": claim_anchor,
         "best_claim_overlap": best_claim_overlap,
         "best_mechanism_overlap": best_mechanism_overlap,

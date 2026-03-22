@@ -166,6 +166,16 @@ Requirements:
 - Avoid overloaded prediction sentences that stack threshold behavior, monotonicity, saturation, timing, and mechanism in one claim unless each part is essential and jointly testable from the same result family.
 - Prefer narrower predictions that can be falsified or supported by one literature result family over elegant but broad claims that only retrieve domain-adjacent evidence.
 - The prediction must include a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
+- Provide `edge_analysis` as a grounded operator layer tied to the exact same primary target-domain claim as `connection`, `mechanism`, `prediction`, and `test`.
+- `edge_analysis.problem_statement` must name one specific target-domain problem, blind spot, hidden failure mode, or missed control point.
+- `edge_analysis.actionable_lever` must name one concrete action, heuristic, filter, design change, or search direction that follows from the mechanism.
+- `edge_analysis.cheap_test` must include setup, metric, confirm, falsify, and optional time_to_signal. It must be a fast realistic validation path, not a multi-month research program by default.
+- `edge_analysis.edge_if_right` must state one concrete operator advantage if the test confirms the claim. Keep it contingent and scoped to the retrieved evidence.
+- `edge_analysis.primary_operator` must name the specific operator who would use the lever.
+- Optional `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, and `edge_analysis.deployment_scope` should explain why the opportunity may be underexploited without claiming certainty or exclusive novelty.
+- Do not write generic edge language such as `this could help researchers`, `investigate further`, `monitor this`, or `this may provide an edge`.
+- Do not claim `nobody knows this`, `this is unpublished`, or similar novelty claims as fact.
+- If you cannot supply a specific problem, actionable lever, cheap test, and contingent edge without unsupported extrapolation, return `no_connection`.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
 Return ONLY valid JSON. No markdown.
@@ -211,6 +221,22 @@ If valid:
     "who_benefits": "who can use this prediction"
   }},
   "test": {{"data": "specific dataset or experiment to use", "metric": "one concrete canonical reported metric name", "horizon": "same or compatible time horizon", "confirm": "what result on that metric confirms the hypothesis", "falsify": "what result on that metric falsifies it"}},
+  "edge_analysis": {{
+    "problem_statement": "one specific target-domain problem, blind spot, or hidden failure mode",
+    "why_missed": "why standard framing or workflow may overlook it",
+    "actionable_lever": "one concrete action implied by the mechanism",
+    "cheap_test": {{
+      "setup": "fastest realistic validation path",
+      "metric": "one metric aligned with test.metric",
+      "confirm": "what result would support the lever",
+      "falsify": "what result would kill the lever",
+      "time_to_signal": "how quickly the test should produce evidence"
+    }},
+    "edge_if_right": "concrete operator advantage if confirmed",
+    "expected_asymmetry": "why this is plausibly underexploited",
+    "primary_operator": "specific operator who would use it",
+    "deployment_scope": "where to try it first"
+  }},
   "assumptions": ["...", "..."],
   "boundary_conditions": "when this mapping should and should not hold",
   "evidence": "specific evidence from search results"
@@ -514,6 +540,32 @@ def _missing_required_fields(data: dict) -> list[str]:
                 missing.append(f"prediction.{field}")
         return missing
 
+    def _edge_analysis_missing_fields(edge_analysis: object) -> list[str]:
+        if not isinstance(edge_analysis, dict):
+            return [
+                "edge_analysis.problem_statement",
+                "edge_analysis.actionable_lever",
+                "edge_analysis.cheap_test",
+                "edge_analysis.edge_if_right",
+                "edge_analysis.primary_operator",
+            ]
+        missing = []
+        if not _is_non_empty(edge_analysis.get("problem_statement")):
+            missing.append("edge_analysis.problem_statement")
+        if not _is_non_empty(edge_analysis.get("actionable_lever")):
+            missing.append("edge_analysis.actionable_lever")
+        cheap_test = edge_analysis.get("cheap_test")
+        if not isinstance(cheap_test, dict) or not all(
+            _is_non_empty(cheap_test.get(key))
+            for key in ("setup", "metric", "confirm", "falsify")
+        ):
+            missing.append("edge_analysis.cheap_test")
+        if not _is_non_empty(edge_analysis.get("edge_if_right")):
+            missing.append("edge_analysis.edge_if_right")
+        if not _is_non_empty(edge_analysis.get("primary_operator")):
+            missing.append("edge_analysis.primary_operator")
+        return missing
+
     missing: list[str] = []
     for field in ("source_domain", "target_domain", "connection"):
         if field not in data or not _is_non_empty(data.get(field)):
@@ -530,6 +582,7 @@ def _missing_required_fields(data: dict) -> list[str]:
     missing.extend(_prediction_missing_fields(data.get("prediction")))
     if not _test_has_metric_confirm_falsify(data.get("test")):
         missing.append("test")
+    missing.extend(_edge_analysis_missing_fields(data.get("edge_analysis")))
     if _assumptions_count(data.get("assumptions")) < 2:
         missing.append("assumptions")
     if not _is_non_empty(data.get("boundary_conditions")):

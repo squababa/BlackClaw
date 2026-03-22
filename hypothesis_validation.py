@@ -267,6 +267,118 @@ CORE_TARGET_BROAD_PAGE_MARKERS = (
     "how to",
 )
 
+EDGE_GENERIC_PHRASES = (
+    "could help researchers",
+    "help researchers",
+    "investigate further",
+    "monitor this",
+    "monitor it",
+    "study this",
+    "study further",
+    "optimize performance",
+    "improve performance",
+    "new perspective",
+    "interesting parallel",
+    "interesting analogy",
+    "may provide an edge",
+    "could provide an edge",
+    "could be useful",
+    "may be useful",
+)
+
+EDGE_OVERCLAIM_MARKERS = (
+    "nobody knows",
+    "no one knows",
+    "nobody has noticed",
+    "no one has noticed",
+    "unpublished",
+    "guaranteed",
+    "definitely",
+    "certainly",
+    "proves that",
+)
+
+EDGE_PROBLEM_HINTS = (
+    "problem",
+    "blind spot",
+    "failure",
+    "fails",
+    "miss",
+    "missed",
+    "bottleneck",
+    "threshold",
+    "control point",
+    "conflict",
+    "collision",
+    "plateau",
+    "drift",
+    "underestimate",
+    "overestimate",
+    "saturation",
+)
+
+EDGE_ACTION_HINTS = (
+    "add",
+    "apply",
+    "compare",
+    "filter",
+    "rank",
+    "switch",
+    "tune",
+    "route",
+    "replay",
+    "simulate",
+    "measure",
+    "test",
+    "use",
+    "deploy",
+    "screen",
+    "prioritize",
+)
+
+EDGE_ADVANTAGE_HINTS = (
+    "advantage",
+    "gain",
+    "reduce",
+    "lower",
+    "faster",
+    "earlier",
+    "improve",
+    "better",
+    "throughput",
+    "cost",
+    "latency",
+    "warning",
+    "quality",
+    "efficiency",
+    "allocation",
+    "collision",
+    "error",
+)
+
+EDGE_GENERIC_OPERATORS = {
+    "researcher",
+    "researchers",
+    "operator",
+    "operators",
+    "decision-maker",
+    "decision-makers",
+    "decision maker",
+    "decision makers",
+    "practitioner",
+    "practitioners",
+    "team",
+    "teams",
+    "organization",
+    "organizations",
+    "company",
+    "companies",
+    "stakeholder",
+    "stakeholders",
+    "user",
+    "users",
+}
+
 TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS = UNIVERSAL_MECHANISM_WORDS | {
     "threshold",
     "thresholds",
@@ -1565,6 +1677,196 @@ def _is_non_empty(value: object) -> bool:
     return value is not None
 
 
+def _edge_nested_payload(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    nested = payload.get("edge_analysis")
+    if isinstance(nested, dict):
+        return nested
+    if any(
+        key in payload
+        for key in (
+            "problem_statement",
+            "why_missed",
+            "actionable_lever",
+            "cheap_test",
+            "edge_if_right",
+            "expected_asymmetry",
+            "primary_operator",
+            "time_to_signal",
+            "deployment_scope",
+        )
+    ):
+        return payload
+    return {}
+
+
+def normalize_edge_analysis(payload: object) -> dict:
+    """Normalize edge-analysis fields into one stable inspectable payload."""
+    source = _edge_nested_payload(payload)
+    cheap_source = source.get("cheap_test")
+    if not isinstance(cheap_source, dict):
+        cheap_source = {}
+
+    time_to_signal = _clean_optional_text(
+        cheap_source.get("time_to_signal") or source.get("time_to_signal")
+    )
+    out = {
+        "problem_statement": _clean_optional_text(source.get("problem_statement")),
+        "why_missed": _clean_optional_text(source.get("why_missed")),
+        "actionable_lever": _clean_optional_text(source.get("actionable_lever")),
+        "cheap_test": {
+            "setup": _clean_optional_text(
+                cheap_source.get("setup")
+                or cheap_source.get("data")
+                or cheap_source.get("experiment")
+                or cheap_source.get("protocol")
+                or cheap_source.get("method")
+            ),
+            "metric": _clean_optional_text(
+                cheap_source.get("metric") or cheap_source.get("metrics")
+            ),
+            "confirm": _clean_optional_text(
+                cheap_source.get("confirm")
+                or cheap_source.get("confirms")
+                or cheap_source.get("confirmed_if")
+                or cheap_source.get("supports")
+            ),
+            "falsify": _clean_optional_text(
+                cheap_source.get("falsify")
+                or cheap_source.get("falsifies")
+                or cheap_source.get("falsified_if")
+                or cheap_source.get("refutes")
+            ),
+            "time_to_signal": time_to_signal,
+        },
+        "edge_if_right": _clean_optional_text(source.get("edge_if_right")),
+        "expected_asymmetry": _clean_optional_text(source.get("expected_asymmetry")),
+        "primary_operator": _clean_optional_text(source.get("primary_operator")),
+        "deployment_scope": _clean_optional_text(source.get("deployment_scope")),
+    }
+    return out
+
+
+def _contains_edge_generic_phrase(text: object) -> bool:
+    cleaned = (_clean_optional_text(text) or "").lower()
+    return any(phrase in cleaned for phrase in EDGE_GENERIC_PHRASES)
+
+
+def _contains_edge_overclaim(text: object) -> bool:
+    cleaned = (_clean_optional_text(text) or "").lower()
+    return any(phrase in cleaned for phrase in EDGE_OVERCLAIM_MARKERS)
+
+
+def _edge_term_overlap(left: object, right: object) -> int:
+    return len(_meaningful_terms(left) & _meaningful_terms(right))
+
+
+def _edge_operator_is_specific(text: object) -> bool:
+    cleaned = (_clean_optional_text(text) or "").lower()
+    if not cleaned:
+        return False
+    if cleaned in EDGE_GENERIC_OPERATORS:
+        return False
+    return any(char.isalpha() for char in cleaned)
+
+
+def _validate_edge_analysis(payload: object, hypothesis_dict: dict) -> list[str]:
+    """Require one concrete edge layer tied to the grounded hypothesis."""
+    normalized = normalize_edge_analysis(payload)
+    reasons: list[str] = []
+
+    problem_statement = normalized.get("problem_statement") or ""
+    actionable_lever = normalized.get("actionable_lever") or ""
+    cheap_test = normalized.get("cheap_test") or {}
+    edge_if_right = normalized.get("edge_if_right") or ""
+    primary_operator = normalized.get("primary_operator") or ""
+
+    test_metric = _extract_test_metric_text(hypothesis_dict.get("test")) or ""
+    prediction_payload = normalize_prediction_payload(hypothesis_dict.get("prediction"))
+    observable = _clean_optional_text(prediction_payload.get("observable")) or ""
+    mechanism_text = _clean_optional_text(hypothesis_dict.get("mechanism")) or ""
+    cheap_setup = _clean_optional_text(cheap_test.get("setup")) or ""
+    cheap_metric = _clean_optional_text(cheap_test.get("metric")) or ""
+    cheap_confirm = _clean_optional_text(cheap_test.get("confirm")) or ""
+    cheap_falsify = _clean_optional_text(cheap_test.get("falsify")) or ""
+
+    if not problem_statement:
+        reasons.append("edge_analysis problem_statement must name a specific target-domain problem")
+    else:
+        lower_problem = problem_statement.lower()
+        if len(problem_statement.split()) < 7 or not any(
+            hint in lower_problem for hint in EDGE_PROBLEM_HINTS
+        ):
+            reasons.append("edge_analysis problem_statement is too generic")
+        elif (
+            _edge_term_overlap(problem_statement, test_metric) == 0
+            and _edge_term_overlap(problem_statement, observable) == 0
+            and _edge_term_overlap(problem_statement, mechanism_text) == 0
+        ):
+            reasons.append(
+                "edge_analysis problem_statement does not align with prediction/test metric"
+            )
+
+    if not actionable_lever:
+        reasons.append("edge_analysis actionable_lever must name a concrete action")
+    else:
+        lower_lever = actionable_lever.lower()
+        if _contains_edge_generic_phrase(actionable_lever) or not any(
+            token in lower_lever for token in EDGE_ACTION_HINTS
+        ):
+            reasons.append("edge_analysis actionable_lever is too generic")
+        elif (
+            _edge_term_overlap(actionable_lever, mechanism_text) == 0
+            and _edge_term_overlap(actionable_lever, test_metric) == 0
+            and _edge_term_overlap(actionable_lever, observable) == 0
+        ):
+            reasons.append(
+                "edge_analysis actionable_lever is not grounded in the mechanism"
+            )
+
+    if not isinstance(cheap_test, dict) or not all(
+        _is_non_empty(cheap_test.get(key)) for key in ("setup", "metric", "confirm", "falsify")
+    ):
+        reasons.append(
+            "edge_analysis cheap_test must include setup, metric, confirm, and falsify"
+        )
+    else:
+        if len(cheap_setup) < 20:
+            reasons.append("edge_analysis cheap_test is not plausibly cheap")
+        if not _has_metric_text(cheap_metric):
+            reasons.append("edge_analysis cheap_test metric is too vague")
+        elif (
+            _edge_term_overlap(cheap_metric, test_metric) == 0
+            and _edge_term_overlap(cheap_metric, observable) == 0
+        ):
+            reasons.append(
+                "edge_analysis cheap_test does not match the main test metric"
+            )
+        if len(cheap_confirm) < 20 or len(cheap_falsify) < 20:
+            reasons.append("edge_analysis cheap_test must state what confirms vs falsifies the edge")
+
+    if not edge_if_right:
+        reasons.append(
+            "edge_analysis edge_if_right must name a concrete operator advantage"
+        )
+    else:
+        lower_edge = edge_if_right.lower()
+        if _contains_edge_generic_phrase(edge_if_right) or not any(
+            token in lower_edge for token in EDGE_ADVANTAGE_HINTS
+        ):
+            reasons.append("edge_analysis edge_if_right is too generic")
+        elif _contains_edge_overclaim(edge_if_right):
+            reasons.append(
+                "edge_analysis edge_if_right overclaims novelty or certainty"
+            )
+
+    if not _edge_operator_is_specific(primary_operator):
+        reasons.append("edge_analysis primary_operator must name a specific operator")
+
+    return reasons
+
+
 def _validate_mechanism(mechanism: object) -> list[str]:
     reasons: list[str] = []
     text = mechanism if isinstance(mechanism, str) else ""
@@ -1695,6 +1997,7 @@ def validate_hypothesis(hypothesis_dict: dict) -> tuple[bool, list[str]]:
     reasons.extend(_validate_mechanism_typing(hypothesis_dict))
     reasons.extend(_validate_prediction(hypothesis_dict.get("prediction")))
     reasons.extend(_validate_test(hypothesis_dict.get("test")))
+    reasons.extend(_validate_edge_analysis(hypothesis_dict, hypothesis_dict))
 
     if _assumptions_count(hypothesis_dict.get("assumptions")) < 2:
         reasons.append("assumptions must list at least 2 assumptions")
