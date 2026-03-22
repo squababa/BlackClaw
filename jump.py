@@ -173,9 +173,30 @@ Requirements:
 - `edge_analysis.edge_if_right` must state one concrete operator advantage if the test confirms the claim. Keep it contingent and scoped to the retrieved evidence.
 - `edge_analysis.primary_operator` must name the specific operator who would use the lever.
 - Optional `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, and `edge_analysis.deployment_scope` should explain why the opportunity may be underexploited without claiming certainty or exclusive novelty.
+- Good problem statements name one concrete hidden failure mode tied to the same metric or observable. Examples:
+  - `Dense periodic schedulers may miss collision-free non-sequential offset assignments, inflating collision rate at high utilization.`
+  - `Doorway-capacity models may overestimate marginal throughput above the saturation threshold, distorting dwell-time planning.`
+- Bad problem statements are generic or essay-like. Examples:
+  - `Complex systems may hide inefficiencies.`
+  - `This domain may have an interesting blind spot.`
+- Good actionable levers name one concrete action. Examples:
+  - `Add a siteswap-style validity filter before greedy slot assignment.`
+  - `Switch from linear doorway-throughput assumptions to threshold-based capacity rules above the saturation point.`
+- Bad actionable levers are vague or advisory. Examples:
+  - `Investigate further.`
+  - `Use this perspective to think differently about the system.`
+- Good test metrics name one concrete literature-facing quantity. Examples:
+  - `collision rate per hyperperiod`
+  - `mean cascade size per initiating branch failure`
+  - `false-positive rate`
+- Bad test metrics are generic placeholders. Examples:
+  - `performance`
+  - `overall efficiency`
+  - `outcomes`
 - Do not write generic edge language such as `this could help researchers`, `investigate further`, `monitor this`, or `this may provide an edge`.
 - Do not claim `nobody knows this`, `this is unpublished`, or similar novelty claims as fact.
 - If you cannot supply a specific problem, actionable lever, cheap test, and contingent edge without unsupported extrapolation, return `no_connection`.
+- If `mechanism`, `test.metric`, `edge_analysis.problem_statement`, or `edge_analysis.actionable_lever` are only generic placeholders, rewrite them concretely or return `no_connection`.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
 Return ONLY valid JSON. No markdown.
@@ -250,6 +271,114 @@ JSON_RETRY_PROMPT = (
 MISSING_FIELDS_REPAIR_PROMPT = (
     "Your output is missing fields: {missing_fields}. Return ONLY corrected JSON with those fields filled. "
     "Do not change the source_domain or target_domain. Do not add a depth field."
+)
+
+GENERIC_MECHANISM_FILLERS = (
+    "threshold mechanism",
+    "gating effect",
+    "competitive dynamic",
+    "self-reinforcing process",
+    "feedback loop",
+    "feedback process",
+    "things interact",
+    "complex interactions",
+    "optimize under constraints",
+    "both systems involve",
+    "both exhibit",
+    "both use feedback",
+    "both optimize",
+)
+
+RESULT_FIRST_MECHANISM_OPENERS = (
+    "when ",
+    "as ",
+    "if ",
+    "once ",
+    "after ",
+    "because ",
+    "the system ",
+    "both systems ",
+    "this system ",
+    "these systems ",
+)
+
+GENERIC_TEST_METRIC_FILLERS = (
+    "performance",
+    "overall performance",
+    "efficiency",
+    "effect",
+    "effects",
+    "outcome",
+    "outcomes",
+    "result",
+    "results",
+    "improvement",
+    "behavior",
+)
+
+GENERIC_PROBLEM_FILLERS = (
+    "system may hide inefficiencies",
+    "complex systems may hide inefficiencies",
+    "performance may degrade",
+    "this domain may hide",
+    "interesting blind spot",
+    "hidden opportunity",
+    "operators may be missing something",
+    "there may be a problem",
+)
+
+GENERIC_ACTION_FILLERS = (
+    "investigate further",
+    "study this",
+    "study further",
+    "monitor this",
+    "monitor it",
+    "explore this",
+    "consider this",
+    "use this perspective",
+    "apply this idea",
+    "research this",
+    "look into this",
+)
+
+EDGE_PROBLEM_HINTS = (
+    "problem",
+    "blind spot",
+    "failure",
+    "fails",
+    "miss",
+    "missed",
+    "bottleneck",
+    "threshold",
+    "control point",
+    "conflict",
+    "collision",
+    "plateau",
+    "drift",
+    "underestimate",
+    "overestimate",
+    "saturation",
+)
+
+EDGE_ACTION_HINTS = (
+    "add",
+    "apply",
+    "compare",
+    "filter",
+    "rank",
+    "switch",
+    "tune",
+    "route",
+    "replay",
+    "simulate",
+    "measure",
+    "test",
+    "use",
+    "deploy",
+    "screen",
+    "prioritize",
+    "constrain",
+    "gate",
 )
 
 GENERIC_QUERY_TOKENS = {
@@ -513,6 +642,64 @@ def _missing_required_fields(data: dict) -> list[str]:
             return has_metric and has_confirm and has_falsify
         return False
 
+    def _contains_any_phrase(text: object, phrases: tuple[str, ...]) -> bool:
+        cleaned = str(text or "").strip().lower()
+        return any(phrase in cleaned for phrase in phrases)
+
+    def _mechanism_needs_repair(mechanism: object) -> bool:
+        text = str(mechanism or "").strip()
+        if not text:
+            return True
+        lower = text.lower()
+        if _contains_any_phrase(lower, GENERIC_MECHANISM_FILLERS):
+            return True
+        if lower.startswith(RESULT_FIRST_MECHANISM_OPENERS):
+            return True
+        if len(text.split()) < 8:
+            return True
+        return False
+
+    def _test_metric_needs_repair(test: object) -> bool:
+        if not isinstance(test, dict):
+            return True
+        metric = str(test.get("metric") or test.get("metrics") or "").strip()
+        if not metric:
+            return True
+        lower = metric.lower()
+        if lower in GENERIC_TEST_METRIC_FILLERS or _contains_any_phrase(
+            lower, GENERIC_TEST_METRIC_FILLERS
+        ):
+            return True
+        if len(metric.split()) < 2:
+            return True
+        return False
+
+    def _problem_statement_needs_repair(text: object) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return True
+        lower = value.lower()
+        if len(value.split()) < 7:
+            return True
+        if _contains_any_phrase(lower, GENERIC_PROBLEM_FILLERS):
+            return True
+        if not any(hint in lower for hint in EDGE_PROBLEM_HINTS):
+            return True
+        return False
+
+    def _actionable_lever_needs_repair(text: object) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return True
+        lower = value.lower()
+        if _contains_any_phrase(lower, GENERIC_ACTION_FILLERS):
+            return True
+        if not any(hint in lower for hint in EDGE_ACTION_HINTS):
+            return True
+        if len(value.split()) < 4:
+            return True
+        return False
+
     def _prediction_missing_fields(prediction: object) -> list[str]:
         if not isinstance(prediction, dict):
             return [
@@ -570,7 +757,9 @@ def _missing_required_fields(data: dict) -> list[str]:
     for field in ("source_domain", "target_domain", "connection"):
         if field not in data or not _is_non_empty(data.get(field)):
             missing.append(field)
-    if not _is_non_empty(data.get("mechanism")):
+    if not _is_non_empty(data.get("mechanism")) or _mechanism_needs_repair(
+        data.get("mechanism")
+    ):
         missing.append("mechanism")
     normalized_mechanism_typing = normalize_mechanism_typing(data)
     if not _is_non_empty(normalized_mechanism_typing.get("mechanism_type")):
@@ -582,7 +771,16 @@ def _missing_required_fields(data: dict) -> list[str]:
     missing.extend(_prediction_missing_fields(data.get("prediction")))
     if not _test_has_metric_confirm_falsify(data.get("test")):
         missing.append("test")
+    elif _test_metric_needs_repair(data.get("test")):
+        missing.append("test.metric")
     missing.extend(_edge_analysis_missing_fields(data.get("edge_analysis")))
+    edge_analysis = (
+        data.get("edge_analysis") if isinstance(data.get("edge_analysis"), dict) else {}
+    )
+    if _problem_statement_needs_repair(edge_analysis.get("problem_statement")):
+        missing.append("edge_analysis.problem_statement")
+    if _actionable_lever_needs_repair(edge_analysis.get("actionable_lever")):
+        missing.append("edge_analysis.actionable_lever")
     if _assumptions_count(data.get("assumptions")) < 2:
         missing.append("assumptions")
     if not _is_non_empty(data.get("boundary_conditions")):
@@ -597,17 +795,49 @@ def _missing_required_fields(data: dict) -> list[str]:
     return missing
 
 
+def _repair_guidance_for_missing_fields(missing_fields: list[str]) -> str:
+    guidance: list[str] = []
+    if any(field == "mechanism" for field in missing_fields):
+        guidance.append(
+            "- Rewrite `mechanism` as one process-first sentence that opens with the exact target-domain process noun phrase, then names the operator, monitored/control variable, and resulting measurable change. Do not start with `when`, `as`, `if`, or a result summary."
+        )
+    if any(field in {"test", "test.metric"} for field in missing_fields):
+        guidance.append(
+            "- Rewrite `test` so `metric` names one concrete literature-facing quantity, not placeholders like `performance`, `efficiency`, or `outcomes`. Make `confirm` and `falsify` explicitly refer to that same metric."
+        )
+    if "edge_analysis.problem_statement" in missing_fields:
+        guidance.append(
+            "- Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode, bottleneck, blind spot, or measurable miss tied to the same observable or metric as the test."
+        )
+    if "edge_analysis.actionable_lever" in missing_fields:
+        guidance.append(
+            "- Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action, filter, intervention, or decision rule. Reject advisory phrasing like `investigate further`, `study this`, or `consider this`."
+        )
+    if not guidance:
+        return ""
+    return "\nExtra repair rules:\n" + "\n".join(guidance)
+
+
+def _build_repair_prompt(
+    full_prompt: str,
+    original_json: str,
+    missing_fields: list[str],
+) -> str:
+    repair_prompt = MISSING_FIELDS_REPAIR_PROMPT.format(
+        missing_fields=", ".join(missing_fields)
+    )
+    repair_guidance = _repair_guidance_for_missing_fields(missing_fields)
+    return (
+        f"{repair_prompt}{repair_guidance}\n\nOriginal instruction:\n{full_prompt}\n\nOriginal JSON:\n{original_json}"
+    )
+
+
 def _repair_missing_fields(
     full_prompt: str,
     original_json: str,
     missing_fields: list[str],
 ) -> dict | None:
-    repair_prompt = MISSING_FIELDS_REPAIR_PROMPT.format(
-        missing_fields=", ".join(missing_fields)
-    )
-    repair_prompt = (
-        f"{repair_prompt}\n\nOriginal instruction:\n{full_prompt}\n\nOriginal JSON:\n{original_json}"
-    )
+    repair_prompt = _build_repair_prompt(full_prompt, original_json, missing_fields)
     try:
         response = _llm_client.generate_content(
             repair_prompt,
