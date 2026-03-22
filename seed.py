@@ -10,6 +10,9 @@ from pathlib import Path
 
 PERSONALIZATION_RANDOM_FLOOR = 0.2
 PERSONALIZATION_WEIGHT_STRENGTH = 0.6
+EXPECTED_VALUE_PRIOR_STRENGTH = 6.0
+CATEGORY_EXPECTED_VALUE_PRIOR_STRENGTH = 10.0
+SEED_DIVERSITY_SECONDARY_STRENGTH = 0.25
 SEED_DIVERSITY_HISTORY_WINDOW = 40
 
 
@@ -96,66 +99,76 @@ def resolve_seed_choice(seed_name: str) -> tuple[dict | None, list[str]]:
     return None, suggest_seed_matches(seed_name)
 
 
-def _rate_stats(counts: dict | None) -> tuple[float, float, int]:
-    """Compute star/dismiss rates and sample size from count dict."""
-    if not counts:
-        return 0.0, 0.0, 0
-    starred = int(counts.get("starred", 0))
-    dismissed = int(counts.get("dismissed", 0))
-    total = starred + dismissed
-    if total <= 0:
-        return 0.0, 0.0, 0
-    return starred / total, dismissed / total, total
+def _shrunk_expected_value(
+    stats: dict | None,
+    baseline_stats: dict | None,
+    prior_strength: float,
+) -> float:
+    """Blend one seed/category EV estimate toward the global baseline."""
+    stats = stats or {}
+    baseline_stats = baseline_stats or {}
+    attempts = max(0, int(stats.get("attempts", 0) or 0))
+    baseline = float(baseline_stats.get("raw_expected_value", 0.0) or 0.0)
+    raw_value = float(stats.get("raw_expected_value", baseline) or baseline)
+    confidence = attempts / (attempts + max(1.0, float(prior_strength)))
+    return (raw_value * confidence) + (baseline * (1.0 - confidence))
 
 
-def _personalization_multiplier(
+def _expected_value_multiplier(
     domain_name: str,
     category: str,
-    feedback_metrics: dict,
+    outcome_metrics: dict,
 ) -> tuple[float, str]:
-    """Return personalization multiplier + concise reason string."""
-    domain_counts = feedback_metrics.get("domain_counts", {}).get(domain_name, {})
-    category_counts = feedback_metrics.get("category_counts", {}).get(category, {})
-    domain_star_rate, domain_dismiss_rate, domain_total = _rate_stats(domain_counts)
-    category_star_rate, category_dismiss_rate, category_total = _rate_stats(
-        category_counts
+    """Return expected-value multiplier + concise reason string."""
+    global_stats = outcome_metrics.get("global_metrics", {})
+    domain_stats = outcome_metrics.get("domain_metrics", {}).get(domain_name, {})
+    category_stats = outcome_metrics.get("category_metrics", {}).get(category, {})
+
+    domain_ev = _shrunk_expected_value(
+        domain_stats,
+        global_stats,
+        EXPECTED_VALUE_PRIOR_STRENGTH,
     )
-
-    domain_confidence = min(1.0, domain_total / 5.0) if domain_total else 0.0
-    category_confidence = min(1.0, category_total / 8.0) if category_total else 0.0
-    cluster_penalty = feedback_metrics.get("domain_cluster_penalty", {}).get(
-        domain_name, 1.0
+    category_ev = _shrunk_expected_value(
+        category_stats,
+        global_stats,
+        CATEGORY_EXPECTED_VALUE_PRIOR_STRENGTH,
     )
+    combined_ev = (0.7 * domain_ev) + (0.3 * category_ev)
+    baseline_ev = float(global_stats.get("raw_expected_value", 0.0) or 0.0)
+    delta = combined_ev - baseline_ev
+    multiplier = 1.0 + max(-0.55, min(0.8, delta * 1.35))
 
-    multiplier = 1.0
-    if domain_total:
-        multiplier *= 1.0 + (1.2 * domain_star_rate * domain_confidence)
-        multiplier *= max(0.3, 1.0 - (0.9 * domain_dismiss_rate * domain_confidence))
-    if category_total:
-        multiplier *= 1.0 + (0.6 * category_star_rate * category_confidence)
-        multiplier *= max(
-            0.4, 1.0 - (0.6 * category_dismiss_rate * category_confidence)
-        )
-    multiplier *= max(0.6, min(1.0, float(cluster_penalty)))
+    domain_attempts = int(domain_stats.get("attempts", 0) or 0)
+    transmission_rate = float(domain_stats.get("transmission_rate", 0.0) or 0.0)
+    late_stage_rate = float(
+        domain_stats.get("late_stage_survival_rate", 0.0) or 0.0
+    )
+    strong_rejection_rate = float(
+        domain_stats.get("strong_rejection_rate", 0.0) or 0.0
+    )
+    weak_grounding_rate = float(domain_stats.get("weak_grounding_rate", 0.0) or 0.0)
 
-    if domain_total and domain_star_rate >= 0.55:
-        reason = f"high star rate for domain {domain_name} ({domain_star_rate:.0%})"
-    elif category_total and category_star_rate >= 0.55:
-        reason = f"high star rate in category {category} ({category_star_rate:.0%})"
-    elif domain_total and domain_dismiss_rate >= 0.6:
+    if domain_attempts <= 0:
         reason = (
-            f"high dismiss rate for domain {domain_name} ({domain_dismiss_rate:.0%})"
+            f"limited seed history; category EV {category_ev:.2f} vs global {baseline_ev:.2f}"
         )
-    elif category_total and category_dismiss_rate >= 0.6:
+    elif delta >= 0.08:
         reason = (
-            f"high dismiss rate in category {category} ({category_dismiss_rate:.0%})"
+            f"high EV: tx {transmission_rate:.0%}, late-stage {late_stage_rate:.0%}, "
+            f"strong rejection {strong_rejection_rate:.0%}"
         )
-    elif cluster_penalty < 0.95:
-        reason = "mostly dismissed signature clusters"
+    elif delta <= -0.08:
+        reason = (
+            f"low EV: tx {transmission_rate:.0%}, weak grounding {weak_grounding_rate:.0%}, "
+            f"strong rejection {strong_rejection_rate:.0%}"
+        )
     else:
-        reason = "neutral feedback profile"
+        reason = (
+            f"near-baseline EV: tx {transmission_rate:.0%}, late-stage {late_stage_rate:.0%}"
+        )
 
-    return max(0.05, multiplier), reason
+    return max(0.2, multiplier), reason
 
 
 def _soften_multiplier(multiplier: float, strength: float) -> float:
@@ -235,9 +248,9 @@ def pick_seed() -> dict:
     """
     from config import PERSONALIZATION, SEED_EXCLUSION_WINDOW
     from store import (
-        get_feedback_seed_metrics,
         get_recent_domains,
         get_recent_seed_selection_context,
+        get_seed_outcome_metrics,
     )
 
     domains = _load_domains()
@@ -249,20 +262,18 @@ def pick_seed() -> dict:
     if not candidates:
         candidates = domains
 
-    feedback_metrics = get_feedback_seed_metrics() if PERSONALIZATION else {}
+    outcome_metrics = get_seed_outcome_metrics() if PERSONALIZATION else {}
 
-    # Weight: never-visited domains get 3x weight
     weights = []
     reasons_by_domain: dict[str, str] = {}
     for d in candidates:
-        base_weight = 3.0 if d["name"] not in recent else 1.0
-        weight = base_weight
+        weight = 1.0
         reason_parts = []
         if PERSONALIZATION:
-            multiplier, reason = _personalization_multiplier(
+            multiplier, reason = _expected_value_multiplier(
                 d["name"],
                 d["category"],
-                feedback_metrics,
+                outcome_metrics,
             )
             weight *= _soften_multiplier(multiplier, PERSONALIZATION_WEIGHT_STRENGTH)
             reason_parts.append(reason)
@@ -272,7 +283,10 @@ def pick_seed() -> dict:
             d["category"],
             selection_context,
         )
-        weight *= diversity_multiplier
+        weight *= _soften_multiplier(
+            diversity_multiplier,
+            SEED_DIVERSITY_SECONDARY_STRENGTH,
+        )
         reason_parts.append(diversity_reason)
 
         weights.append(max(0.05, weight))
