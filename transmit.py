@@ -130,6 +130,12 @@ def format_transmission(
     def _first_nonempty(*values) -> str:
         return _first_present(*values) or "—"
 
+    def _meaningful_text(value) -> str | None:
+        cleaned = _clean_text(value)
+        if cleaned in (None, "—"):
+            return None
+        return cleaned
+
     def _format_score(value) -> str:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return f"{value:.2f}"
@@ -146,6 +152,57 @@ def format_transmission(
         if not sentence_endings:
             return cleaned
         return cleaned[: sentence_endings[0] + 1].strip()
+
+    def _strip_if_prefix(value) -> str | None:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return None
+        if cleaned.lower().startswith("if "):
+            return cleaned[3:].strip()
+        return cleaned
+
+    def _contains_phrase(value, phrases: tuple[str, ...]) -> bool:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return False
+        lowered = cleaned.lower()
+        return any(phrase in lowered for phrase in phrases)
+
+    def _first_evidence_aligned_claim(payload) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+
+        mechanism_entries = payload.get("mechanism_assertions")
+        if isinstance(mechanism_entries, list):
+            for entry in mechanism_entries:
+                if not isinstance(entry, dict):
+                    continue
+                claim = _first_sentence(entry.get("mechanism_claim"))
+                if claim is not None:
+                    return claim
+
+        variable_entries = payload.get("variable_mappings")
+        if isinstance(variable_entries, list):
+            for entry in variable_entries:
+                if not isinstance(entry, dict):
+                    continue
+                claim = _first_sentence(entry.get("claim"))
+                if claim is not None:
+                    return claim
+        return None
+
+    def _measure_instruction(measure: str | None, horizon: str | None) -> str:
+        if measure is None:
+            return "the named operator outcome"
+        cleaned_horizon = _clean_text(horizon)
+        if cleaned_horizon is None:
+            return measure
+        lowered = cleaned_horizon.lower()
+        if lowered.startswith("measurable within "):
+            return f"{measure}; {lowered}"
+        if lowered.startswith(("within ", "during ", "over ", "per ")):
+            return f"{measure} {cleaned_horizon}"
+        return f"{measure} within {cleaned_horizon}"
 
     def _indent_block(value: str, prefix: str = "    ") -> str:
         return "\n".join(f"{prefix}{line}" for line in str(value).splitlines())
@@ -235,6 +292,188 @@ def format_transmission(
             )
         return "\n".join(lines)
 
+    analogy_phrases = (
+        "exact same logic",
+        "same logic",
+        "same decision architecture",
+        "just as",
+        "mirrors",
+        "mirror",
+        "analogous",
+        "analogy",
+        "parallel",
+        "resembles",
+        "echoes",
+        "maps onto",
+        "corresponds to",
+    )
+
+    def _build_problem_text(
+        normalized_prediction_payload: dict,
+        test_payload: dict,
+        mechanism_value: str,
+    ) -> str:
+        measure = _first_present(
+            normalized_prediction_payload.get("observable"),
+            test_payload.get("metric"),
+            test_payload.get("metrics"),
+        )
+        utility = _first_sentence(normalized_prediction_payload.get("utility_rationale"))
+        mechanism_focus = _first_sentence(_meaningful_text(mechanism_value))
+
+        if measure:
+            return (
+                f"In {target_domain}, does {measure} stay bounded enough to rely on "
+                "under the operating condition this hypothesis isolates?"
+            )
+        if mechanism_focus:
+            return (
+                f"In {target_domain}, is {mechanism_focus} the process actually driving "
+                "the measurable outcome that matters here?"
+            )
+        if utility:
+            return utility
+        return (
+            f"In {target_domain}, which measurable control point should the operator "
+            "actually care about?"
+        )
+
+    def _build_decision_text(
+        normalized_prediction_payload: dict,
+        test_payload: dict,
+    ) -> str:
+        measure = _first_present(
+            normalized_prediction_payload.get("observable"),
+            test_payload.get("metric"),
+            test_payload.get("metrics"),
+        )
+        horizon = _first_present(
+            normalized_prediction_payload.get("time_horizon"),
+            test_payload.get("horizon"),
+            test_payload.get("time_horizon"),
+            test_payload.get("timing"),
+        )
+        confirm = _first_present(
+            test_payload.get("confirm"),
+            test_payload.get("confirms"),
+            test_payload.get("confirmed_if"),
+            test_payload.get("supports"),
+        )
+        falsify = _strip_if_prefix(
+            _first_present(
+                normalized_prediction_payload.get("falsification_condition"),
+                test_payload.get("falsify"),
+                test_payload.get("falsifies"),
+                test_payload.get("falsified_if"),
+                test_payload.get("refutes"),
+            )
+        )
+
+        intro = f"Measure {_measure_instruction(measure, horizon)}"
+
+        if confirm and falsify:
+            return (
+                f"{intro}; keep treating the named mechanism as an operator lever only "
+                f"if {confirm}; stop tuning around it if {falsify}."
+            )
+        if confirm:
+            return (
+                f"{intro}; keep treating the named mechanism as an operator lever only "
+                f"if {confirm}."
+            )
+        if falsify:
+            return f"{intro}; stop tuning around the named mechanism if {falsify}."
+        return f"{intro} before committing to this mechanism as something to tune or trust."
+
+    def _build_primary_claim(
+        summary_value: str | None,
+        mechanism_value: str,
+        target_excerpt_value: str,
+        normalized_prediction_payload: dict,
+        test_payload: dict,
+        evidence_map_payload,
+    ) -> str:
+        aligned_claim = _first_evidence_aligned_claim(evidence_map_payload)
+        connection_sentence = _first_sentence(summary_value)
+        if connection_sentence and _contains_phrase(connection_sentence, analogy_phrases):
+            connection_sentence = None
+        mechanism_sentence = _first_sentence(_meaningful_text(mechanism_value))
+        target_excerpt_sentence = _first_sentence(_meaningful_text(target_excerpt_value))
+
+        claim = _first_present(
+            aligned_claim,
+            _first_sentence(normalized_prediction_payload.get("statement")),
+            _first_sentence(
+                _first_present(
+                    test_payload.get("confirm"),
+                    test_payload.get("confirms"),
+                    test_payload.get("confirmed_if"),
+                    test_payload.get("supports"),
+                )
+            ),
+            mechanism_sentence,
+            target_excerpt_sentence,
+            connection_sentence,
+        )
+        utility = _first_sentence(normalized_prediction_payload.get("utility_rationale"))
+        who_benefits = _first_sentence(normalized_prediction_payload.get("who_benefits"))
+
+        lines = [
+            f"Target problem: {_build_problem_text(normalized_prediction_payload, test_payload, mechanism_value)}",
+            f"Target claim: {_first_nonempty(claim)}",
+            f"Decision informed: {_build_decision_text(normalized_prediction_payload, test_payload)}",
+        ]
+        if utility is not None:
+            lines.append(f"Why it matters: {utility}")
+        elif who_benefits is not None:
+            lines.append(
+                f"Why it matters: this changes what {who_benefits} should measure, compare, or tune."
+            )
+        return "\n".join(lines)
+
+    def _build_optional_summary(summary_value: str | None, primary_claim_value: str) -> str:
+        cleaned_summary = _meaningful_text(summary_value)
+        if cleaned_summary is None:
+            return "—"
+        if _contains_phrase(cleaned_summary, analogy_phrases):
+            return "—"
+        cleaned_primary = _clean_text(primary_claim_value)
+        summary_first_sentence = _first_sentence(cleaned_summary)
+        if cleaned_primary is not None and (
+            cleaned_summary in cleaned_primary
+            or (
+                summary_first_sentence is not None
+                and summary_first_sentence in cleaned_primary
+            )
+        ):
+            return "—"
+        useful_context_phrases = (
+            "measure",
+            "metric",
+            "baseline",
+            "compare",
+            "decision",
+            "intervention",
+            "operator",
+            "threshold",
+            "boundary condition",
+            "assumption",
+            "confirm",
+            "falsify",
+            "dataset",
+            "experiment",
+            "control",
+        )
+        sentence_count = sum(1 for char in cleaned_summary if char in ".!?")
+        if sentence_count > 1 and not _contains_phrase(cleaned_summary, useful_context_phrases):
+            return "—"
+        if (
+            len(cleaned_summary.split()) > 24
+            and not _contains_phrase(cleaned_summary, useful_context_phrases)
+        ):
+            return "—"
+        return f"Context: {cleaned_summary}"
+
     def _build_operator_takeaway(
         normalized_prediction_payload: dict,
         test_payload: dict,
@@ -256,36 +495,42 @@ def format_transmission(
             test_payload.get("confirmed_if"),
             test_payload.get("supports"),
         )
-        falsify = _first_present(
-            normalized_prediction_payload.get("falsification_condition"),
-            test_payload.get("falsify"),
-            test_payload.get("falsifies"),
-            test_payload.get("falsified_if"),
-            test_payload.get("refutes"),
+        falsify = _strip_if_prefix(
+            _first_present(
+                normalized_prediction_payload.get("falsification_condition"),
+                test_payload.get("falsify"),
+                test_payload.get("falsifies"),
+                test_payload.get("falsified_if"),
+                test_payload.get("refutes"),
+            )
         )
-        utility = _first_present(normalized_prediction_payload.get("utility_rationale"))
+        utility = _first_sentence(normalized_prediction_payload.get("utility_rationale"))
         who_benefits = _first_present(normalized_prediction_payload.get("who_benefits"))
 
         lines: list[str] = []
         if measure and horizon:
-            lines.append(f"Measure {measure} within {horizon}.")
+            lines.append(f"Measure: {_measure_instruction(measure, horizon)}.")
         elif measure:
-            lines.append(f"Measure {measure}.")
+            lines.append(f"Measure: {measure}.")
 
         if confirm and falsify:
             lines.append(
-                f"Use {confirm} as the confirmation signal and {falsify} as the stop condition."
+                "Compare/decide: keep the named mechanism in play only if "
+                f"{confirm}; stop tuning around it if {falsify}."
             )
         elif confirm:
-            lines.append(f"Use {confirm} as the confirmation signal.")
+            lines.append(
+                "Compare/decide: keep the named mechanism in play only if "
+                f"{confirm}."
+            )
         elif falsify:
-            lines.append(f"Treat {falsify} as the stop condition.")
+            lines.append(f"Compare/decide: stop tuning around it if {falsify}.")
 
-        if not lines and utility:
-            lines.append(_first_sentence(utility) or utility)
-        if not lines and who_benefits:
-            lines.append(f"This informs decisions for {who_benefits}.")
-        return " ".join(lines) if lines else "—"
+        if utility:
+            lines.append(f"Why this matters: {utility}")
+        elif who_benefits:
+            lines.append(f"Who uses this: {who_benefits}.")
+        return "\n".join(lines) if lines else "—"
 
     source_data = connection.get("source")
     if not isinstance(source_data, dict):
@@ -353,12 +598,16 @@ def format_transmission(
         cleaned_test = _clean_text(test_value)
         test_text = cleaned_test if cleaned_test is not None else "—"
 
-    summary_text = _first_nonempty(connection.get("connection"))
-    primary_claim_text = _first_nonempty(
-        _first_sentence(connection.get("connection")),
-        connection.get("mechanism"),
-        normalized_prediction.get("statement"),
+    raw_summary_text = _clean_text(connection.get("connection"))
+    primary_claim_text = _build_primary_claim(
+        raw_summary_text,
+        mechanism_text,
+        target_excerpt,
+        normalized_prediction,
+        test_data,
+        connection.get("evidence_map"),
     )
+    summary_text = _build_optional_summary(raw_summary_text, primary_claim_text)
     operator_takeaway_text = _build_operator_takeaway(
         normalized_prediction,
         test_data,
