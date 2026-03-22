@@ -253,7 +253,8 @@ python main.py --check-provenance --window 50
 ## Grading Runs
 
 Use [BLACKCLAW_GRADING_RUBRIC.md](/Users/matiaschristensen/Documents/BlackClaw/BLACKCLAW_GRADING_RUBRIC.md)
-to review cycles and transmissions consistently before making bigger architectural changes.
+to review cycles, transmissions, strong rejections, and operator value consistently before
+making bigger architectural changes.
 
 ## Dashboard
 
