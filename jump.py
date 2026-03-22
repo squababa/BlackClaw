@@ -75,12 +75,13 @@ Requirements:
 - Optional `secondary_mechanism_types` must be a JSON array and every tag must also come from the same controlled vocabulary.
 - Provide evidence_map with claim-level evidence:
   - evidence_map.variable_mappings must cover each critical mapping in variable_mapping (at least 3 entries).
-  - Each variable mapping entry must include source_variable, target_variable, claim, evidence_snippet, source_reference, and may include support_level.
-  - The first 3 variable_mapping entries are the critical mappings, so the first 3 evidence_map.variable_mappings entries must be the strongest-supported ones and must align to those same critical mappings.
-  - For each critical mapping, the claim must closely match the mapped variables, the evidence_snippet must directly support that exact claim, and the source_reference must point to the specific search result containing that snippet.
-  - For critical mappings, write the claim as a direct restatement of what the evidence_snippet literally supports. Do not let the claim become broader, more abstract, or more mechanistic than the snippet itself.
-  - For critical mappings, prefer direct support over inferential support whenever possible.
-  - Prefer fewer, better-supported critical mappings over extra weak ones. If support is thin, keep the first 3 mappings narrow and well-supported instead of inventing broader weak critical mappings. Non-critical mappings are lower priority.
+- Each variable mapping entry must include source_variable, target_variable, claim, evidence_snippet, source_reference, and may include support_level.
+- The first 3 variable_mapping entries are the critical mappings, so the first 3 evidence_map.variable_mappings entries must be the strongest-supported ones and must align to those same critical mappings.
+- For each critical mapping, the claim must closely match the mapped variables, the evidence_snippet must directly support that exact claim, and the source_reference must point to the specific search result containing that snippet.
+- For critical mappings, write the claim as a direct restatement of what the evidence_snippet literally supports. Do not let the claim become broader, more abstract, or more mechanistic than the snippet itself.
+- For critical mappings, prefer direct support over inferential support whenever possible.
+- For the first 3 critical mappings, the evidence_snippet must be specific enough to stand on its own: prefer 8+ words, at least one or two concrete overlapping terms with the claim/mapped variable, and enough local detail that it does not read like generic background context.
+- Prefer fewer, better-supported critical mappings over extra weak ones. If support is thin, keep the first 3 mappings narrow and well-supported instead of inventing broader weak critical mappings. Non-critical mappings are lower priority.
   - If a snippet supports only a weaker, local correspondence, keep the mapping claim equally weak and local.
   - Write each claim at the same level of specificity as the mapped variables. Do not make the claim broader than the mapping itself.
   - Each variable mapping snippet must directly bear on the mapped target-domain variable, not just the broader target-domain story or a nearby downstream effect.
@@ -105,6 +106,12 @@ Requirements:
 - `test.metric` must name one concrete measurable metric explicitly. Use a standard reported metric name where possible, and keep it specific enough that a paper table, figure, or abstract result could report it directly.
 - `prediction.observable`, `test.metric`, `test.confirm`, and `test.falsify` must all evaluate the same named target-domain operator or its direct measurable outcome, with the same primary comparator.
 - `test.confirm` and `test.falsify` must each refer to that same named metric and its explicit comparator. Do not write vague test language like "check whether the effect happens."
+- Good confirm/falsify wording names the metric directly. Examples:
+  - `collision rate per hyperperiod is lower under filtered scheduling than under sequential scheduling at equal utilization`
+  - `mean cascade size per initiating branch failure does not differ between high-load and low-load configurations`
+- Bad confirm/falsify wording is generic. Examples:
+  - `the effect happens`
+  - `results improve`
 - Do not pair a broad analogy with a loosely related metric. If the metric only weakly proxies the claimed mechanism, narrow the claim or return `no_connection`.
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
 - The mechanism sentence must name a specific target-domain process that is directly evidenced in the retrieved target material or mechanism assertions.
@@ -193,10 +200,16 @@ Requirements:
   - `performance`
   - `overall efficiency`
   - `outcomes`
+- Good edge advantages name one concrete operator gain. Examples:
+  - `Operators can reduce collision rate before redesigning the scheduling architecture.`
+  - `Transit planners can avoid overestimating doorway throughput above the saturation point.`
+- Bad edge advantages are generic usefulness claims. Examples:
+  - `This could be useful.`
+  - `This may provide an edge.`
 - Do not write generic edge language such as `this could help researchers`, `investigate further`, `monitor this`, or `this may provide an edge`.
 - Do not claim `nobody knows this`, `this is unpublished`, or similar novelty claims as fact.
 - If you cannot supply a specific problem, actionable lever, cheap test, and contingent edge without unsupported extrapolation, return `no_connection`.
-- If `mechanism`, `test.metric`, `edge_analysis.problem_statement`, or `edge_analysis.actionable_lever` are only generic placeholders, rewrite them concretely or return `no_connection`.
+- If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, or the first 3 critical evidence snippets are only generic placeholders, rewrite them concretely or return `no_connection`.
 - Provide at least 2 assumptions and explicit boundary_conditions.
 
 Return ONLY valid JSON. No markdown.
@@ -290,6 +303,7 @@ GENERIC_MECHANISM_FILLERS = (
 )
 
 RESULT_FIRST_MECHANISM_OPENERS = (
+    "in ",
     "when ",
     "as ",
     "if ",
@@ -341,6 +355,30 @@ GENERIC_ACTION_FILLERS = (
     "look into this",
 )
 
+GENERIC_EDGE_ADVANTAGE_FILLERS = (
+    "could be useful",
+    "may be useful",
+    "may provide an edge",
+    "could provide an edge",
+    "improves performance",
+    "improve performance",
+    "optimize performance",
+    "offers an advantage",
+    "help researchers",
+    "useful to explore",
+)
+
+GENERIC_TEST_DECISION_FILLERS = (
+    "the effect happens",
+    "the hypothesis is supported",
+    "the hypothesis holds",
+    "the mechanism is true",
+    "results improve",
+    "outcomes improve",
+    "performance improves",
+    "the effect appears",
+)
+
 EDGE_PROBLEM_HINTS = (
     "problem",
     "blind spot",
@@ -379,6 +417,28 @@ EDGE_ACTION_HINTS = (
     "prioritize",
     "constrain",
     "gate",
+)
+
+EDGE_ADVANTAGE_HINTS = (
+    "advantage",
+    "gain",
+    "reduce",
+    "lower",
+    "faster",
+    "earlier",
+    "improve",
+    "better",
+    "throughput",
+    "cost",
+    "latency",
+    "warning",
+    "quality",
+    "efficiency",
+    "allocation",
+    "collision",
+    "error",
+    "risk",
+    "yield",
 )
 
 GENERIC_QUERY_TOKENS = {
@@ -646,6 +706,13 @@ def _missing_required_fields(data: dict) -> list[str]:
         cleaned = str(text or "").strip().lower()
         return any(phrase in cleaned for phrase in phrases)
 
+    def _meaningful_terms(text: object) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9_]+", str(text or "").lower())
+            if len(token) >= 4 and not token.isdigit()
+        }
+
     def _mechanism_needs_repair(mechanism: object) -> bool:
         text = str(mechanism or "").strip()
         if not text:
@@ -654,6 +721,10 @@ def _missing_required_fields(data: dict) -> list[str]:
         if _contains_any_phrase(lower, GENERIC_MECHANISM_FILLERS):
             return True
         if lower.startswith(RESULT_FIRST_MECHANISM_OPENERS):
+            return True
+        if lower.startswith("the retrieved evidence") or lower.startswith("retrieved evidence"):
+            return True
+        if lower.startswith("literature ") or lower.startswith("studies "):
             return True
         if len(text.split()) < 8:
             return True
@@ -671,6 +742,39 @@ def _missing_required_fields(data: dict) -> list[str]:
         ):
             return True
         if len(metric.split()) < 2:
+            return True
+        return False
+
+    def _test_decision_needs_repair(test: object) -> bool:
+        if not isinstance(test, dict):
+            return True
+        metric = str(test.get("metric") or test.get("metrics") or "").strip()
+        confirm = str(
+            test.get("confirm")
+            or test.get("confirms")
+            or test.get("confirmed_if")
+            or test.get("supports")
+            or ""
+        ).strip()
+        falsify = str(
+            test.get("falsify")
+            or test.get("falsifies")
+            or test.get("falsified_if")
+            or test.get("refutes")
+            or ""
+        ).strip()
+        if not metric or not confirm or not falsify:
+            return True
+        metric_terms = _meaningful_terms(metric)
+        if not metric_terms:
+            return True
+        if _contains_any_phrase(confirm, GENERIC_TEST_DECISION_FILLERS) or _contains_any_phrase(
+            falsify, GENERIC_TEST_DECISION_FILLERS
+        ):
+            return True
+        if len(metric_terms & _meaningful_terms(confirm)) == 0:
+            return True
+        if len(metric_terms & _meaningful_terms(falsify)) == 0:
             return True
         return False
 
@@ -698,6 +802,38 @@ def _missing_required_fields(data: dict) -> list[str]:
             return True
         if len(value.split()) < 4:
             return True
+        return False
+
+    def _edge_advantage_needs_repair(text: object) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return True
+        lower = value.lower()
+        if _contains_any_phrase(lower, GENERIC_EDGE_ADVANTAGE_FILLERS):
+            return True
+        if not any(hint in lower for hint in EDGE_ADVANTAGE_HINTS):
+            return True
+        if len(value.split()) < 6:
+            return True
+        return False
+
+    def _critical_evidence_snippets_need_repair(evidence_map: dict) -> bool:
+        variable_mappings = (
+            evidence_map.get("variable_mappings")
+            if isinstance(evidence_map.get("variable_mappings"), list)
+            else []
+        )
+        for entry in variable_mappings[:3]:
+            if not isinstance(entry, dict):
+                return True
+            claim = str(entry.get("claim") or "").strip()
+            snippet = str(entry.get("evidence_snippet") or "").strip()
+            if len(snippet.split()) < 8:
+                return True
+            if len(_meaningful_terms(snippet)) < 4:
+                return True
+            if len(_meaningful_terms(claim) & _meaningful_terms(snippet)) == 0:
+                return True
         return False
 
     def _prediction_missing_fields(prediction: object) -> list[str]:
@@ -772,7 +908,9 @@ def _missing_required_fields(data: dict) -> list[str]:
     if not _test_has_metric_confirm_falsify(data.get("test")):
         missing.append("test")
     elif _test_metric_needs_repair(data.get("test")):
-        missing.append("test.metric")
+        missing.extend(["test.metric", "test.confirm", "test.falsify"])
+    elif _test_decision_needs_repair(data.get("test")):
+        missing.extend(["test.confirm", "test.falsify"])
     missing.extend(_edge_analysis_missing_fields(data.get("edge_analysis")))
     edge_analysis = (
         data.get("edge_analysis") if isinstance(data.get("edge_analysis"), dict) else {}
@@ -781,6 +919,8 @@ def _missing_required_fields(data: dict) -> list[str]:
         missing.append("edge_analysis.problem_statement")
     if _actionable_lever_needs_repair(edge_analysis.get("actionable_lever")):
         missing.append("edge_analysis.actionable_lever")
+    if _edge_advantage_needs_repair(edge_analysis.get("edge_if_right")):
+        missing.append("edge_analysis.edge_if_right")
     if _assumptions_count(data.get("assumptions")) < 2:
         missing.append("assumptions")
     if not _is_non_empty(data.get("boundary_conditions")):
@@ -789,6 +929,8 @@ def _missing_required_fields(data: dict) -> list[str]:
         missing.append("evidence")
     evidence_map = normalize_evidence_map(data.get("evidence_map"))
     if len(evidence_map.get("variable_mappings", [])) < 3:
+        missing.append("evidence_map.variable_mappings")
+    elif _critical_evidence_snippets_need_repair(evidence_map):
         missing.append("evidence_map.variable_mappings")
     if len(evidence_map.get("mechanism_assertions", [])) < 1:
         missing.append("evidence_map.mechanism_assertions")
@@ -805,6 +947,10 @@ def _repair_guidance_for_missing_fields(missing_fields: list[str]) -> str:
         guidance.append(
             "- Rewrite `test` so `metric` names one concrete literature-facing quantity, not placeholders like `performance`, `efficiency`, or `outcomes`. Make `confirm` and `falsify` explicitly refer to that same metric."
         )
+    if any(field in {"test.confirm", "test.falsify"} for field in missing_fields):
+        guidance.append(
+            "- Rewrite `test.confirm` and `test.falsify` so each sentence literally names the same metric used in `test.metric` and states the explicit comparator or direction for that metric."
+        )
     if "edge_analysis.problem_statement" in missing_fields:
         guidance.append(
             "- Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode, bottleneck, blind spot, or measurable miss tied to the same observable or metric as the test."
@@ -812,6 +958,14 @@ def _repair_guidance_for_missing_fields(missing_fields: list[str]) -> str:
     if "edge_analysis.actionable_lever" in missing_fields:
         guidance.append(
             "- Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action, filter, intervention, or decision rule. Reject advisory phrasing like `investigate further`, `study this`, or `consider this`."
+        )
+    if "edge_analysis.edge_if_right" in missing_fields:
+        guidance.append(
+            "- Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain such as lower collision rate, earlier warning, lower cost, higher throughput, or reduced false positives. Reject generic usefulness language."
+        )
+    if "evidence_map.variable_mappings" in missing_fields:
+        guidance.append(
+            "- Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause with concrete overlapping terms from the claim or mapped variable. Do not use vague background snippets."
         )
     if not guidance:
         return ""

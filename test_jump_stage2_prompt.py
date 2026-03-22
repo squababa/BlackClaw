@@ -97,22 +97,33 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Good actionable levers name one concrete action" in prompt
     assert "Bad actionable levers are vague or advisory" in prompt
     assert "Good test metrics name one concrete literature-facing quantity" in prompt
-    assert "If `mechanism`, `test.metric`, `edge_analysis.problem_statement`, or `edge_analysis.actionable_lever` are only generic placeholders" in prompt
+    assert "Good confirm/falsify wording names the metric directly" in prompt
+    assert "Good edge advantages name one concrete operator gain" in prompt
+    assert "For the first 3 critical mappings, the evidence_snippet must be specific enough to stand on its own" in prompt
+    assert "If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, or the first 3 critical evidence snippets are only generic placeholders" in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
     payload = _valid_stage2_payload()
-    payload["mechanism"] = "When a threshold is crossed, the system transitions to a new state."
+    payload["mechanism"] = "In the target domain, the system transitions to a new state when the threshold is crossed."
     payload["test"]["metric"] = "performance"
+    payload["test"]["confirm"] = "the effect happens"
+    payload["test"]["falsify"] = "results improve"
     payload["edge_analysis"]["problem_statement"] = "Complex systems may hide inefficiencies."
     payload["edge_analysis"]["actionable_lever"] = "Investigate further."
+    payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+    payload["evidence_map"]["variable_mappings"][0]["evidence_snippet"] = "General background context only."
 
     missing = jump._missing_required_fields(payload)
 
     assert "mechanism" in missing
     assert "test.metric" in missing
+    assert "test.confirm" in missing
+    assert "test.falsify" in missing
     assert "edge_analysis.problem_statement" in missing
     assert "edge_analysis.actionable_lever" in missing
+    assert "edge_analysis.edge_if_right" in missing
+    assert "evidence_map.variable_mappings" in missing
 
 
 def test_build_repair_prompt_includes_targeted_guidance() -> None:
@@ -122,12 +133,19 @@ def test_build_repair_prompt_includes_targeted_guidance() -> None:
         [
             "mechanism",
             "test.metric",
+            "test.confirm",
+            "test.falsify",
             "edge_analysis.problem_statement",
             "edge_analysis.actionable_lever",
+            "edge_analysis.edge_if_right",
+            "evidence_map.variable_mappings",
         ],
     )
 
     assert "Rewrite `mechanism` as one process-first sentence" in repair_prompt
     assert "Rewrite `test` so `metric` names one concrete literature-facing quantity" in repair_prompt
+    assert "Rewrite `test.confirm` and `test.falsify` so each sentence literally names the same metric used in `test.metric`" in repair_prompt
     assert "Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode" in repair_prompt
     assert "Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action" in repair_prompt
+    assert "Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain" in repair_prompt
+    assert "Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause" in repair_prompt
