@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 PERSONALIZATION_RANDOM_FLOOR = 0.2
+PERSONALIZATION_WEIGHT_STRENGTH = 0.6
+SEED_DIVERSITY_HISTORY_WINDOW = 40
 
 
 def _load_domains() -> list[dict]:
@@ -156,6 +158,70 @@ def _personalization_multiplier(
     return max(0.05, multiplier), reason
 
 
+def _soften_multiplier(multiplier: float, strength: float) -> float:
+    """Blend a multiplier toward neutral so one signal does not dominate."""
+    return 1.0 + ((max(0.05, multiplier) - 1.0) * strength)
+
+
+def _diversity_multiplier(
+    domain_name: str,
+    category: str,
+    selection_context: dict,
+) -> tuple[float, str]:
+    """Return a lightweight multiplier that favors broader seed coverage."""
+    recent_categories = selection_context.get("recent_categories", [])
+    total_recent = len(recent_categories)
+    if total_recent <= 0:
+        return 1.0, "neutral exploration coverage"
+
+    category_recent_counts = selection_context.get("category_recent_counts", {})
+    domain_last_seen = selection_context.get("domain_last_seen", {})
+    category_last_seen = selection_context.get("category_last_seen", {})
+    domain_low_yield_counts = selection_context.get("domain_low_yield_counts", {})
+
+    distinct_categories = max(len(category_recent_counts), 1)
+    target_category_share = total_recent / distinct_categories
+    category_count = category_recent_counts.get(category, 0)
+    category_seen_idx = category_last_seen.get(category)
+    domain_seen_idx = domain_last_seen.get(domain_name)
+    low_yield_count = domain_low_yield_counts.get(domain_name, 0)
+
+    multiplier = 1.0
+    reasons: list[str] = []
+
+    if category_count > target_category_share:
+        overflow = (category_count - target_category_share) / max(target_category_share, 1.0)
+        multiplier *= max(0.65, 1.0 - min(0.3, 0.12 + (overflow * 0.18)))
+        reasons.append("recently overused category")
+    elif category_count == 0:
+        multiplier *= 1.35
+        reasons.append("underexplored category")
+    elif category_count < target_category_share * 0.75:
+        multiplier *= 1.15
+        reasons.append("lightly explored category")
+
+    if category_seen_idx is None:
+        multiplier *= 1.2
+        reasons.append("category not seen recently")
+    elif category_seen_idx >= max(3, distinct_categories):
+        multiplier *= 1.0 + min(0.2, (category_seen_idx / total_recent) * 0.25)
+        reasons.append("category cooled off")
+
+    if domain_seen_idx is None:
+        multiplier *= 1.15
+        reasons.append("underexplored seed")
+    elif domain_seen_idx >= max(4, total_recent // 4):
+        multiplier *= 1.0 + min(0.15, (domain_seen_idx / total_recent) * 0.2)
+        reasons.append("seed cooled off")
+
+    if low_yield_count >= 2:
+        multiplier *= max(0.45, 1.0 - min(0.45, low_yield_count * 0.18))
+        reasons.insert(0, "recent low-yield seed")
+
+    reason = ", ".join(reasons[:2]) if reasons else "neutral exploration coverage"
+    return max(0.2, min(2.5, multiplier)), reason
+
+
 def pick_seed() -> dict:
     """
     Pick a seed domain for the next exploration cycle.
@@ -168,10 +234,15 @@ def pick_seed() -> dict:
     6. Return: {"name": str, "category": str, "seed_queries": list[str]}
     """
     from config import PERSONALIZATION, SEED_EXCLUSION_WINDOW
-    from store import get_feedback_seed_metrics, get_recent_domains
+    from store import (
+        get_feedback_seed_metrics,
+        get_recent_domains,
+        get_recent_seed_selection_context,
+    )
 
     domains = _load_domains()
     recent = set(get_recent_domains(SEED_EXCLUSION_WINDOW))
+    selection_context = get_recent_seed_selection_context(SEED_DIVERSITY_HISTORY_WINDOW)
     # Filter out recently explored
     candidates = [d for d in domains if d["name"] not in recent]
     # Fallback if exclusion removes everything
@@ -186,16 +257,28 @@ def pick_seed() -> dict:
     for d in candidates:
         base_weight = 3.0 if d["name"] not in recent else 1.0
         weight = base_weight
-        reason = "baseline weighting"
+        reason_parts = []
         if PERSONALIZATION:
             multiplier, reason = _personalization_multiplier(
                 d["name"],
                 d["category"],
                 feedback_metrics,
             )
-            weight = base_weight * multiplier
+            weight *= _soften_multiplier(multiplier, PERSONALIZATION_WEIGHT_STRENGTH)
+            reason_parts.append(reason)
+
+        diversity_multiplier, diversity_reason = _diversity_multiplier(
+            d["name"],
+            d["category"],
+            selection_context,
+        )
+        weight *= diversity_multiplier
+        reason_parts.append(diversity_reason)
+
         weights.append(max(0.05, weight))
-        reasons_by_domain[d["name"]] = reason
+        reasons_by_domain[d["name"]] = ", ".join(
+            part for part in reason_parts if part
+        ) or "baseline weighting"
 
     if PERSONALIZATION and random.random() < PERSONALIZATION_RANDOM_FLOOR:
         selected = random.choice(candidates)
@@ -211,4 +294,3 @@ def pick_seed() -> dict:
             print(f"  [Seed] Personalization reason: {reason}")
 
     return _domain_to_seed(selected)
-
