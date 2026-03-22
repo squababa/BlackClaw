@@ -109,7 +109,11 @@ def _shrunk_expected_value(
     baseline_stats = baseline_stats or {}
     attempts = max(0, int(stats.get("attempts", 0) or 0))
     baseline = float(baseline_stats.get("raw_expected_value", 0.0) or 0.0)
-    raw_value = float(stats.get("raw_expected_value", baseline) or baseline)
+    raw_value = stats.get("raw_expected_value")
+    try:
+        raw_value = float(raw_value) if raw_value is not None else baseline
+    except (TypeError, ValueError):
+        raw_value = baseline
     confidence = attempts / (attempts + max(1.0, float(prior_strength)))
     return (raw_value * confidence) + (baseline * (1.0 - confidence))
 
@@ -140,6 +144,7 @@ def _expected_value_multiplier(
     multiplier = 1.0 + max(-0.55, min(0.8, delta * 1.35))
 
     domain_attempts = int(domain_stats.get("attempts", 0) or 0)
+    category_attempts = int(category_stats.get("attempts", 0) or 0)
     transmission_rate = float(domain_stats.get("transmission_rate", 0.0) or 0.0)
     late_stage_rate = float(
         domain_stats.get("late_stage_survival_rate", 0.0) or 0.0
@@ -148,10 +153,29 @@ def _expected_value_multiplier(
         domain_stats.get("strong_rejection_rate", 0.0) or 0.0
     )
     weak_grounding_rate = float(domain_stats.get("weak_grounding_rate", 0.0) or 0.0)
+    domain_delta = domain_ev - baseline_ev
+    category_delta = category_ev - baseline_ev
+    category_dominant = (
+        category_attempts > 0
+        and abs(category_delta) >= 0.08
+        and abs(domain_delta) < 0.05
+    )
 
-    if domain_attempts <= 0:
+    if domain_attempts <= 0 and category_attempts <= 0:
+        reason = f"limited seed history; global EV {baseline_ev:.2f}"
+    elif domain_attempts <= 0:
         reason = (
             f"limited seed history; category EV {category_ev:.2f} vs global {baseline_ev:.2f}"
+        )
+    elif category_dominant and category_delta > 0:
+        reason = (
+            f"category tailwind in {category}: EV {category_ev:.2f} vs global "
+            f"{baseline_ev:.2f}; domain tx {transmission_rate:.0%}"
+        )
+    elif category_dominant and category_delta < 0:
+        reason = (
+            f"category headwind in {category}: EV {category_ev:.2f} vs global "
+            f"{baseline_ev:.2f}; domain tx {transmission_rate:.0%}"
         )
     elif delta >= 0.08:
         reason = (

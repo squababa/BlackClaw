@@ -7,7 +7,7 @@ import re
 from rich.console import Console
 from rich.panel import Panel
 from llm_client import get_llm_client
-from hypothesis_validation import normalize_mechanism_typing
+from hypothesis_validation import normalize_edge_analysis, normalize_mechanism_typing
 from prediction_enforcement import format_prediction_block, prediction_quality_label, normalize_prediction_payload
 from sanitize import check_llm_output
 from store import increment_llm_calls
@@ -761,7 +761,6 @@ def format_transmission(
         who_benefits = _first_sentence(normalized_prediction_payload.get("who_benefits"))
 
         lines = [
-            f"Target problem: {_build_problem_text(normalized_prediction_payload, test_payload, mechanism_value)}",
             f"Target claim: {_first_nonempty(claim)}",
             f"Decision informed: {_build_decision_text(normalized_prediction_payload, test_payload)}",
         ]
@@ -816,63 +815,76 @@ def format_transmission(
             return "—"
         return f"Context: {cleaned_summary}"
 
-    def _build_operator_takeaway(
+    def _build_hidden_problem(
+        edge_payload: dict,
+        normalized_prediction_payload: dict,
+        test_payload: dict,
+        mechanism_value: str,
+    ) -> str:
+        return _first_nonempty(
+            edge_payload.get("problem_statement"),
+            _build_problem_text(normalized_prediction_payload, test_payload, mechanism_value),
+        )
+
+    def _build_actionable_lever(
+        edge_payload: dict,
         normalized_prediction_payload: dict,
         test_payload: dict,
     ) -> str:
-        measure = _first_present(
-            normalized_prediction_payload.get("observable"),
-            test_payload.get("metric"),
-            test_payload.get("metrics"),
+        return _first_nonempty(
+            edge_payload.get("actionable_lever"),
+            _build_decision_text(normalized_prediction_payload, test_payload),
         )
-        horizon = _first_present(
-            normalized_prediction_payload.get("time_horizon"),
-            test_payload.get("horizon"),
-            test_payload.get("time_horizon"),
-            test_payload.get("timing"),
-        )
-        confirm = _first_present(
-            test_payload.get("confirm"),
-            test_payload.get("confirms"),
-            test_payload.get("confirmed_if"),
-            test_payload.get("supports"),
-        )
-        falsify = _strip_if_prefix(
-            _first_present(
-                normalized_prediction_payload.get("falsification_condition"),
-                test_payload.get("falsify"),
-                test_payload.get("falsifies"),
-                test_payload.get("falsified_if"),
-                test_payload.get("refutes"),
-            )
-        )
-        utility = _first_sentence(normalized_prediction_payload.get("utility_rationale"))
-        who_benefits = _first_present(normalized_prediction_payload.get("who_benefits"))
 
-        lines: list[str] = []
-        if measure and horizon:
-            lines.append(f"Measure: {_measure_instruction(measure, horizon)}.")
-        elif measure:
-            lines.append(f"Measure: {measure}.")
+    def _format_cheap_test_block(edge_payload: dict, fallback_test_text: str) -> str:
+        cheap_test = (
+            edge_payload.get("cheap_test")
+            if isinstance(edge_payload.get("cheap_test"), dict)
+            else {}
+        )
+        if not cheap_test:
+            return fallback_test_text
+        lines = []
+        setup = _first_present(cheap_test.get("setup"))
+        metric = _first_present(cheap_test.get("metric"))
+        confirm = _first_present(cheap_test.get("confirm"))
+        falsify = _first_present(cheap_test.get("falsify"))
+        time_to_signal = _first_present(cheap_test.get("time_to_signal"))
+        if setup:
+            lines.append(f"Setup: {setup}")
+        if metric:
+            lines.append(f"Metric: {metric}")
+        if confirm:
+            lines.append(f"Confirm: {confirm}")
+        if falsify:
+            lines.append(f"Falsify: {falsify}")
+        if time_to_signal:
+            lines.append(f"Time to signal: {time_to_signal}")
+        return "\n".join(lines) if lines else fallback_test_text
 
-        if confirm and falsify:
-            lines.append(
-                "Compare/decide: keep the named mechanism in play only if "
-                f"{confirm}; stop tuning around it if {falsify}."
-            )
-        elif confirm:
-            lines.append(
-                "Compare/decide: keep the named mechanism in play only if "
-                f"{confirm}."
-            )
-        elif falsify:
-            lines.append(f"Compare/decide: stop tuning around it if {falsify}.")
-
-        if utility:
-            lines.append(f"Why this matters: {utility}")
-        elif who_benefits:
-            lines.append(f"Who uses this: {who_benefits}.")
-        return "\n".join(lines) if lines else "—"
+    def _build_edge_if_right_block(
+        edge_payload: dict,
+        normalized_prediction_payload: dict,
+    ) -> str:
+        lines = [
+            f"Operator advantage: {_first_nonempty(edge_payload.get('edge_if_right'), normalized_prediction_payload.get('utility_rationale'))}"
+        ]
+        why_missed = _first_present(edge_payload.get("why_missed"))
+        expected_asymmetry = _first_present(edge_payload.get("expected_asymmetry"))
+        primary_operator = _first_present(
+            edge_payload.get("primary_operator"),
+            normalized_prediction_payload.get("who_benefits"),
+        )
+        deployment_scope = _first_present(edge_payload.get("deployment_scope"))
+        if why_missed:
+            lines.append(f"Why missed: {why_missed}")
+        if expected_asymmetry:
+            lines.append(f"Expected asymmetry: {expected_asymmetry}")
+        if primary_operator:
+            lines.append(f"Primary operator: {primary_operator}")
+        if deployment_scope:
+            lines.append(f"Deployment scope: {deployment_scope}")
+        return "\n".join(lines)
 
     source_data = connection.get("source")
     if not isinstance(source_data, dict):
@@ -919,6 +931,7 @@ def format_transmission(
     test_value = connection.get("test")
     test_data = test_value if isinstance(test_value, dict) else {}
     normalized_prediction = normalize_prediction_payload(connection)
+    edge_analysis = normalize_edge_analysis(connection)
     prediction_text = format_prediction_block(normalized_prediction)
     prediction_quality = (
         scores.get("prediction_quality")
@@ -965,9 +978,21 @@ def format_transmission(
         central_mapping_candidate,
     )
     summary_text = _build_optional_summary(raw_summary_text, primary_claim_text)
-    operator_takeaway_text = _build_operator_takeaway(
+    hidden_problem_text = _build_hidden_problem(
+        edge_analysis,
         normalized_prediction,
         test_data,
+        mechanism_text,
+    )
+    actionable_lever_text = _build_actionable_lever(
+        edge_analysis,
+        normalized_prediction,
+        test_data,
+    )
+    cheap_test_text = _format_cheap_test_block(edge_analysis, test_text)
+    edge_if_right_text = _build_edge_if_right_block(
+        edge_analysis,
+        normalized_prediction,
     )
     scholarly_prior_art = _clean_text(scores.get("scholarly_prior_art_summary"))
     evidence_map_text = _format_evidence_map_block(evidence_map_payload)
@@ -990,36 +1015,42 @@ def format_transmission(
     lines.extend(
         [
             "",
-            "  1) PRIMARY CLAIM",
+            "  1) HIDDEN PROBLEM",
+            _indent_block(hidden_problem_text),
+            "",
+            "  2) ACTIONABLE LEVER",
+            _indent_block(actionable_lever_text),
+            "",
+            "  3) CHEAP TEST",
+            _indent_block(cheap_test_text),
+            "",
+            "  4) EDGE IF RIGHT",
+            _indent_block(edge_if_right_text),
+            "",
+            "  5) TARGET CLAIM",
             _indent_block(primary_claim_text),
             "",
-            "  2) PREDICTION",
+            "  6) PREDICTION",
             _indent_block(prediction_text),
             "",
-            "  3) OPERATOR TAKEAWAY",
-            _indent_block(operator_takeaway_text),
-            "",
-            "  4) TEST",
-            _indent_block(test_text),
-            "",
-            "  5) MECHANISM",
+            "  7) MECHANISM",
             _indent_block(mechanism_text),
             "",
-            "  6) MECHANISM TYPING",
+            "  8) MECHANISM TYPING",
             _indent_block(mechanism_typing_text),
             "",
-            "  7) VARIABLE MAPPING",
+            "  9) VARIABLE MAPPING",
             _indent_block(variable_mapping_text),
             "",
-            "  8) SOURCE EVIDENCE",
+            "  10) SOURCE EVIDENCE",
             f"    {_evidence_reference_label(source_url)}: {source_url}",
             f"    EXCERPT: {source_excerpt}",
             "",
-            "  9) TARGET EVIDENCE",
+            "  11) TARGET EVIDENCE",
             f"    {_evidence_reference_label(target_url)}: {target_url}",
             f"    EXCERPT: {target_excerpt}",
             "",
-            "  10) SCORES",
+            "  12) SCORES",
             (
                 "    "
                 f"NOVELTY: {_format_score(scores.get('novelty'))} | "
@@ -1061,7 +1092,7 @@ def format_transmission(
     lines.extend(
         [
             "",
-            "  11) OPTIONAL SUMMARY",
+            "  13) OPTIONAL SUMMARY",
             _indent_block(summary_text),
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ]
