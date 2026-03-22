@@ -4970,6 +4970,330 @@ def _usefulness_evidence_candidates(evidence_map: object) -> list[dict]:
     return candidates
 
 
+EVIDENCE_GATE_STOPWORDS = {
+    "about",
+    "across",
+    "after",
+    "also",
+    "among",
+    "because",
+    "between",
+    "claim",
+    "claims",
+    "domain",
+    "domains",
+    "evidence",
+    "generic",
+    "mechanism",
+    "mechanisms",
+    "model",
+    "models",
+    "process",
+    "processes",
+    "result",
+    "results",
+    "show",
+    "shows",
+    "source",
+    "study",
+    "support",
+    "system",
+    "systems",
+    "target",
+    "using",
+    "with",
+}
+EVIDENCE_GATE_WEAK_SOURCE_MARKERS = (
+    "youtube.com",
+    "youtu.be",
+    "wikipedia.org",
+    "investopedia",
+    "blog",
+    "blogs",
+    "medium.com",
+    "substack",
+    "wordpress",
+    "blogspot",
+    "forum",
+    "forums",
+    "reddit",
+    "quora",
+    "explainer",
+    "overview",
+    "introduction",
+    "tutorial",
+    "guide",
+    "beginner",
+    "what is",
+    "how to",
+)
+EVIDENCE_GATE_ADJACENT_TARGET_MARKERS = (
+    "hypergraph",
+    "graph model",
+    "cascade model",
+    "simulation",
+    "simulated",
+    "synthetic",
+    "toy model",
+    "abstract network",
+    "network model",
+    "framework",
+)
+
+
+def _evidence_gate_terms(value: object) -> set[str]:
+    """Extract compact matching terms for narrow evidence-gate heuristics."""
+    cleaned = _clean_inline_text(value)
+    if cleaned is None:
+        return set()
+    return {
+        token
+        for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_/\-]*", cleaned.lower())
+        if len(token) >= 4
+        and token not in EVIDENCE_GATE_STOPWORDS
+        and not token.isdigit()
+    }
+
+
+def _display_evidence_candidates(
+    evidence_map: object,
+    claim_provenance: dict | None = None,
+) -> list[dict]:
+    """Flatten evidence_map entries into display-oriented candidates."""
+    payload = evidence_map if isinstance(evidence_map, dict) else {}
+    candidates: list[dict] = []
+
+    variable_entries = (
+        claim_provenance.get("scored_variable_mappings")
+        if isinstance(claim_provenance, dict)
+        and isinstance(claim_provenance.get("scored_variable_mappings"), list)
+        else payload.get("variable_mappings")
+    )
+    if isinstance(variable_entries, list):
+        for index, entry in enumerate(variable_entries):
+            if not isinstance(entry, dict):
+                continue
+            candidates.append(
+                {
+                    "kind": "mapping",
+                    "index": index,
+                    "claim_text": _clean_inline_text(entry.get("claim")),
+                    "evidence_snippet": _clean_inline_text(
+                        entry.get("evidence_snippet")
+                    ),
+                    "source_reference": _clean_inline_text(
+                        entry.get("source_reference")
+                    ),
+                    "source_variable": _clean_inline_text(
+                        entry.get("source_variable")
+                    ),
+                    "target_variable": _clean_inline_text(
+                        entry.get("target_variable")
+                    ),
+                    "support_level": _clean_inline_text(entry.get("support_level")),
+                    "provenance_score": (
+                        entry.get("provenance_score")
+                        if isinstance(entry.get("provenance_score"), dict)
+                        else {}
+                    ),
+                }
+            )
+
+    mechanism_entries = (
+        claim_provenance.get("scored_mechanism_assertions")
+        if isinstance(claim_provenance, dict)
+        and isinstance(claim_provenance.get("scored_mechanism_assertions"), list)
+        else payload.get("mechanism_assertions")
+    )
+    if isinstance(mechanism_entries, list):
+        for index, entry in enumerate(mechanism_entries):
+            if not isinstance(entry, dict):
+                continue
+            candidates.append(
+                {
+                    "kind": "mechanism",
+                    "index": index,
+                    "claim_text": _clean_inline_text(entry.get("mechanism_claim")),
+                    "evidence_snippet": _clean_inline_text(
+                        entry.get("evidence_snippet")
+                    ),
+                    "source_reference": _clean_inline_text(
+                        entry.get("source_reference")
+                    ),
+                    "source_variable": None,
+                    "target_variable": None,
+                    "support_level": None,
+                    "provenance_score": (
+                        entry.get("provenance_score")
+                        if isinstance(entry.get("provenance_score"), dict)
+                        else {}
+                    ),
+                }
+            )
+    return candidates
+
+
+def _evaluate_transmit_evidence_gate(
+    connection: dict | None,
+    source_domain: str,
+    target_domain: str,
+    seed_url: str | None,
+    seed_excerpt: str | None,
+    claim_provenance: dict | None,
+) -> dict:
+    """Apply a narrow pre-transmit credibility/domain-specificity gate."""
+    payload = connection if isinstance(connection, dict) else {}
+    evidence_map = (
+        claim_provenance.get("evidence_map")
+        if isinstance(claim_provenance, dict)
+        and isinstance(claim_provenance.get("evidence_map"), dict)
+        else normalize_evidence_map(payload.get("evidence_map"))
+    )
+    test_payload = payload.get("test") if isinstance(payload.get("test"), dict) else {}
+    prediction_payload = (
+        payload.get("prediction")
+        if isinstance(payload.get("prediction"), dict)
+        else {}
+    )
+
+    target_context_terms = (
+        _evidence_gate_terms(payload.get("mechanism"))
+        | _evidence_gate_terms(payload.get("connection"))
+        | _evidence_gate_terms(target_domain)
+        | _evidence_gate_terms(prediction_payload.get("observable"))
+        | _evidence_gate_terms(test_payload.get("metric"))
+        | _evidence_gate_terms(test_payload.get("metrics"))
+    )
+
+    best_target_candidate = {
+        "kind": "top_level_target",
+        "claim_text": None,
+        "evidence_snippet": _clean_inline_text(payload.get("target_excerpt")),
+        "source_reference": _clean_inline_text(payload.get("target_url")),
+        "source_variable": None,
+        "target_variable": None,
+        "support_level": None,
+        "provenance_score": {},
+    }
+    best_target_score = len(
+        target_context_terms
+        & _evidence_gate_terms(
+            " ".join(
+                part
+                for part in (
+                    best_target_candidate.get("evidence_snippet"),
+                    best_target_candidate.get("source_reference"),
+                )
+                if part
+            )
+        )
+    )
+
+    for candidate in _display_evidence_candidates(
+        evidence_map,
+        claim_provenance=claim_provenance,
+    ):
+        combined_terms = _evidence_gate_terms(
+            " ".join(
+                part
+                for part in (
+                    candidate.get("claim_text"),
+                    candidate.get("evidence_snippet"),
+                    candidate.get("source_reference"),
+                    candidate.get("target_variable"),
+                )
+                if part
+            )
+        )
+        score = len(target_context_terms & combined_terms)
+        if str(candidate.get("support_level") or "").lower() == "direct":
+            score += 1
+        score += min(
+            int((candidate.get("provenance_score") or {}).get("overall", 0.0) * 2),
+            2,
+        )
+        score -= min(int(candidate.get("index", 0) or 0), 2)
+        if score > best_target_score:
+            best_target_score = score
+            best_target_candidate = candidate
+
+    target_terms = _evidence_gate_terms(target_domain)
+    target_evidence_text = " ".join(
+        part
+        for part in (
+            best_target_candidate.get("claim_text"),
+            best_target_candidate.get("evidence_snippet"),
+            best_target_candidate.get("source_reference"),
+            best_target_candidate.get("target_variable"),
+        )
+        if part
+    )
+    target_evidence_lower = target_evidence_text.lower()
+    target_overlap = len(target_terms & _evidence_gate_terms(target_evidence_text))
+    target_provenance = best_target_candidate.get("provenance_score") or {}
+    target_reasons = {
+        str(reason).strip().lower()
+        for reason in (target_provenance.get("reasons") or [])
+        if str(reason).strip()
+    }
+
+    source_context_terms = _evidence_gate_terms(source_domain) | _evidence_gate_terms(
+        best_target_candidate.get("source_variable")
+    )
+    source_text = " ".join(part for part in (seed_excerpt, seed_url) if part)
+    source_lower = source_text.lower()
+    source_overlap = len(source_context_terms & _evidence_gate_terms(source_text))
+
+    reasons: list[str] = []
+    if (
+        not source_text
+        or any(marker in source_lower for marker in EVIDENCE_GATE_WEAK_SOURCE_MARKERS)
+        or (
+            source_context_terms
+            and source_overlap == 0
+            and len(source_text.split()) < 18
+        )
+    ):
+        reasons.append("evidence:weak_source_support")
+
+    if (
+        target_terms
+        and target_overlap == 0
+        and any(
+            marker in target_evidence_lower
+            for marker in EVIDENCE_GATE_ADJACENT_TARGET_MARKERS
+        )
+    ):
+        reasons.append("evidence:target_domain_adjacent_only")
+
+    if (
+        not target_evidence_text
+        or "generic evidence" in target_reasons
+        or "claim/snippet mismatch" in target_reasons
+        or float(target_provenance.get("overall") or 0.0) < 0.6
+        or (
+            target_terms
+            and target_overlap == 0
+            and best_target_candidate.get("kind") == "top_level_target"
+        )
+    ):
+        reasons.append("evidence:displayed_proof_not_credible_enough")
+
+    unique_reasons: list[str] = []
+    for reason in reasons:
+        if reason not in unique_reasons:
+            unique_reasons.append(reason)
+
+    return {
+        "passes": not unique_reasons,
+        "reasons": unique_reasons,
+        "best_target_candidate": best_target_candidate,
+        "target_domain_overlap": target_overlap,
+        "target_provenance_overall": float(target_provenance.get("overall") or 0.0),
+        "source_overlap": source_overlap,
+    }
+
+
 def _evaluate_usefulness_proof_gate(
     connection: dict | None,
     prediction_quality: dict | None,
@@ -5356,6 +5680,7 @@ def _evaluate_connection_candidate(
         else evaluate_prediction_quality(connection)
     )
     claim_provenance = summarize_evidence_map_provenance(connection)
+    seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
 
     passes_threshold = scores["total"] >= threshold
     rewritten_description = connection.get("connection", "")
@@ -5365,6 +5690,8 @@ def _evaluate_connection_candidate(
     claim_provenance_ok = bool(claim_provenance.get("passes"))
     usefulness_ok = True
     usefulness_proof = None
+    evidence_credibility_ok = True
+    evidence_credibility = None
     prediction_quality_ok = True
     adversarial_ok = True
     adversarial_rubric = None
@@ -5423,7 +5750,35 @@ def _evaluate_connection_candidate(
             for reason in usefulness_proof.get("reasons") or []:
                 print(f"  [Usefulness] - {reason}")
 
-    if passes_threshold and validation_ok and usefulness_ok:
+    if passes_threshold and validation_ok and claim_provenance_ok and usefulness_ok:
+        evidence_credibility = _evaluate_transmit_evidence_gate(
+            connection=connection,
+            source_domain=source_domain,
+            target_domain=target_domain,
+            seed_url=seed_url,
+            seed_excerpt=seed_excerpt,
+            claim_provenance=claim_provenance,
+        )
+        evidence_credibility_ok = bool(evidence_credibility.get("passes"))
+        if validation_log is not None:
+            validation_log["evidence_credibility"] = evidence_credibility
+        if not evidence_credibility_ok:
+            for reason in evidence_credibility.get("reasons") or []:
+                if reason and reason not in validation_reasons:
+                    validation_reasons.append(reason)
+            if validation_log is not None:
+                validation_log["passed"] = False
+                validation_log["rejection_reasons"] = validation_reasons
+            print("  [EvidenceGate] Blocked transmission - skipping transmission")
+            for reason in evidence_credibility.get("reasons") or []:
+                print(f"  [EvidenceGate] - {reason}")
+
+    if (
+        passes_threshold
+        and validation_ok
+        and usefulness_ok
+        and evidence_credibility_ok
+    ):
         adversarial_started = time.monotonic()
         adversarial_ok, adversarial_rubric = run_adversarial_rubric(
             connection,
@@ -5438,7 +5793,13 @@ def _evaluate_connection_candidate(
             for reason in adversarial_rubric.get("kill_reasons", []):
                 print(f"  [Adversarial] - {reason}")
 
-    if passes_threshold and validation_ok and usefulness_ok and adversarial_ok:
+    if (
+        passes_threshold
+        and validation_ok
+        and usefulness_ok
+        and evidence_credibility_ok
+        and adversarial_ok
+    ):
         invariance_started = time.monotonic()
         invariance_ok, invariance_result = run_invariance_check(
             connection,
@@ -5458,6 +5819,7 @@ def _evaluate_connection_candidate(
         passes_threshold
         and validation_ok
         and usefulness_ok
+        and evidence_credibility_ok
         and adversarial_ok
         and invariance_ok
     ):
@@ -5480,6 +5842,7 @@ def _evaluate_connection_candidate(
         passes_threshold
         and validation_ok
         and usefulness_ok
+        and evidence_credibility_ok
         and adversarial_ok
         and invariance_ok
         and not boring
@@ -5500,7 +5863,6 @@ def _evaluate_connection_candidate(
                 f"(similarity: {similarity_score:.3f})"
             )
 
-    seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
     target_url = connection.get("target_url")
     target_excerpt = connection.get("target_excerpt")
     seed_url_ok = (
@@ -5575,6 +5937,7 @@ def _evaluate_connection_candidate(
         passes_threshold
         and validation_ok
         and usefulness_ok
+        and evidence_credibility_ok
         and adversarial_ok
         and invariance_ok
         and not boring
@@ -5601,6 +5964,14 @@ def _evaluate_connection_candidate(
         stage_failures.extend(
             reason
             for reason in (usefulness_proof or {}).get("reasons", [])
+            if reason
+            and reason not in stage_failures
+            and f"validation:{reason}" not in stage_failures
+        )
+    if not evidence_credibility_ok:
+        stage_failures.extend(
+            reason
+            for reason in (evidence_credibility or {}).get("reasons", [])
             if reason
             and reason not in stage_failures
             and f"validation:{reason}" not in stage_failures
@@ -5646,6 +6017,8 @@ def _evaluate_connection_candidate(
         "claim_provenance": claim_provenance,
         "usefulness_ok": usefulness_ok,
         "usefulness_proof": usefulness_proof,
+        "evidence_credibility_ok": evidence_credibility_ok,
+        "evidence_credibility": evidence_credibility,
         "adversarial_ok": adversarial_ok,
         "adversarial_rubric": adversarial_rubric,
         "invariance_ok": invariance_ok,
