@@ -60,7 +60,11 @@ SEARCH RESULTS:
 Requirements:
 - Keep target_domain aligned with Stage 1.
 - Lock onto exactly one primary target-domain causal claim before elaborating the comparison.
+- The primary target-domain claim must be no broader than the retrieved target-domain evidence. Do not generalize beyond what the target snippets directly support.
+- If the search results support only a narrow, local, conditional, or partial version of the claim, make that narrower version the core claim.
+- Prefer the smaller honest claim over the broader impressive one. Do not reward elegant analogy shells that outrun the retrieved target evidence.
 - That primary claim must name one measurable target-domain operator or operator-driven outcome that can be checked in literature or experiments.
+- If the target material does not directly support a concrete target-domain claim at that level, return `no_connection`.
 - `connection`, `mechanism`, `prediction`, and `test` must all stay centered on that same primary claim. If they drift to different effects or outcomes, return `no_connection`.
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
@@ -103,9 +107,11 @@ Requirements:
 - `test.confirm` and `test.falsify` must each refer to that same named metric and its explicit comparator. Do not write vague test language like "check whether the effect happens."
 - Do not pair a broad analogy with a loosely related metric. If the metric only weakly proxies the claimed mechanism, narrow the claim or return `no_connection`.
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
+- The mechanism sentence must name a specific target-domain process that is directly evidenced in the retrieved target material or mechanism assertions.
 - The first clause of `mechanism` must open with the named target-domain process noun phrase itself, not with a consequence sentence, threshold/result summary, or broad pattern description.
 - The first clause should read like: `[specific target-domain process] [acts on/monitors/routes/tests] [control or monitored quantity]`, then state the discrete or measurable change that process causes.
 - Name the operative process itself, not an abstract pattern behind it. Do not stop at generic labels like threshold crossing, feedback loop, accumulation, switching, or competition without the target-domain process that performs that action.
+- Do not upgrade generic threshold, redundancy, routing, competition, or feedback language into a stronger target-domain mechanism unless the retrieved target evidence directly supports that stronger process claim.
 - The mechanism must name the exact target-domain process that `test.metric` is supposed to measure.
 - `test.metric`, `test.confirm`, and `test.falsify` must directly measure that named process or its immediate observable consequence, not a distant downstream proxy.
 - Prefer a process name or standard causal operator a target-domain paper might use (for example: `SERCA-mediated SR refilling`, `GABAergic lateral inhibition`, `zero-cross switching`, `frictional contact network formation`).
@@ -120,6 +126,7 @@ Requirements:
   - `a feedback loop increases reuse`
 - If you cannot name a process already grounded in target-domain evidence or literature-facing wording, return `no_connection`.
 - If the named process cannot be grounded in target evidence or mechanism assertions, return `no_connection`.
+- If the target search results do not directly support a concrete target-domain process, return `no_connection` instead of filling the gap with generic mechanism language.
 - If you can describe only a pattern, threshold crossing, or transition but cannot name the operative target-domain process in target-domain terms, return `no_connection`.
 - In `mechanism`, explicitly state:
   - the operative causal operator,
@@ -168,8 +175,8 @@ If valid:
   "no_connection": false,
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
-  "connection": "2-4 sentence explanation that starts with the primary target-domain claim/process, then links the source-domain correspondence",
-  "mechanism": "one named operative target-domain causal process opening with a grounded process noun phrase, then naming the operator, control/monitored variable, and resulting discrete or measurable change measured by the test",
+  "connection": "2-4 sentence explanation that starts with an evidence-bounded primary target-domain claim/process, then links the source-domain correspondence without broadening beyond the retrieved target evidence",
+  "mechanism": "one directly evidenced operative target-domain causal process opening with a grounded process noun phrase, then naming the operator, control/monitored variable, and resulting discrete or measurable change measured by the test",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],

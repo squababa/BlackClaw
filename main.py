@@ -5602,6 +5602,8 @@ def _evaluate_connection_candidate(
             reason
             for reason in (usefulness_proof or {}).get("reasons", [])
             if reason
+            and reason not in stage_failures
+            and f"validation:{reason}" not in stage_failures
         )
     if not adversarial_ok:
         for reason in (adversarial_rubric or {}).get("kill_reasons", []):
