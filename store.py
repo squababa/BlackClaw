@@ -6357,6 +6357,245 @@ def get_feedback_seed_metrics() -> dict:
     }
 
 
+def _empty_seed_outcome_bucket() -> dict[str, float]:
+    """Create a mutable accumulator for one seed/category outcome bucket."""
+    return {
+        "attempts": 0,
+        "transmissions": 0,
+        "late_stage_survivals": 0,
+        "strong_rejections": 0,
+        "stars": 0,
+        "dismisses": 0,
+        "strong_grades": 0,
+        "weak_grades": 0,
+        "weak_grounding_failures": 0,
+        "total_score_sum": 0.0,
+        "scored_attempts": 0,
+    }
+
+
+def _looks_like_weak_grounding_failure(reason: object) -> bool:
+    """Return True when a rejection reason looks like weak grounding/evidence."""
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "weak grounding",
+        "grounding",
+        "evidence",
+        "provenance",
+        "claim_snippet_mismatch",
+        "source_reference",
+        "missing seed_",
+        "missing target_",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _finalize_seed_outcome_bucket(bucket: dict[str, float]) -> dict[str, float]:
+    """Convert one mutable accumulator into stable rate-based metrics."""
+    attempts = int(bucket.get("attempts", 0) or 0)
+    if attempts <= 0:
+        return {
+            "attempts": 0,
+            "transmission_rate": 0.0,
+            "late_stage_survival_rate": 0.0,
+            "strong_rejection_rate": 0.0,
+            "star_rate": 0.0,
+            "dismiss_rate": 0.0,
+            "strong_grade_rate": 0.0,
+            "weak_grade_rate": 0.0,
+            "weak_grounding_rate": 0.0,
+            "avg_total_score": 0.0,
+            "raw_expected_value": 0.0,
+        }
+
+    scored_attempts = int(bucket.get("scored_attempts", 0) or 0)
+    avg_total_score = (
+        max(0.0, min(1.0, float(bucket.get("total_score_sum", 0.0) or 0.0) / scored_attempts))
+        if scored_attempts > 0
+        else 0.0
+    )
+    transmission_rate = float(bucket.get("transmissions", 0) or 0) / attempts
+    late_stage_survival_rate = (
+        float(bucket.get("late_stage_survivals", 0) or 0) / attempts
+    )
+    strong_rejection_rate = float(bucket.get("strong_rejections", 0) or 0) / attempts
+    star_rate = float(bucket.get("stars", 0) or 0) / attempts
+    dismiss_rate = float(bucket.get("dismisses", 0) or 0) / attempts
+    strong_grade_rate = float(bucket.get("strong_grades", 0) or 0) / attempts
+    weak_grade_rate = float(bucket.get("weak_grades", 0) or 0) / attempts
+    weak_grounding_rate = (
+        float(bucket.get("weak_grounding_failures", 0) or 0) / attempts
+    )
+
+    raw_expected_value = (
+        (1.35 * transmission_rate)
+        + (0.55 * late_stage_survival_rate)
+        + (0.35 * avg_total_score)
+        + (0.30 * star_rate)
+        + (0.20 * strong_grade_rate)
+        - (0.55 * strong_rejection_rate)
+        - (0.25 * dismiss_rate)
+        - (0.20 * weak_grounding_rate)
+        - (0.10 * weak_grade_rate)
+    )
+
+    return {
+        "attempts": attempts,
+        "transmission_rate": transmission_rate,
+        "late_stage_survival_rate": late_stage_survival_rate,
+        "strong_rejection_rate": strong_rejection_rate,
+        "star_rate": star_rate,
+        "dismiss_rate": dismiss_rate,
+        "strong_grade_rate": strong_grade_rate,
+        "weak_grade_rate": weak_grade_rate,
+        "weak_grounding_rate": weak_grounding_rate,
+        "avg_total_score": avg_total_score,
+        "raw_expected_value": raw_expected_value,
+    }
+
+
+def get_seed_outcome_metrics(history_limit: int = 400) -> dict:
+    """Summarize empirical seed/category outcomes for expected-value weighting."""
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT
+            e.seed_domain,
+            e.seed_category,
+            e.total_score,
+            e.transmitted,
+            e.validation_json,
+            e.late_stage_timing_json,
+            COALESCE(
+                (
+                    SELECT MAX(CASE WHEN t.user_rating = 'starred' THEN 1 ELSE 0 END)
+                    FROM transmissions t
+                    WHERE t.exploration_id = e.id
+                ),
+                0
+            ) AS has_star,
+            COALESCE(
+                (
+                    SELECT MAX(CASE WHEN t.user_rating = 'dismissed' THEN 1 ELSE 0 END)
+                    FROM transmissions t
+                    WHERE t.exploration_id = e.id
+                ),
+                0
+            ) AS has_dismiss,
+            COALESCE(
+                (
+                    SELECT MAX(CASE WHEN t.manual_grade = 'strong' THEN 1 ELSE 0 END)
+                    FROM transmissions t
+                    WHERE t.exploration_id = e.id
+                ),
+                0
+            ) AS has_strong_grade,
+            COALESCE(
+                (
+                    SELECT MAX(
+                        CASE
+                            WHEN t.manual_grade IN (
+                                'interesting_but_weak',
+                                'generic',
+                                'provenance_failed',
+                                'salvage_candidate'
+                            ) THEN 1
+                            ELSE 0
+                        END
+                    )
+                    FROM transmissions t
+                    WHERE t.exploration_id = e.id
+                ),
+                0
+            ) AS has_weak_grade,
+            COALESCE(
+                (
+                    SELECT MAX(
+                        CASE WHEN sr.status != 'salvaged' THEN 1 ELSE 0 END
+                    )
+                    FROM strong_rejections sr
+                    WHERE sr.exploration_id = e.id
+                ),
+                0
+            ) AS has_strong_rejection
+        FROM explorations e
+        ORDER BY e.timestamp DESC
+        LIMIT ?""",
+        (max(1, int(history_limit)),),
+    ).fetchall()
+    conn.close()
+
+    global_bucket = _empty_seed_outcome_bucket()
+    domain_buckets: dict[str, dict[str, float]] = {}
+    category_buckets: dict[str, dict[str, float]] = {}
+
+    for row in rows:
+        domain = (row["seed_domain"] or "").strip()
+        category = (row["seed_category"] or "").strip()
+        validation = _json_object_or_empty(row["validation_json"])
+        late_stage_timing = _json_object_or_empty(row["late_stage_timing_json"])
+        completed_stage_order = late_stage_timing.get("completed_stage_order") or []
+        completed_stages = {str(item).strip() for item in completed_stage_order if item}
+        validation_reasons = _clean_reason_list(
+            validation.get("rejection_reasons")
+        ) or _clean_reason_list(validation.get("reasons"))
+        claim_provenance = (
+            validation.get("claim_provenance")
+            if isinstance(validation.get("claim_provenance"), dict)
+            else {}
+        )
+        claim_issues = _clean_reason_list(claim_provenance.get("issues"))
+        weak_grounding_failure = any(
+            _looks_like_weak_grounding_failure(reason)
+            for reason in [*validation_reasons, *claim_issues]
+        )
+        transmitted = bool(_normalize_bool_flag(row["transmitted"]))
+        survived_late_stage = transmitted or bool(
+            completed_stages.intersection({"rewrite", "semantic_dedup"})
+        )
+
+        score = _coerce_optional_float(row["total_score"])
+
+        target_buckets = [global_bucket]
+        if domain:
+            target_buckets.append(
+                domain_buckets.setdefault(domain, _empty_seed_outcome_bucket())
+            )
+        if category:
+            target_buckets.append(
+                category_buckets.setdefault(category, _empty_seed_outcome_bucket())
+            )
+
+        for bucket in target_buckets:
+            bucket["attempts"] += 1
+            bucket["transmissions"] += int(transmitted)
+            bucket["late_stage_survivals"] += int(survived_late_stage)
+            bucket["strong_rejections"] += int(bool(row["has_strong_rejection"]))
+            bucket["stars"] += int(bool(row["has_star"]))
+            bucket["dismisses"] += int(bool(row["has_dismiss"]))
+            bucket["strong_grades"] += int(bool(row["has_strong_grade"]))
+            bucket["weak_grades"] += int(bool(row["has_weak_grade"]))
+            bucket["weak_grounding_failures"] += int(weak_grounding_failure)
+            if score is not None:
+                bucket["total_score_sum"] += max(0.0, min(1.0, float(score)))
+                bucket["scored_attempts"] += 1
+
+    return {
+        "history_limit": max(1, int(history_limit)),
+        "sample_size": len(rows),
+        "global_metrics": _finalize_seed_outcome_bucket(global_bucket),
+        "domain_metrics": {
+            name: _finalize_seed_outcome_bucket(bucket)
+            for name, bucket in domain_buckets.items()
+        },
+        "category_metrics": {
+            name: _finalize_seed_outcome_bucket(bucket)
+            for name, bucket in category_buckets.items()
+        },
+    }
+
+
 def get_recent_seed_selection_context(n: int = 40) -> dict:
     """Summarize recent seed history for lightweight diversity balancing."""
     conn = _connect()
