@@ -3,6 +3,7 @@ BlackClaw Transmission Formatting + Rewrite Pass
 Formats discoveries for terminal output using Rich.
 """
 import json
+import re
 from rich.console import Console
 from rich.panel import Panel
 from llm_client import get_llm_client
@@ -168,6 +169,86 @@ def format_transmission(
         lowered = cleaned.lower()
         return any(phrase in lowered for phrase in phrases)
 
+    alignment_stopwords = {
+        "about",
+        "across",
+        "after",
+        "also",
+        "among",
+        "because",
+        "before",
+        "between",
+        "claim",
+        "claims",
+        "direct",
+        "during",
+        "each",
+        "evidence",
+        "from",
+        "into",
+        "mechanism",
+        "mechanisms",
+        "more",
+        "most",
+        "only",
+        "other",
+        "over",
+        "problem",
+        "same",
+        "show",
+        "shows",
+        "source",
+        "study",
+        "system",
+        "systems",
+        "target",
+        "than",
+        "that",
+        "their",
+        "there",
+        "these",
+        "they",
+        "this",
+        "through",
+        "under",
+        "using",
+        "when",
+        "where",
+        "which",
+        "while",
+        "with",
+    }
+
+    def _word_tokens(value) -> list[str]:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return []
+        return re.findall(r"[a-z0-9]+", cleaned.lower())
+
+    def _alignment_terms(value) -> set[str]:
+        return {
+            token
+            for token in _word_tokens(value)
+            if len(token) >= 3 and token not in alignment_stopwords
+        }
+
+    def _normalized_text_key(value) -> str:
+        return " ".join(_word_tokens(value))
+
+    def _texts_strongly_match(left, right) -> bool:
+        normalized_left = _normalized_text_key(left)
+        normalized_right = _normalized_text_key(right)
+        if not normalized_left or not normalized_right:
+            return False
+        return (
+            normalized_left == normalized_right
+            or normalized_left in normalized_right
+            or normalized_right in normalized_left
+        )
+
+    def _overlap_count(left, right) -> int:
+        return len(_alignment_terms(left) & _alignment_terms(right))
+
     def _first_evidence_aligned_claim(payload) -> str | None:
         if not isinstance(payload, dict):
             return None
@@ -190,6 +271,267 @@ def format_transmission(
                 if claim is not None:
                     return claim
         return None
+
+    def _evidence_candidates(payload) -> list[dict]:
+        if not isinstance(payload, dict):
+            return []
+
+        candidates: list[dict] = []
+        variable_entries = payload.get("variable_mappings")
+        if isinstance(variable_entries, list):
+            for index, entry in enumerate(variable_entries):
+                if not isinstance(entry, dict):
+                    continue
+                candidate = {
+                    "kind": "mapping",
+                    "index": index,
+                    "claim_text": _clean_text(entry.get("claim")),
+                    "evidence_snippet": _clean_text(entry.get("evidence_snippet")),
+                    "source_reference": _clean_text(entry.get("source_reference")),
+                    "source_variable": _clean_text(entry.get("source_variable")),
+                    "target_variable": _clean_text(entry.get("target_variable")),
+                    "support_level": _clean_text(entry.get("support_level")),
+                }
+                if any(
+                    candidate.get(key) is not None
+                    for key in (
+                        "claim_text",
+                        "evidence_snippet",
+                        "source_reference",
+                        "source_variable",
+                        "target_variable",
+                    )
+                ):
+                    candidates.append(candidate)
+
+        mechanism_entries = payload.get("mechanism_assertions")
+        if isinstance(mechanism_entries, list):
+            for index, entry in enumerate(mechanism_entries):
+                if not isinstance(entry, dict):
+                    continue
+                candidate = {
+                    "kind": "mechanism",
+                    "index": index,
+                    "claim_text": _clean_text(entry.get("mechanism_claim")),
+                    "evidence_snippet": _clean_text(entry.get("evidence_snippet")),
+                    "source_reference": _clean_text(entry.get("source_reference")),
+                    "source_variable": None,
+                    "target_variable": None,
+                    "support_level": None,
+                }
+                if any(
+                    candidate.get(key) is not None
+                    for key in (
+                        "claim_text",
+                        "evidence_snippet",
+                        "source_reference",
+                    )
+                ):
+                    candidates.append(candidate)
+        return candidates
+
+    def _select_central_mapping_candidate(
+        payload,
+        displayed_claim_value: str | None,
+        mechanism_value: str | None,
+    ) -> dict | None:
+        best_candidate = None
+        best_score = float("-inf")
+        for candidate in _evidence_candidates(payload):
+            if candidate.get("kind") != "mapping":
+                continue
+            score = 0
+            claim_text = candidate.get("claim_text")
+            if _texts_strongly_match(claim_text, displayed_claim_value):
+                score += 8
+            score += 2 * min(_overlap_count(claim_text, displayed_claim_value), 3)
+            score += 2 * min(_overlap_count(claim_text, mechanism_value), 2)
+            score += min(_overlap_count(candidate.get("target_variable"), mechanism_value), 2)
+            if str(candidate.get("support_level") or "").strip().lower() == "direct":
+                score += 1
+            score -= int(candidate.get("index", 0))
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+        return best_candidate
+
+    def _extract_displayed_target_claim(primary_claim_value: str) -> str | None:
+        for line in str(primary_claim_value).splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("target claim:"):
+                continue
+            _, _, tail = stripped.partition(":")
+            return _clean_text(tail)
+        return None
+
+    def _score_target_display_candidate(
+        candidate: dict,
+        *,
+        displayed_claim_value: str | None,
+        mechanism_value: str | None,
+        central_mapping_candidate: dict | None,
+    ) -> int:
+        claim_text = candidate.get("claim_text")
+        evidence_snippet = candidate.get("evidence_snippet")
+        source_reference = candidate.get("source_reference")
+        combined_text = " ".join(
+            part for part in (claim_text, evidence_snippet, source_reference) if part
+        )
+        context_terms = _alignment_terms(displayed_claim_value) | _alignment_terms(
+            mechanism_value
+        )
+        if central_mapping_candidate is not None:
+            context_terms |= _alignment_terms(central_mapping_candidate.get("claim_text"))
+            context_terms |= _alignment_terms(
+                central_mapping_candidate.get("target_variable")
+            )
+
+        score = 0
+        if candidate.get("kind") != "top_level_target":
+            if _texts_strongly_match(claim_text, displayed_claim_value):
+                score += 10
+            score += 3 * min(_overlap_count(claim_text, displayed_claim_value), 3)
+            if candidate.get("kind") == "mechanism":
+                score += 2 * min(_overlap_count(claim_text, mechanism_value), 3)
+            if central_mapping_candidate is not None:
+                if (
+                    candidate.get("kind") == "mapping"
+                    and _texts_strongly_match(
+                        candidate.get("claim_text"),
+                        central_mapping_candidate.get("claim_text"),
+                    )
+                ):
+                    score += 4
+                score += 2 * min(
+                    _overlap_count(combined_text, central_mapping_candidate.get("target_variable")),
+                    2,
+                )
+            if str(candidate.get("support_level") or "").strip().lower() == "direct":
+                score += 1
+
+        if evidence_snippet is not None:
+            score += 1 + min(len(_alignment_terms(evidence_snippet) & context_terms), 3)
+        if source_reference is not None:
+            score += 1 + min(len(_alignment_terms(source_reference) & context_terms), 2)
+        return score
+
+    def _select_target_display_evidence(
+        target_reference_value: str,
+        target_excerpt_value: str,
+        evidence_map_payload,
+        displayed_claim_value: str | None,
+        mechanism_value: str | None,
+    ) -> tuple[str, str, dict | None]:
+        central_mapping_candidate = _select_central_mapping_candidate(
+            evidence_map_payload,
+            displayed_claim_value,
+            mechanism_value,
+        )
+        fallback_candidate = {
+            "kind": "top_level_target",
+            "claim_text": None,
+            "evidence_snippet": _meaningful_text(target_excerpt_value),
+            "source_reference": _meaningful_text(target_reference_value),
+            "source_variable": None,
+            "target_variable": None,
+            "support_level": None,
+        }
+        best_candidate = fallback_candidate
+        best_score = _score_target_display_candidate(
+            fallback_candidate,
+            displayed_claim_value=displayed_claim_value,
+            mechanism_value=mechanism_value,
+            central_mapping_candidate=central_mapping_candidate,
+        )
+
+        for candidate in _evidence_candidates(evidence_map_payload):
+            if (
+                candidate.get("evidence_snippet") is None
+                and candidate.get("source_reference") is None
+            ):
+                continue
+            score = _score_target_display_candidate(
+                candidate,
+                displayed_claim_value=displayed_claim_value,
+                mechanism_value=mechanism_value,
+                central_mapping_candidate=central_mapping_candidate,
+            )
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+
+        return (
+            _first_nonempty(
+                best_candidate.get("source_reference"),
+                target_reference_value,
+            ),
+            _first_nonempty(
+                best_candidate.get("evidence_snippet"),
+                target_excerpt_value,
+            ),
+            central_mapping_candidate,
+        )
+
+    def _looks_noisy_source_excerpt(value) -> bool:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return False
+        odd_marker_count = sum(
+            cleaned.count(marker) for marker in ("·", "☆", "―", "…")
+        )
+        if odd_marker_count >= 2:
+            return True
+        semicolon_parts = [part.strip() for part in cleaned.split(";") if part.strip()]
+        if len(semicolon_parts) < 3:
+            return False
+        return max(len(part.split()) for part in semicolon_parts) <= 6
+
+    def _select_source_display_evidence(
+        source_reference_value: str,
+        source_excerpt_value: str,
+        source_domain_value: str,
+        central_mapping_candidate: dict | None,
+    ) -> tuple[str, str]:
+        source_url_value = _meaningful_text(source_reference_value)
+        source_excerpt_text = _meaningful_text(source_excerpt_value)
+        if source_url_value is None and source_excerpt_text is None:
+            return "—", "—"
+
+        source_context_terms = _alignment_terms(source_domain_value)
+        if central_mapping_candidate is not None:
+            source_context_terms |= _alignment_terms(
+                central_mapping_candidate.get("source_variable")
+            )
+            source_context_terms |= _alignment_terms(
+                central_mapping_candidate.get("claim_text")
+            )
+
+        overlap = len(source_context_terms & _alignment_terms(source_excerpt_text))
+        reference_overlap = len(source_context_terms & _alignment_terms(source_url_value))
+
+        if (
+            source_context_terms
+            and overlap == 0
+            and reference_overlap == 0
+            and (
+                _looks_noisy_source_excerpt(source_excerpt_text)
+                or len(_word_tokens(source_excerpt_text)) < 10
+            )
+        ):
+            return "—", "—"
+
+        return (
+            _first_nonempty(source_url_value),
+            _first_nonempty(source_excerpt_text),
+        )
+
+    def _evidence_reference_label(value) -> str:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return "REFERENCE"
+        if re.match(r"^(?:https?://|www\.)", cleaned, re.IGNORECASE):
+            return "URL"
+        return "REFERENCE"
 
     def _measure_instruction(measure: str | None, horizon: str | None) -> str:
         if measure is None:
@@ -598,6 +940,7 @@ def format_transmission(
         cleaned_test = _clean_text(test_value)
         test_text = cleaned_test if cleaned_test is not None else "—"
 
+    evidence_map_payload = connection.get("evidence_map")
     raw_summary_text = _clean_text(connection.get("connection"))
     primary_claim_text = _build_primary_claim(
         raw_summary_text,
@@ -605,7 +948,21 @@ def format_transmission(
         target_excerpt,
         normalized_prediction,
         test_data,
-        connection.get("evidence_map"),
+        evidence_map_payload,
+    )
+    displayed_target_claim = _extract_displayed_target_claim(primary_claim_text)
+    target_url, target_excerpt, central_mapping_candidate = _select_target_display_evidence(
+        target_url,
+        target_excerpt,
+        evidence_map_payload,
+        displayed_target_claim,
+        mechanism_text,
+    )
+    source_url, source_excerpt = _select_source_display_evidence(
+        source_url,
+        source_excerpt,
+        source_domain,
+        central_mapping_candidate,
     )
     summary_text = _build_optional_summary(raw_summary_text, primary_claim_text)
     operator_takeaway_text = _build_operator_takeaway(
@@ -613,7 +970,7 @@ def format_transmission(
         test_data,
     )
     scholarly_prior_art = _clean_text(scores.get("scholarly_prior_art_summary"))
-    evidence_map_text = _format_evidence_map_block(connection.get("evidence_map"))
+    evidence_map_text = _format_evidence_map_block(evidence_map_payload)
     mechanism_typing_text = _format_mechanism_typing_block(connection)
 
     lines = [
@@ -655,11 +1012,11 @@ def format_transmission(
             _indent_block(variable_mapping_text),
             "",
             "  8) SOURCE EVIDENCE",
-            f"    URL: {source_url}",
+            f"    {_evidence_reference_label(source_url)}: {source_url}",
             f"    EXCERPT: {source_excerpt}",
             "",
             "  9) TARGET EVIDENCE",
-            f"    URL: {target_url}",
+            f"    {_evidence_reference_label(target_url)}: {target_url}",
             f"    EXCERPT: {target_excerpt}",
             "",
             "  10) SCORES",
