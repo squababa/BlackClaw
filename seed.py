@@ -5,6 +5,7 @@ Picks starting domains for exploration with exclusion and weighting.
 from difflib import get_close_matches
 import json
 import random
+import re
 from pathlib import Path
 
 
@@ -12,8 +13,226 @@ PERSONALIZATION_RANDOM_FLOOR = 0.2
 PERSONALIZATION_WEIGHT_STRENGTH = 0.6
 EXPECTED_VALUE_PRIOR_STRENGTH = 6.0
 CATEGORY_EXPECTED_VALUE_PRIOR_STRENGTH = 10.0
+SEED_QUALITY_WEIGHT_STRENGTH = 0.8
 SEED_DIVERSITY_SECONDARY_STRENGTH = 0.25
 SEED_DIVERSITY_HISTORY_WINDOW = 40
+SEED_QUALITY_HIGH_THRESHOLD = 0.68
+SEED_QUALITY_MEDIUM_THRESHOLD = 0.46
+SEED_QUALITY_MIN_ELIGIBLE_CANDIDATES = 12
+
+QUALITY_SIGNAL_GROUPS = {
+    "concrete mechanisms": {
+        "accumulation",
+        "annealing",
+        "arms race",
+        "bottleneck",
+        "calibration",
+        "cascade",
+        "channel",
+        "coding",
+        "competition",
+        "constraint",
+        "control",
+        "decoding",
+        "decay",
+        "diffusion",
+        "error",
+        "feedback",
+        "field",
+        "filter",
+        "flow",
+        "gating",
+        "inhibition",
+        "latency",
+        "load",
+        "logistics",
+        "mechanism",
+        "network",
+        "normalization",
+        "phase transition",
+        "pipeline",
+        "pressure",
+        "protocol",
+        "quorum",
+        "queue",
+        "regulation",
+        "reinforcement",
+        "repair",
+        "resolution",
+        "routing",
+        "saturation",
+        "schedule",
+        "screen",
+        "sensing",
+        "signal",
+        "switching",
+        "synchronization",
+        "threshold",
+        "timing",
+        "tradeoff",
+        "triage",
+        "voltage",
+    },
+    "measurable variables": {
+        "amplitude",
+        "boundary",
+        "capacity",
+        "concentration",
+        "count",
+        "density",
+        "distribution",
+        "frequency",
+        "load",
+        "loss aversion",
+        "metric",
+        "pressure",
+        "rate",
+        "ratio",
+        "resolution",
+        "score",
+        "signal",
+        "spacing",
+        "temperature",
+        "threshold",
+        "timing",
+        "variance",
+        "velocity",
+        "voltage",
+    },
+    "operator workflows": {
+        "allocation",
+        "audit",
+        "bureaucracy",
+        "compare",
+        "control",
+        "design",
+        "diagnosis",
+        "information systems",
+        "intervention",
+        "logistics",
+        "maintenance",
+        "manufacturing",
+        "monitoring",
+        "navigation",
+        "operations",
+        "optimization",
+        "prioritize",
+        "protocol",
+        "rerank",
+        "repair",
+        "rollout",
+        "route",
+        "scheduling",
+        "screen",
+        "search",
+        "security",
+        "sorting",
+        "strategy",
+        "surveillance",
+        "techniques",
+        "testing",
+        "triage",
+        "tuning",
+        "vendor",
+        "wayfinding",
+        "workflow",
+    },
+    "transferable process structure": {
+        "cascade",
+        "competition",
+        "coordination",
+        "coupling",
+        "decay",
+        "distribution",
+        "hierarchy",
+        "incentive",
+        "information spread",
+        "network",
+        "organization",
+        "path",
+        "queue",
+        "redundancy",
+        "reinforcement",
+        "self organization",
+        "spread",
+        "switching",
+        "transmission",
+    },
+}
+
+QUALITY_CONCERN_GROUPS = {
+    "overly broad framing": {
+        "abstract structures",
+        "adaptation",
+        "balance",
+        "collective behavior",
+        "complex systems",
+        "consciousness",
+        "emergence",
+        "fundamental concepts",
+        "hard problem",
+        "interaction",
+        "possible worlds",
+        "self organization",
+        "universal patterns",
+        "unsolved problems",
+    },
+    "aesthetic or interpretive framing": {
+        "aesthetic",
+        "beauty",
+        "calligraphy",
+        "choreography",
+        "experience",
+        "font design",
+        "hero journey",
+        "monomyth",
+        "narrative",
+        "phenomenology",
+        "philosophy",
+        "readability",
+        "rhetoric",
+        "story",
+        "storytelling",
+        "typography",
+    },
+    "weak operator leverage": {
+        "astronomy history",
+        "history",
+        "monomyth",
+        "philosophical",
+        "placeholder numeral",
+        "theories",
+    },
+}
+
+OPERATOR_FRIENDLY_CATEGORIES = {
+    "Agriculture",
+    "Applied Science",
+    "Biomaterials",
+    "Chemistry",
+    "Computer Science",
+    "Craft",
+    "Culinary Science",
+    "Human Performance",
+    "Maritime Engineering",
+    "Material Craft",
+    "Medicine",
+    "Neuroscience",
+    "Precision Craft",
+    "Security",
+    "Skill Science",
+    "Technology",
+    "Textile Craft",
+    "Traditional Practice",
+}
+
+ABSTRACT_OR_INTERPRETIVE_CATEGORIES = {
+    "Art",
+    "Arts",
+    "Communication",
+    "Consciousness",
+    "Philosophy",
+}
 
 
 def _load_domains() -> list[dict]:
@@ -24,12 +243,148 @@ def _load_domains() -> list[dict]:
     return data["domains"]
 
 
-def _domain_to_seed(domain: dict) -> dict:
+def _domain_to_seed(
+    domain: dict,
+    quality_profile: dict | None = None,
+    selection_diagnostics: dict | None = None,
+) -> dict:
     """Normalize a raw domain row to the runtime seed shape."""
-    return {
+    seed = {
         "name": domain["name"],
         "category": domain["category"],
         "seed_queries": list(domain["seed_queries"]),
+    }
+    if isinstance(quality_profile, dict) and quality_profile:
+        seed["quality_profile"] = quality_profile
+    if isinstance(selection_diagnostics, dict) and selection_diagnostics:
+        seed["selection_diagnostics"] = selection_diagnostics
+        reason = str(selection_diagnostics.get("reason") or "").strip()
+        if reason:
+            seed["selection_reason"] = reason
+    return seed
+
+
+def _match_terms(text: str, terms: set[str]) -> list[str]:
+    """Return sorted phrase matches found inside one normalized domain corpus."""
+    matches = [
+        term
+        for term in terms
+        if re.search(rf"\b{re.escape(term)}\b", text) is not None
+    ]
+    return sorted(matches, key=lambda value: (len(value), value))[:4]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    """Keep the first appearance of each non-empty string."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        clean = " ".join(str(item or "").split()).strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            ordered.append(clean)
+    return ordered
+
+
+def describe_seed_quality(domain: dict) -> dict:
+    """Profile one domain for upstream seed quality and operator relevance."""
+    name = str(domain.get("name", "") or "").strip()
+    category = str(domain.get("category", "") or "").strip()
+    queries = [
+        " ".join(str(query or "").split()).strip()
+        for query in list(domain.get("seed_queries", []) or [])
+        if str(query or "").strip()
+    ]
+    corpus = " | ".join([name, category, *queries]).casefold()
+
+    signal_matches = {
+        label: _match_terms(corpus, terms)
+        for label, terms in QUALITY_SIGNAL_GROUPS.items()
+    }
+    concern_matches = {
+        label: _match_terms(corpus, terms)
+        for label, terms in QUALITY_CONCERN_GROUPS.items()
+    }
+
+    score = 0.32
+    strengths: list[str] = []
+    concerns: list[str] = []
+
+    for label, matches in signal_matches.items():
+        if not matches:
+            continue
+        if label == "concrete mechanisms":
+            score += 0.2 + min(0.08, 0.02 * max(0, len(matches) - 1))
+        elif label == "measurable variables":
+            score += 0.16 + min(0.06, 0.02 * max(0, len(matches) - 1))
+        elif label == "operator workflows":
+            score += 0.16 + min(0.06, 0.02 * max(0, len(matches) - 1))
+        else:
+            score += 0.12 + min(0.04, 0.015 * max(0, len(matches) - 1))
+        strengths.append(f"{label} via {', '.join(matches[:2])}")
+
+    if category in OPERATOR_FRIENDLY_CATEGORIES:
+        score += 0.06
+        strengths.append(f"operator-friendly category: {category}")
+    elif category in ABSTRACT_OR_INTERPRETIVE_CATEGORIES:
+        score -= 0.06
+        concerns.append(f"interpretive-heavy category: {category}")
+
+    if (
+        signal_matches["concrete mechanisms"]
+        and signal_matches["measurable variables"]
+        and signal_matches["operator workflows"]
+    ):
+        score += 0.06
+        strengths.append("mechanism + metric + workflow coverage")
+
+    positive_group_count = sum(1 for matches in signal_matches.values() if matches)
+    if positive_group_count <= 1:
+        score -= 0.08
+        concerns.append("thin operational structure")
+
+    for label, matches in concern_matches.items():
+        if not matches:
+            continue
+        penalty = 0.1 + min(0.05, 0.02 * max(0, len(matches) - 1))
+        if label == "aesthetic or interpretive framing":
+            penalty += 0.03
+        score -= penalty
+        concerns.append(f"{label} via {', '.join(matches[:2])}")
+
+    if concern_matches["overly broad framing"] and positive_group_count <= 2:
+        score -= 0.05
+    if concern_matches["aesthetic or interpretive framing"] and not (
+        signal_matches["operator workflows"] and signal_matches["measurable variables"]
+    ):
+        score -= 0.06
+
+    score = max(0.05, min(0.95, score))
+    if score >= SEED_QUALITY_HIGH_THRESHOLD:
+        band = "high"
+    elif score >= SEED_QUALITY_MEDIUM_THRESHOLD:
+        band = "medium"
+    else:
+        band = "weak"
+
+    summary_parts: list[str] = [f"{band}-quality seed ({score:.2f})"]
+    if strengths:
+        summary_parts.append(f"strengths: {', '.join(_dedupe(strengths)[:3])}")
+    if concerns:
+        summary_parts.append(f"concerns: {', '.join(_dedupe(concerns)[:2])}")
+
+    return {
+        "score": round(score, 3),
+        "band": band,
+        "summary": "; ".join(summary_parts),
+        "strengths": _dedupe(strengths)[:4],
+        "concerns": _dedupe(concerns)[:4],
+        "signal_matches": {
+            label: matches for label, matches in signal_matches.items() if matches
+        },
+        "concern_matches": {
+            label: matches for label, matches in concern_matches.items() if matches
+        },
     }
 
 
@@ -259,6 +614,27 @@ def _diversity_multiplier(
     return max(0.2, min(2.5, multiplier)), reason
 
 
+def _quality_multiplier(quality_profile: dict) -> tuple[float, str]:
+    """Return a bounded multiplier + concise reason for seed quality biasing."""
+    score = float(quality_profile.get("score", 0.0) or 0.0)
+    band = str(quality_profile.get("band") or "unknown").strip().lower()
+    strengths = list(quality_profile.get("strengths") or [])
+    concerns = list(quality_profile.get("concerns") or [])
+
+    multiplier = 0.35 + (score * 1.6)
+    if band == "high":
+        multiplier = max(multiplier, 1.25)
+    elif band == "weak":
+        multiplier = min(multiplier, 0.72)
+    if concerns and not strengths:
+        multiplier *= 0.9
+
+    detail = strengths[:2] if band != "weak" else concerns[:2]
+    detail_text = ", ".join(detail) if detail else "limited quality signal"
+    reason = f"seed quality {band} ({score:.2f}): {detail_text}"
+    return max(0.2, min(1.9, multiplier)), reason
+
+
 def pick_seed() -> dict:
     """
     Pick a seed domain for the next exploration cycle.
@@ -286,20 +662,56 @@ def pick_seed() -> dict:
     if not candidates:
         candidates = domains
 
+    quality_profiles_by_name = {
+        d["name"]: describe_seed_quality(d)
+        for d in candidates
+    }
+    quality_eligible = [
+        d
+        for d in candidates
+        if quality_profiles_by_name[d["name"]]["band"] != "weak"
+    ]
+    if len(quality_eligible) >= SEED_QUALITY_MIN_ELIGIBLE_CANDIDATES:
+        candidates = quality_eligible
+        candidate_pool_reason = (
+            "quality-screened pool: weak seeds withheld because "
+            f"{len(quality_eligible)} medium/high candidates remain"
+        )
+    else:
+        candidate_pool_reason = "full pool: insufficient medium/high seed coverage"
+
     outcome_metrics = get_seed_outcome_metrics() if PERSONALIZATION else {}
 
     weights = []
     reasons_by_domain: dict[str, str] = {}
+    diagnostics_by_domain: dict[str, dict] = {}
     for d in candidates:
         weight = 1.0
         reason_parts = []
+        quality_profile = quality_profiles_by_name[d["name"]]
+        quality_multiplier, quality_reason = _quality_multiplier(quality_profile)
+        softened_quality = _soften_multiplier(
+            quality_multiplier,
+            SEED_QUALITY_WEIGHT_STRENGTH,
+        )
+        weight *= softened_quality
+        reason_parts.append(candidate_pool_reason)
+        reason_parts.append(quality_reason)
+
+        personalization_multiplier = 1.0
+        personalization_reason = "personalization disabled"
         if PERSONALIZATION:
             multiplier, reason = _expected_value_multiplier(
                 d["name"],
                 d["category"],
                 outcome_metrics,
             )
-            weight *= _soften_multiplier(multiplier, PERSONALIZATION_WEIGHT_STRENGTH)
+            personalization_multiplier = _soften_multiplier(
+                multiplier,
+                PERSONALIZATION_WEIGHT_STRENGTH,
+            )
+            weight *= personalization_multiplier
+            personalization_reason = reason
             reason_parts.append(reason)
 
         diversity_multiplier, diversity_reason = _diversity_multiplier(
@@ -307,28 +719,51 @@ def pick_seed() -> dict:
             d["category"],
             selection_context,
         )
-        weight *= _soften_multiplier(
+        softened_diversity = _soften_multiplier(
             diversity_multiplier,
             SEED_DIVERSITY_SECONDARY_STRENGTH,
         )
+        weight *= softened_diversity
         reason_parts.append(diversity_reason)
 
-        weights.append(max(0.05, weight))
-        reasons_by_domain[d["name"]] = ", ".join(
+        final_weight = max(0.05, weight)
+        weights.append(final_weight)
+        combined_reason = ", ".join(
             part for part in reason_parts if part
         ) or "baseline weighting"
+        reasons_by_domain[d["name"]] = combined_reason
+        diagnostics_by_domain[d["name"]] = {
+            "mode": "weighted",
+            "reason": combined_reason,
+            "weight": round(final_weight, 4),
+            "quality_multiplier": round(softened_quality, 4),
+            "personalization_multiplier": round(personalization_multiplier, 4),
+            "personalization_reason": personalization_reason,
+            "diversity_multiplier": round(softened_diversity, 4),
+            "diversity_reason": diversity_reason,
+            "candidate_pool_reason": candidate_pool_reason,
+            "quality_profile": quality_profile,
+        }
 
     if PERSONALIZATION and random.random() < PERSONALIZATION_RANDOM_FLOOR:
         selected = random.choice(candidates)
-        print(
-            "  [Seed] Personalization reason: random exploration pick "
-            "(20% diversity floor)"
+        diagnostics = dict(diagnostics_by_domain.get(selected["name"], {}))
+        random_reason = "random exploration pick (20% diversity floor)"
+        diagnostics["mode"] = "random_floor"
+        diagnostics["reason"] = (
+            f"{random_reason}; "
+            f"{diagnostics.get('quality_profile', {}).get('summary', 'quality profile unavailable')}"
         )
     else:
         # Weighted random selection
         selected = random.choices(candidates, weights=weights, k=1)[0]
-        if PERSONALIZATION:
-            reason = reasons_by_domain.get(selected["name"], "weighted feedback signal")
-            print(f"  [Seed] Personalization reason: {reason}")
+        diagnostics = diagnostics_by_domain.get(
+            selected["name"],
+            {"mode": "weighted", "reason": reasons_by_domain.get(selected["name"])},
+        )
 
-    return _domain_to_seed(selected)
+    return _domain_to_seed(
+        selected,
+        quality_profile=diagnostics.get("quality_profile"),
+        selection_diagnostics=diagnostics,
+    )

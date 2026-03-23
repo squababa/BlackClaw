@@ -493,6 +493,8 @@ def init_db():
             timestamp TEXT NOT NULL,
             seed_domain TEXT NOT NULL,
             seed_category TEXT NOT NULL,
+            seed_selection_json TEXT,
+            pattern_diagnostics_json TEXT,
             patterns_found TEXT,
             jump_target_domain TEXT,
             connection_description TEXT,
@@ -707,6 +709,10 @@ def init_db():
     }
     if "chain_path" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN chain_path TEXT")
+    if "seed_selection_json" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN seed_selection_json TEXT")
+    if "pattern_diagnostics_json" not in existing_columns:
+        conn.execute("ALTER TABLE explorations ADD COLUMN pattern_diagnostics_json TEXT")
     if "scholarly_prior_art_summary" not in existing_columns:
         conn.execute("ALTER TABLE explorations ADD COLUMN scholarly_prior_art_summary TEXT")
     if "seed_url" not in existing_columns:
@@ -1174,6 +1180,8 @@ def is_semantic_duplicate(
 def save_exploration(
     seed_domain: str,
     seed_category: str,
+    seed_selection: dict | None = None,
+    pattern_diagnostics: dict | None = None,
     patterns_found: list[dict] | None = None,
     jump_target_domain: str | None = None,
     connection_description: str | None = None,
@@ -1201,18 +1209,28 @@ def save_exploration(
     conn = _connect()
     cursor = conn.execute(
         """INSERT INTO explorations
-        (timestamp, seed_domain, seed_category, patterns_found, jump_target_domain,
+        (timestamp, seed_domain, seed_category, seed_selection_json,
+         pattern_diagnostics_json, patterns_found, jump_target_domain,
          connection_description, scholarly_prior_art_summary, chain_path, seed_url,
          seed_excerpt, target_url, target_excerpt, novelty_score, distance_score,
          depth_score, total_score, validation_json, adversarial_rubric_json,
          invariance_json, evidence_map_json, mechanism_typing_json,
-         late_stage_timing_json,
-         rewrite_boring, semantic_duplicate, transmitted)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         late_stage_timing_json, rewrite_boring, semantic_duplicate, transmitted)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             _now(),
             seed_domain,
             seed_category,
+            (
+                json.dumps(seed_selection, ensure_ascii=False, sort_keys=True)
+                if isinstance(seed_selection, dict) and seed_selection
+                else None
+            ),
+            (
+                json.dumps(pattern_diagnostics, ensure_ascii=False, sort_keys=True)
+                if isinstance(pattern_diagnostics, dict) and pattern_diagnostics
+                else None
+            ),
             json.dumps(patterns_found) if patterns_found else None,
             jump_target_domain,
             connection_description,
@@ -1762,6 +1780,7 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
             id,
             timestamp,
             patterns_found,
+            pattern_diagnostics_json,
             jump_target_domain,
             connection_description,
             total_score,
@@ -1799,6 +1818,11 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
     for row in rows:
         patterns = _json_array_or_empty(row["patterns_found"])
         has_patterns = bool(patterns)
+        pattern_diagnostics = _json_object_or_empty(row["pattern_diagnostics_json"])
+        pattern_outcome = _clean_optional_text(pattern_diagnostics.get("outcome"))
+        pattern_jump_outcome = _clean_optional_text(
+            pattern_diagnostics.get("jump_outcome")
+        )
         target_domain = _clean_optional_text(row["jump_target_domain"])
         connection_description = _clean_optional_text(row["connection_description"])
         total_score = _coerce_optional_float(row["total_score"])
@@ -1914,9 +1938,13 @@ def get_bottleneck_diagnostics(limit: int = 200, threshold: float = 0.6) -> dict
 
         if not has_patterns:
             counts["no_patterns_extracted"] += 1
+            if pattern_outcome:
+                counts[pattern_outcome] += 1
             continue
         if not connection_found:
             counts["patterns_found_but_no_connection"] += 1
+            if pattern_jump_outcome:
+                counts[pattern_jump_outcome] += 1
             continue
         if total_score is None:
             counts["uncategorized"] += 1
@@ -2523,6 +2551,8 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
             e.timestamp AS exploration_timestamp,
             e.seed_domain,
             e.seed_category,
+            e.seed_selection_json,
+            e.pattern_diagnostics_json,
             e.patterns_found,
             e.jump_target_domain,
             e.connection_description,
@@ -2559,6 +2589,10 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
         mechanism_typing = _mechanism_typing_or_none(
             row["transmission_mechanism_typing_json"]
         ) or _mechanism_typing_or_none(row["exploration_mechanism_typing_json"])
+        seed_selection = _json_object_or_empty(row["seed_selection_json"])
+        pattern_diagnostics = _json_object_or_empty(row["pattern_diagnostics_json"])
+        seed_quality = _json_object_or_empty(seed_selection.get("quality_profile"))
+        seed_quality_band = _clean_optional_text(seed_quality.get("band"))
         adversarial_rubric = _json_object_or_empty(row["adversarial_rubric_json"])
         invariance_result = _json_object_or_empty(row["invariance_json"])
         mechanism_type = (
@@ -2600,6 +2634,12 @@ def list_recent_review_items(limit: int = 20) -> list[dict]:
                 "timestamp": row["exploration_timestamp"],
                 "seed_domain": _clean_optional_text(row["seed_domain"]),
                 "seed_category": _clean_optional_text(row["seed_category"]),
+                "seed_selection": seed_selection if seed_selection else None,
+                "seed_quality": seed_quality if seed_quality else None,
+                "seed_quality_band": seed_quality_band,
+                "pattern_diagnostics": (
+                    pattern_diagnostics if pattern_diagnostics else None
+                ),
                 "pattern_count": pattern_count,
                 "target_domain": _clean_optional_text(row["jump_target_domain"]),
                 "connection_found": connection_found,
