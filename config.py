@@ -42,6 +42,33 @@ def _optional(var: str, default):
         except ValueError:
             return default
     return val.strip()
+
+
+def _optional_alias(var_names: tuple[str, ...], default):
+    """Get the first present optional env var from a list, with fallback."""
+    for var in var_names:
+        val = os.getenv(var)
+        if val is None or val.strip() == "":
+            continue
+        # Keep optional values safe: invalid overrides fall back to the default.
+        if isinstance(default, int):
+            try:
+                return int(val)
+            except ValueError:
+                print(
+                    f"[BlackClaw] WARNING: Invalid {var}={val!r}; using default {default}"
+                )
+                return default
+        if isinstance(default, float):
+            try:
+                return float(val)
+            except ValueError:
+                print(
+                    f"[BlackClaw] WARNING: Invalid {var}={val!r}; using default {default}"
+                )
+                return default
+        return val.strip()
+    return default
 # Load .env on import
 _load_env()
 # --- Required ---
@@ -89,7 +116,10 @@ EMBEDDING_DUP_THRESHOLD: float = _optional(
     0.88,
 )
 INVARIANCE_KILL_THRESHOLD: float = _optional("BLACKCLAW_INVARIANCE_KILL_THRESHOLD", 0.4)
-CYCLE_COOLDOWN: int = _optional("BLACKCLAW_COOLDOWN", 300)  # seconds
+CYCLE_COOLDOWN: int = _optional_alias(
+    ("BLACKCLAW_CYCLE_COOLDOWN", "BLACKCLAW_COOLDOWN"),
+    300,
+)  # seconds
 DB_PATH: str = _optional("BLACKCLAW_DB_PATH", "blackclaw.db")
 MAX_PATTERNS_PER_CYCLE: int = _optional("BLACKCLAW_MAX_PATTERNS", 3)
 # --- Rate limits ---
