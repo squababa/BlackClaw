@@ -609,6 +609,14 @@ MECHANISM_QUERY_TOKENS = {
     "stabilization",
     "switching",
     "threshold",
+    "throughput",
+    "latency",
+    "queue",
+    "load",
+    "rate",
+    "screen",
+    "triage",
+    "tuning",
 }
 
 
@@ -647,6 +655,9 @@ def _build_jump_search_query(
             [
                 str(pattern.get("pattern_name", "") or ""),
                 str(pattern.get("abstract_structure", "") or ""),
+                str(pattern.get("measurable_signal", "") or ""),
+                str(pattern.get("control_lever", "") or ""),
+                str(pattern.get("transfer_rationale", "") or ""),
             ]
         )
     )

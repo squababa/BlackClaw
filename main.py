@@ -87,7 +87,7 @@ from store import (
     resolve_candidate_lineage_metadata,
     resolve_convergence_lineage_metadata,
 )
-from seed import pick_seed, resolve_seed_choice
+from seed import describe_seed_quality, pick_seed, resolve_seed_choice
 
 CLAUDE_SONNET_INPUT_RATE_PER_MTOK = 3.0
 CLAUDE_SONNET_OUTPUT_RATE_PER_MTOK = 15.0
@@ -1345,10 +1345,31 @@ def _print_recent_review_items(limit: int = 20):
         )
         print(
             f"  seed={row.get('seed_domain') or '—'} | "
+            f"seed_quality={row.get('seed_quality_band') or '—'} | "
             f"target={row.get('target_domain') or '—'} | "
             f"connection_found={'yes' if row.get('connection_found') else 'no'} | "
             f"transmitted={'yes' if row.get('transmitted') else 'no'}"
         )
+        seed_selection = row.get("seed_selection") or {}
+        seed_quality = row.get("seed_quality") or {}
+        if seed_quality:
+            strengths = ", ".join((seed_quality.get("strengths") or [])[:2]) or "—"
+            concerns = ", ".join((seed_quality.get("concerns") or [])[:2]) or "—"
+            print(
+                f"  seed_strengths={strengths} | "
+                f"seed_concerns={concerns}"
+            )
+        if seed_selection:
+            print(
+                "  seed_selection_reason="
+                + _truncate_text(seed_selection.get("reason"), 140)
+            )
+        pattern_diagnostics = row.get("pattern_diagnostics") or {}
+        if pattern_diagnostics:
+            print(
+                "  pattern_diagnostics="
+                + _truncate_text(pattern_diagnostics.get("summary"), 140)
+            )
         print(
             f"  tx={row.get('transmission_number') or '—'} | "
             f"total_score={total_text} | "
@@ -3754,6 +3775,21 @@ def _print_bottleneck_diagnostics(report: dict):
         count = _count(key)
         print(f"  {label}: {count} ({_pct(count)})")
 
+    pattern_detail_rows = [
+        ("No strong patterns found", "no_strong_patterns_found"),
+        ("Only weak/generic patterns found", "only_weak_patterns_found"),
+        ("Patterns too weak for jump", "patterns_too_weak_for_jump"),
+        ("Patterns present but no connection", "patterns_present_but_no_connection"),
+    ]
+    pattern_detail_present = [
+        (label, key) for label, key in pattern_detail_rows if _count(key) > 0
+    ]
+    if pattern_detail_present:
+        print("Pattern extraction detail:")
+        for label, key in pattern_detail_present:
+            count = _count(key)
+            print(f"  {label}: {count} ({_pct(count)})")
+
     extra_rows = [
         ("Distance floor failed", "distance_floor_failed"),
         ("Killed as common knowledge", "killed_as_common_knowledge"),
@@ -4401,7 +4437,7 @@ from config import (
     CYCLE_COOLDOWN,
     MAX_PATTERNS_PER_CYCLE,
 )
-from explore import dive
+from explore import dive, finalize_pattern_diagnostics
 from jump import lateral_jump, salvage_high_value_candidate
 from score import (
     score_connection,
@@ -8009,6 +8045,8 @@ def _score_store_and_transmit(
     source_domain: str,
     source_category: str,
     root_seed_name: str,
+    seed_selection: dict | None,
+    pattern_diagnostics: dict | None,
     patterns_payload: list[dict],
     connection: dict,
     target_domain: str,
@@ -8028,6 +8066,8 @@ def _score_store_and_transmit(
     exploration_id = save_exploration(
         seed_domain=source_domain,
         seed_category=source_category,
+        seed_selection=seed_selection,
+        pattern_diagnostics=pattern_diagnostics,
         patterns_found=patterns_payload,
         jump_target_domain=target_domain,
         connection_description=candidate["rewritten_description"],
@@ -8147,6 +8187,34 @@ def _score_store_and_transmit(
     return transmitted, float(candidate["total_score"] or 0.0)
 
 
+def _seed_quality_text(seed: dict) -> str | None:
+    """Render one concise line describing selected-seed quality."""
+    quality = seed.get("quality_profile")
+    if not isinstance(quality, dict) or not quality:
+        return None
+
+    band = str(quality.get("band") or "unknown").strip()
+    score = quality.get("score")
+    score_text = f"{float(score):.2f}" if score is not None else "—"
+    strengths = ", ".join((quality.get("strengths") or [])[:3]) or "—"
+    concerns = ", ".join((quality.get("concerns") or [])[:2]) or "—"
+    return (
+        f"quality={band} ({score_text}) | strengths={strengths} | concerns={concerns}"
+    )
+
+
+def _pattern_diagnostic_text(seed: dict) -> str | None:
+    """Render one concise line describing pattern extraction quality."""
+    diagnostics = seed.get("pattern_diagnostics")
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        return None
+
+    return (
+        f"{diagnostics.get('summary', 'pattern diagnostics unavailable')} | "
+        f"jump_ready={int(diagnostics.get('jump_ready_count', 0) or 0)}"
+    )
+
+
 def run_cycle(
     cycle_num: int,
     threshold: float,
@@ -8163,27 +8231,44 @@ def run_cycle(
     hops_completed = 0
 
     if manual_seed is not None:
-        seed = {
-            "name": manual_seed["name"],
-            "category": manual_seed["category"],
-            "seed_queries": list(manual_seed["seed_queries"]),
+        seed = dict(manual_seed)
+        seed["seed_queries"] = list(manual_seed["seed_queries"])
+        if not isinstance(seed.get("quality_profile"), dict):
+            seed["quality_profile"] = describe_seed_quality(seed)
+        seed["selection_diagnostics"] = {
+            "mode": "manual",
+            "reason": "manual built-in seed via --seed",
+            "quality_profile": seed.get("quality_profile"),
         }
+        seed["selection_reason"] = "manual built-in seed via --seed"
         print("  [Seed Mode] Manual built-in seed via --seed")
     else:
         print("  [Seed Mode] Existing default/random seed flow")
         seed = pick_seed()
 
     print(f"\n  [Seed] {seed['name']} ({seed['category']})")
+    quality_text = _seed_quality_text(seed)
+    if quality_text:
+        print(f"  [Seed] {quality_text}")
+    selection_reason = str(seed.get("selection_reason") or "").strip()
+    if selection_reason:
+        print(f"  [Seed] Selection reason: {selection_reason}")
     update_domain_visited(seed["name"], seed["category"])
 
     print("  [Dive] Searching and extracting patterns...")
     patterns = dive(seed)
     print(f"  [Dive] Found {len(patterns)} patterns")
+    pattern_diag_text = _pattern_diagnostic_text(seed)
+    if pattern_diag_text:
+        print(f"  [Dive] Pattern quality: {pattern_diag_text}")
 
     if not patterns:
+        finalize_pattern_diagnostics(seed, connections_found=0)
         save_exploration(
             seed_domain=seed["name"],
             seed_category=seed["category"],
+            seed_selection=seed.get("selection_diagnostics"),
+            pattern_diagnostics=seed.get("pattern_diagnostics"),
             patterns_found=None,
             chain_path=[seed["name"]],
             rewrite_boring=False,
@@ -8222,12 +8307,15 @@ def run_cycle(
         connections_found += 1
         target = connection.get("target_domain", "Unknown")
         print(f"  [Jump] Connection found: {seed['name']} ↔ {target}")
+        finalize_pattern_diagnostics(seed, connections_found=connections_found)
 
         tx_sent, _ = _score_store_and_transmit(
             score_label="Score",
             source_domain=seed["name"],
             source_category=seed["category"],
             root_seed_name=seed["name"],
+            seed_selection=seed.get("selection_diagnostics"),
+            pattern_diagnostics=seed.get("pattern_diagnostics"),
             patterns_payload=patterns,
             connection=connection,
             target_domain=target,
@@ -8249,6 +8337,9 @@ def run_cycle(
         print("  [Hop-2 Dive] Searching and extracting patterns...")
         hop_patterns = dive(hop_seed)
         print(f"  [Hop-2 Dive] Found {len(hop_patterns)} patterns")
+        hop_pattern_diag_text = _pattern_diagnostic_text(hop_seed)
+        if hop_pattern_diag_text:
+            print(f"  [Hop-2 Dive] Pattern quality: {hop_pattern_diag_text}")
         if not hop_patterns:
             continue
 
@@ -8295,12 +8386,15 @@ def run_cycle(
             connections_found += 1
             target_2 = second_connection.get("target_domain", "Unknown")
             print(f"  [Hop-2 Jump] Connection found: {hop_seed['name']} ↔ {target_2}")
+            finalize_pattern_diagnostics(hop_seed, connections_found=1)
 
             tx_sent_2, _ = _score_store_and_transmit(
                 score_label="Hop-2 Score",
                 source_domain=hop_seed["name"],
                 source_category=hop_seed["category"],
                 root_seed_name=seed["name"],
+                seed_selection=None,
+                pattern_diagnostics=hop_seed.get("pattern_diagnostics"),
                 patterns_payload=hop_patterns,
                 connection=second_connection,
                 target_domain=target_2,
@@ -8313,10 +8407,13 @@ def run_cycle(
             break
 
     if connections_found == 0:
+        finalize_pattern_diagnostics(seed, connections_found=0)
         seed_url, seed_excerpt = _extract_seed_provenance(patterns)
         save_exploration(
             seed_domain=seed["name"],
             seed_category=seed["category"],
+            seed_selection=seed.get("selection_diagnostics"),
+            pattern_diagnostics=seed.get("pattern_diagnostics"),
             patterns_found=patterns,
             chain_path=[seed["name"]],
             seed_url=seed_url,

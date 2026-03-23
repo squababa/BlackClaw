@@ -3,6 +3,7 @@ BlackClaw Exploration — Dive + Pattern Extraction
 Searches a seed domain and extracts abstract patterns via LLM.
 """
 import json
+import re
 from tavily import TavilyClient
 from config import MODEL, TAVILY_API_KEY
 from llm_client import get_llm_client
@@ -21,6 +22,8 @@ What counts as a strong pattern:
 - It is searchable in unrelated fields using neutral terms.
 - It would help a later search detect a concrete control, routing, accumulation, threshold, bottleneck, feedback, or phase-change mechanism.
 - It contains a concrete driver, an operative mechanism, and a resulting system behavior.
+- It names at least one measurable variable or state change and, when possible, one controllable lever or intervention point.
+- It would give a later jump stage something an operator could monitor, tune, gate, route, throttle, filter, or compare.
 
 Prefer patterns in families like:
 - threshold switching
@@ -50,6 +53,9 @@ GOOD (from "Ribosome Translation")
 - description: Translation maps fixed-width codon units to amino acids with redundancy that dampens point-mutation impact on resulting proteins.
 - abstract_structure: A finite alphabet is decoded in fixed-size chunks through a many-to-one lookup, where neighborhood redundancy reduces output sensitivity to single-symbol perturbations.
 - search_query: fixed width redundant decoding robustness
+- measurable_signal: output error rate under single-symbol perturbation
+- control_lever: chunk width or code redundancy
+- transfer_rationale: maps to any system where fixed-size encoded inputs are decoded under noise and robustness depends on redundancy structure
 Why GOOD: concrete encoding/decoding structure, measurable robustness property, and non-domain-specific abstract form.
 
 BAD (from "Ant Colony Foraging")
@@ -66,12 +72,19 @@ Rules:
 - pattern_name should name the mechanism, not the subject area. Avoid vague names like "adaptive behavior", "balance", "interaction effects", or "coordination".
 - description should say what changes, through what process, and what outcome follows.
 - abstract_structure should state a driver, the operative mechanism, and the resulting system behavior.
+- abstract_structure should include a controllable trigger, bottleneck, comparator, queue, threshold, filter, routing rule, or measurable state variable whenever the source material supports it.
 - abstract_structure must use zero domain-specific terminology.
 - search_query must be 3-6 words and should avoid terms likely to retrieve the original domain.
 - search_query should include the distinctive mechanism tokens that would help retrieve an unrelated analogue, not broad textbook language.
+- measurable_signal should name one metric, threshold, rate, count, error mode, load measure, or state variable that a target-domain operator could plausibly check.
+- control_lever should name one concrete operator action, tuning knob, gating rule, scheduling choice, routing decision, filter, or intervention implied by the mechanism.
+- transfer_rationale should say why the process shape can transfer across domains without reverting to domain-specific nouns.
 - Reject patterns that collapse to generic statements like "systems adapt to change", "multiple forces interact", or "local averaging occurs".
 - Exclude patterns that are merely "things interact", "system adapts", "resources balance", or other broad abstractions without a concrete causal operator.
+- Exclude patterns that are descriptive but non-operational: historical summaries, aesthetic motifs, symbolic readings, subject-area overviews, or taxonomic restatements.
+- Exclude patterns that are elegant but unusable because they lack a measurable variable, controllable lever, or concrete process operator.
 - Fewer patterns is better than weak patterns; return 1-5 patterns only if each one is mechanistically specific and transferable.
+- Prefer 1-3 strong patterns over 4-5 mixed patterns.
 - If a candidate cannot be expressed as a distinct mechanism with a concrete operator, omit it.
 - Return ONLY valid JSON, no markdown, no extra text.
 
@@ -82,13 +95,20 @@ Output schema:
       "pattern_name": "...",
       "description": "...",
       "abstract_structure": "...",
-      "search_query": "..."
+      "search_query": "...",
+      "measurable_signal": "...",
+      "control_lever": "...",
+      "transfer_rationale": "..."
     }}
   ]
 }}"""
 JSON_RETRY_PROMPT = (
     "Your last response was invalid JSON. Return valid JSON only matching the required schema."
 )
+PATTERN_QUALITY_HIGH_THRESHOLD = 0.72
+PATTERN_QUALITY_MEDIUM_THRESHOLD = 0.5
+PATTERN_JUMP_READY_THRESHOLD = 0.64
+PATTERN_MAX_RETURNED = 4
 LOW_SIGNAL_PATTERN_NAMES = {
     "adaptation",
     "adaptive behavior",
@@ -116,6 +136,136 @@ LOW_SIGNAL_SEARCH_QUERIES = {
     "local averaging in systems",
     "multiple forces interact",
 }
+PATTERN_MECHANISM_TERMS = {
+    "accumulation",
+    "amplification",
+    "bottleneck",
+    "calibration",
+    "cascade",
+    "competition",
+    "constraint",
+    "control",
+    "decay",
+    "filter",
+    "gating",
+    "inhibition",
+    "latency",
+    "load",
+    "queue",
+    "rate limit",
+    "reinforcement",
+    "routing",
+    "saturation",
+    "screen",
+    "signal",
+    "switching",
+    "threshold",
+    "timing",
+    "triage",
+}
+PATTERN_MEASURABLE_TERMS = {
+    "accuracy",
+    "capacity",
+    "collision",
+    "count",
+    "delay",
+    "density",
+    "dropout",
+    "error",
+    "failure rate",
+    "false positive",
+    "false negative",
+    "frequency",
+    "latency",
+    "load",
+    "loss",
+    "metric",
+    "pressure",
+    "probability",
+    "queue length",
+    "rate",
+    "response time",
+    "score",
+    "throughput",
+    "threshold",
+    "utilization",
+    "variance",
+    "voltage",
+}
+PATTERN_CONTROL_TERMS = {
+    "allocate",
+    "audit",
+    "compare",
+    "control",
+    "filter",
+    "gate",
+    "intervention",
+    "limit",
+    "prioritize",
+    "rerank",
+    "route",
+    "schedule",
+    "screen",
+    "select",
+    "shift",
+    "throttle",
+    "tune",
+}
+PATTERN_TRANSFER_TERMS = {
+    "across domains",
+    "any system",
+    "cross-domain",
+    "independent of substrate",
+    "same process shape",
+    "same structure",
+    "transfer",
+    "transferable",
+}
+PATTERN_GENERIC_TERMS = {
+    "adaptation",
+    "balance",
+    "behavior",
+    "complexity",
+    "coordination",
+    "emergence",
+    "general principle",
+    "interaction",
+    "optimization",
+    "organization",
+    "pattern",
+    "self-organization",
+}
+PATTERN_AESTHETIC_TERMS = {
+    "aesthetic",
+    "beauty",
+    "composition",
+    "expressive",
+    "interpretation",
+    "narrative",
+    "readability",
+    "style",
+    "symbolic",
+    "typography",
+}
+PATTERN_DESCRIPTIVE_TERMS = {
+    "classification",
+    "history",
+    "overview",
+    "subject area",
+    "taxonomy",
+    "topic",
+}
+PATTERN_REQUIRED_FIELDS = {
+    "pattern_name",
+    "description",
+    "abstract_structure",
+    "search_query",
+}
+PATTERN_OPTIONAL_FIELDS = (
+    "measurable_signal",
+    "control_lever",
+    "transfer_rationale",
+)
 
 
 def _normalize_text(value: object) -> str:
@@ -123,6 +273,45 @@ def _normalize_text(value: object) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(value.split()).strip()
+
+
+def _match_terms(text: str, terms: set[str]) -> list[str]:
+    """Return bounded phrase matches for lightweight pattern scoring."""
+    matches = [
+        term
+        for term in terms
+        if re.search(rf"\b{re.escape(term)}\b", text) is not None
+    ]
+    return sorted(matches, key=lambda value: (len(value), value))[:4]
+
+
+def _pattern_source_tokens(seed: dict) -> set[str]:
+    """Extract source-domain tokens that should not dominate pattern phrasing."""
+    blocked = set(
+        re.findall(
+            r"[a-z0-9]+(?:-[a-z0-9]+)?",
+            " ".join(
+                [
+                    str(seed.get("name", "") or ""),
+                    str(seed.get("category", "") or ""),
+                ]
+            ).lower(),
+        )
+    )
+    blocked.difference_update(
+        {
+            "and",
+            "or",
+            "of",
+            "in",
+            "for",
+            "the",
+            "science",
+            "systems",
+            "system",
+        }
+    )
+    return blocked
 
 
 def _is_low_signal_pattern(pattern: dict) -> bool:
@@ -146,6 +335,244 @@ def _is_low_signal_pattern(pattern: dict) -> bool:
         "many simple agents produce complex behavior",
     )
     return any(marker in abstract for marker in generic_markers)
+
+
+def _profile_pattern_quality(pattern: dict, seed: dict) -> dict:
+    """Score one extracted pattern for mechanism, measurability, and jump readiness."""
+    name = _normalize_text(pattern.get("pattern_name"))
+    description = _normalize_text(pattern.get("description"))
+    abstract = _normalize_text(pattern.get("abstract_structure"))
+    query = _normalize_text(pattern.get("search_query"))
+    measurable_signal = _normalize_text(pattern.get("measurable_signal"))
+    control_lever = _normalize_text(pattern.get("control_lever"))
+    transfer_rationale = _normalize_text(pattern.get("transfer_rationale"))
+
+    corpus = " | ".join(
+        [
+            name,
+            description,
+            abstract,
+            query,
+            measurable_signal,
+            control_lever,
+            transfer_rationale,
+        ]
+    ).lower()
+    source_tokens = _pattern_source_tokens(seed)
+    query_tokens = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", query.lower()))
+
+    mechanism_matches = _match_terms(corpus, PATTERN_MECHANISM_TERMS)
+    measurable_matches = _match_terms(corpus, PATTERN_MEASURABLE_TERMS)
+    control_matches = _match_terms(corpus, PATTERN_CONTROL_TERMS)
+    transfer_matches = _match_terms(corpus, PATTERN_TRANSFER_TERMS)
+    generic_matches = _match_terms(corpus, PATTERN_GENERIC_TERMS)
+    aesthetic_matches = _match_terms(corpus, PATTERN_AESTHETIC_TERMS)
+    descriptive_matches = _match_terms(corpus, PATTERN_DESCRIPTIVE_TERMS)
+    source_overlap = sorted(query_tokens.intersection(source_tokens))
+
+    score = 0.28
+    strengths: list[str] = []
+    concerns: list[str] = []
+
+    if mechanism_matches:
+        score += 0.2 + min(0.06, 0.02 * max(0, len(mechanism_matches) - 1))
+        strengths.append(f"mechanism-rich via {', '.join(mechanism_matches[:2])}")
+    else:
+        score -= 0.12
+        concerns.append("no concrete mechanism tokens")
+
+    if measurable_matches:
+        score += 0.15 + min(0.05, 0.02 * max(0, len(measurable_matches) - 1))
+        strengths.append(f"measurable variables via {', '.join(measurable_matches[:2])}")
+    elif measurable_signal:
+        score += 0.08
+        strengths.append("explicit measurable signal")
+    else:
+        score -= 0.08
+        concerns.append("missing measurable variable")
+
+    if control_matches:
+        score += 0.15 + min(0.05, 0.02 * max(0, len(control_matches) - 1))
+        strengths.append(f"controllable lever via {', '.join(control_matches[:2])}")
+    elif control_lever:
+        score += 0.08
+        strengths.append("explicit control lever")
+    else:
+        score -= 0.08
+        concerns.append("missing controllable lever")
+
+    if transfer_matches:
+        score += 0.1
+        strengths.append(f"transfer structure via {', '.join(transfer_matches[:2])}")
+    elif transfer_rationale:
+        score += 0.05
+        strengths.append("explicit transfer rationale")
+
+    if 3 <= len(query.split()) <= 6:
+        score += 0.04
+        strengths.append("tight jump query")
+    else:
+        score -= 0.06
+        concerns.append("search query too broad or malformed")
+
+    if len(abstract.split()) >= 16 and len(description.split()) >= 12:
+        score += 0.05
+    else:
+        score -= 0.07
+        concerns.append("pattern description too thin")
+
+    if re.search(r"\b(via|through|using|by|under|when|as)\b", abstract):
+        score += 0.04
+    else:
+        score -= 0.05
+        concerns.append("abstract structure lacks an operative driver")
+
+    if re.search(r"\b(resulting in|producing|causing|leading to|triggering)\b", abstract):
+        score += 0.04
+    else:
+        score -= 0.04
+        concerns.append("abstract structure lacks a clear outcome")
+
+    if source_overlap:
+        score -= min(0.12, 0.04 * len(source_overlap))
+        concerns.append(f"query still anchored to source terms: {', '.join(source_overlap[:2])}")
+
+    if generic_matches:
+        score -= 0.12 + min(0.05, 0.02 * max(0, len(generic_matches) - 1))
+        concerns.append(f"broad framing via {', '.join(generic_matches[:2])}")
+    if descriptive_matches:
+        score -= 0.1
+        concerns.append(f"descriptive rather than operational via {', '.join(descriptive_matches[:2])}")
+    if aesthetic_matches:
+        score -= 0.14
+        concerns.append(f"aesthetic or interpretive via {', '.join(aesthetic_matches[:2])}")
+
+    score = max(0.05, min(0.97, score))
+    if score >= PATTERN_QUALITY_HIGH_THRESHOLD:
+        band = "high"
+    elif score >= PATTERN_QUALITY_MEDIUM_THRESHOLD:
+        band = "medium"
+    else:
+        band = "weak"
+
+    jump_support_score = score
+    if not measurable_matches and not measurable_signal:
+        jump_support_score -= 0.06
+    if not control_matches and not control_lever:
+        jump_support_score -= 0.06
+    if source_overlap:
+        jump_support_score -= 0.05
+    jump_support_score = max(0.05, min(0.97, jump_support_score))
+    jump_ready = jump_support_score >= PATTERN_JUMP_READY_THRESHOLD
+
+    return {
+        "score": round(score, 3),
+        "band": band,
+        "jump_support_score": round(jump_support_score, 3),
+        "jump_ready": jump_ready,
+        "strengths": strengths[:4],
+        "concerns": concerns[:4],
+        "summary": (
+            f"{band}-quality pattern ({score:.2f}); "
+            f"jump {'ready' if jump_ready else 'weak'} ({jump_support_score:.2f})"
+        ),
+    }
+
+
+def _pattern_diagnostics(
+    seed: dict,
+    *,
+    raw_count: int,
+    missing_fields: int,
+    low_signal_rejections: int,
+    weak_quality_rejections: int,
+    retained_patterns: list[dict],
+    rejected_profiles: list[dict],
+) -> dict:
+    """Summarize how extraction quality behaved for one seed."""
+    retained_profiles = [
+        pattern.get("pattern_quality", {})
+        for pattern in retained_patterns
+        if isinstance(pattern.get("pattern_quality"), dict)
+    ]
+    high_count = sum(1 for item in retained_profiles if item.get("band") == "high")
+    medium_count = sum(1 for item in retained_profiles if item.get("band") == "medium")
+    weak_count = len(rejected_profiles)
+    jump_ready_count = sum(1 for item in retained_profiles if item.get("jump_ready"))
+    if retained_patterns:
+        if high_count <= 0:
+            outcome = "no_strong_patterns_found"
+        else:
+            outcome = "patterns_ready"
+    elif raw_count <= 0:
+        outcome = "no_patterns_returned"
+    elif low_signal_rejections > 0 or weak_quality_rejections > 0:
+        outcome = "only_weak_patterns_found"
+    else:
+        outcome = "no_strong_patterns_found"
+
+    concerns: list[str] = []
+    for profile in rejected_profiles:
+        for concern in profile.get("concerns", []):
+            if concern not in concerns:
+                concerns.append(concern)
+            if len(concerns) >= 3:
+                break
+        if len(concerns) >= 3:
+            break
+
+    return {
+        "seed_name": str(seed.get("name", "") or "").strip(),
+        "raw_pattern_count": int(raw_count),
+        "retained_pattern_count": len(retained_patterns),
+        "high_quality_count": high_count,
+        "medium_quality_count": medium_count,
+        "weak_quality_count": weak_count,
+        "jump_ready_count": jump_ready_count,
+        "drop_counts": {
+            "missing_required_fields": int(missing_fields),
+            "low_signal": int(low_signal_rejections),
+            "weak_quality": int(weak_quality_rejections),
+        },
+        "top_rejection_reasons": concerns,
+        "outcome": outcome,
+        "summary": (
+            f"{outcome}: kept {len(retained_patterns)}/{raw_count} patterns "
+            f"(high={high_count}, medium={medium_count}, weak_rejected={weak_count})"
+        ),
+    }
+
+
+def _store_pattern_diagnostics(seed: dict, diagnostics: dict) -> None:
+    """Attach extraction diagnostics to the mutable seed object."""
+    if isinstance(seed, dict):
+        seed["pattern_diagnostics"] = diagnostics
+
+
+def finalize_pattern_diagnostics(seed: dict, connections_found: int) -> dict | None:
+    """Update extraction diagnostics with post-jump outcome context."""
+    diagnostics = seed.get("pattern_diagnostics")
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        return None
+
+    final = dict(diagnostics)
+    final["connections_found"] = int(connections_found)
+    if connections_found > 0:
+        final["jump_outcome"] = "connection_found"
+    elif int(final.get("retained_pattern_count", 0) or 0) <= 0:
+        final["jump_outcome"] = str(final.get("outcome") or "no_patterns_returned")
+    elif int(final.get("high_quality_count", 0) or 0) <= 0:
+        final["jump_outcome"] = "patterns_too_weak_for_jump"
+    elif int(final.get("jump_ready_count", 0) or 0) <= 0:
+        final["jump_outcome"] = "patterns_too_weak_for_jump"
+    else:
+        final["jump_outcome"] = "patterns_present_but_no_connection"
+    final["summary"] = (
+        f"{diagnostics.get('summary', 'pattern diagnostics')}; "
+        f"jump_outcome={final['jump_outcome']}"
+    )
+    _store_pattern_diagnostics(seed, final)
+    return final
 
 
 def _search_seed(seed: dict) -> tuple[str, dict]:
@@ -256,6 +683,26 @@ def dive(seed: dict) -> list[dict]:
     # Step 1: Search
     research, provenance = _search_seed(seed)
     if not research.strip():
+        _store_pattern_diagnostics(
+            seed,
+            {
+                "seed_name": str(seed.get("name", "") or "").strip(),
+                "raw_pattern_count": 0,
+                "retained_pattern_count": 0,
+                "high_quality_count": 0,
+                "medium_quality_count": 0,
+                "weak_quality_count": 0,
+                "jump_ready_count": 0,
+                "drop_counts": {
+                    "missing_required_fields": 0,
+                    "low_signal": 0,
+                    "weak_quality": 0,
+                },
+                "top_rejection_reasons": ["no search results"],
+                "outcome": "no_search_results",
+                "summary": "no_search_results: upstream seed search returned no usable material",
+            },
+        )
         print(f"  [!] No search results for {seed['name']}")
         return []
     # Step 2: Extract patterns via LLM
@@ -264,25 +711,107 @@ def dive(seed: dict) -> list[dict]:
     try:
         extracted_json = _generate_json_with_retry(full_prompt, 4096)
     except Exception as e:
+        _store_pattern_diagnostics(
+            seed,
+            {
+                "seed_name": str(seed.get("name", "") or "").strip(),
+                "raw_pattern_count": 0,
+                "retained_pattern_count": 0,
+                "high_quality_count": 0,
+                "medium_quality_count": 0,
+                "weak_quality_count": 0,
+                "jump_ready_count": 0,
+                "drop_counts": {
+                    "missing_required_fields": 0,
+                    "low_signal": 0,
+                    "weak_quality": 0,
+                },
+                "top_rejection_reasons": ["llm extraction failed"],
+                "outcome": "llm_extraction_failed",
+                "summary": "llm_extraction_failed: pattern extraction did not return usable JSON",
+            },
+        )
         print(f"  [!] Failed to extract JSON from LLM response: {e}")
         return []
     try:
         data = json.loads(extracted_json)
     except json.JSONDecodeError as e:
+        _store_pattern_diagnostics(
+            seed,
+            {
+                "seed_name": str(seed.get("name", "") or "").strip(),
+                "raw_pattern_count": 0,
+                "retained_pattern_count": 0,
+                "high_quality_count": 0,
+                "medium_quality_count": 0,
+                "weak_quality_count": 0,
+                "jump_ready_count": 0,
+                "drop_counts": {
+                    "missing_required_fields": 0,
+                    "low_signal": 0,
+                    "weak_quality": 0,
+                },
+                "top_rejection_reasons": ["json parsing failed"],
+                "outcome": "llm_json_parse_failed",
+                "summary": "llm_json_parse_failed: extraction returned invalid JSON payload",
+            },
+        )
         print(f"  [!] Failed to parse LLM response as JSON: {e}")
         return []
     patterns = data.get("patterns", [])
     # Validate each pattern has required fields
     valid = []
-    required = {"pattern_name", "description", "abstract_structure", "search_query"}
+    missing_fields = 0
+    low_signal_rejections = 0
+    weak_quality_rejections = 0
+    rejected_profiles: list[dict] = []
     for p in patterns:
-        if required.issubset(p.keys()):
-            pattern = {key: _normalize_text(value) for key, value in dict(p).items()}
-            if _is_low_signal_pattern(pattern):
-                continue
-            if provenance.get("seed_url"):
-                pattern["seed_url"] = provenance["seed_url"]
-            if provenance.get("seed_excerpt"):
-                pattern["seed_excerpt"] = provenance["seed_excerpt"]
-            valid.append(pattern)
+        if not PATTERN_REQUIRED_FIELDS.issubset(p.keys()):
+            missing_fields += 1
+            continue
+        normalized = {
+            key: _normalize_text(value)
+            for key, value in dict(p).items()
+            if key in PATTERN_REQUIRED_FIELDS or key in PATTERN_OPTIONAL_FIELDS
+        }
+        if _is_low_signal_pattern(normalized):
+            low_signal_rejections += 1
+            rejected_profiles.append(
+                {
+                    "concerns": ["generic or low-signal pattern"],
+                    "band": "weak",
+                    "jump_ready": False,
+                }
+            )
+            continue
+        quality = _profile_pattern_quality(normalized, seed)
+        normalized["pattern_quality"] = quality
+        if quality.get("band") == "weak":
+            weak_quality_rejections += 1
+            rejected_profiles.append(quality)
+            continue
+        if provenance.get("seed_url"):
+            normalized["seed_url"] = provenance["seed_url"]
+        if provenance.get("seed_excerpt"):
+            normalized["seed_excerpt"] = provenance["seed_excerpt"]
+        valid.append(normalized)
+
+    valid.sort(
+        key=lambda pattern: (
+            float(pattern.get("pattern_quality", {}).get("jump_support_score", 0.0) or 0.0),
+            float(pattern.get("pattern_quality", {}).get("score", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    valid = valid[:PATTERN_MAX_RETURNED]
+    diagnostics = _pattern_diagnostics(
+        seed,
+        raw_count=len(patterns),
+        missing_fields=missing_fields,
+        low_signal_rejections=low_signal_rejections,
+        weak_quality_rejections=weak_quality_rejections,
+        retained_patterns=valid,
+        rejected_profiles=rejected_profiles,
+    )
+    _store_pattern_diagnostics(seed, diagnostics)
     return valid
