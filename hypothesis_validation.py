@@ -429,15 +429,42 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
     return deduped
 
 
+def _term_variants(token: str) -> set[str]:
+    variants = {token}
+    if len(token) < 5 or token.isdigit():
+        return variants
+
+    if token.endswith("ies") and len(token) > 6:
+        variants.add(token[:-3] + "y")
+
+    for suffix in ("ing", "ed", "ions", "ion", "es", "s"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+            variants.add(token[: -len(suffix)])
+            break
+
+    return {
+        value
+        for value in variants
+        if len(value) >= 4 and not value.isdigit()
+    }
+
+
 def _meaningful_terms(text: object) -> set[str]:
     cleaned = _clean_optional_text(text) or ""
-    return {
-        token
-        for token in _word_tokens(cleaned)
-        if len(token) >= 4
-        and token not in PROVENANCE_STOPWORDS
-        and not token.isdigit()
-    }
+    terms: set[str] = set()
+    for token in _word_tokens(cleaned):
+        if (
+            len(token) < 4
+            or token in PROVENANCE_STOPWORDS
+            or token.isdigit()
+        ):
+            continue
+        terms.update(
+            variant
+            for variant in _term_variants(token)
+            if variant not in PROVENANCE_STOPWORDS
+        )
+    return terms
 
 
 def _contains_generic_phrase(text: object) -> bool:
@@ -488,8 +515,15 @@ def _score_snippet_specificity(
     expected_terms = set(required_terms or ())
     if not expected_terms:
         expected_terms = _meaningful_terms(claim)
+    claim_terms = _meaningful_terms(claim)
 
     overlap_count = len(expected_terms & meaningful_terms) if expected_terms else 0
+    claim_overlap_count = len(claim_terms & meaningful_terms) if claim_terms else 0
+    claim_coverage = (
+        (claim_overlap_count / len(claim_terms))
+        if claim_terms
+        else 1.0
+    )
     score = 0.0
 
     if len(tokens) >= 8:
@@ -510,13 +544,35 @@ def _score_snippet_specificity(
     reasons: list[str] = []
     if len(tokens) < 8 or len(meaningful_terms) < 4:
         reasons.append("vague snippet")
-    if expected_terms and overlap_count == 0:
+    if expected_terms and overlap_count < _minimum_core_overlap(expected_terms):
+        reasons.append("claim/snippet mismatch")
+    elif len(claim_terms) >= 5 and claim_coverage < 0.25:
         reasons.append("claim/snippet mismatch")
     if _contains_generic_phrase(text):
         reasons.append("generic evidence")
         score -= 0.25
 
     return round(max(0.0, min(1.0, score)), 3), _dedupe_preserve_order(reasons)
+
+
+def _provenance_entry_rank(entry: object) -> tuple[float, ...]:
+    payload = entry if isinstance(entry, dict) else {}
+    score = payload.get("provenance_score") or {}
+    raw_reasons = {
+        str(reason).strip().lower()
+        for reason in (score.get("reasons") or [])
+        if str(reason).strip()
+    }
+    failures = _provenance_quality_failures(score)
+    return (
+        1.0 if not failures else 0.0,
+        1.0 if "claim/snippet mismatch" not in raw_reasons else 0.0,
+        1.0 if "vague snippet" not in raw_reasons else 0.0,
+        float(score.get("snippet_specificity") or 0.0),
+        float(score.get("claim_specificity") or 0.0),
+        float(score.get("overall") or 0.0),
+        float(score.get("source_traceability") or 0.0),
+    )
 
 
 def _score_source_traceability(source_reference: object) -> tuple[float, list[str]]:
@@ -613,7 +669,51 @@ def _looks_like_broad_target_page(source_reference: object) -> bool:
     )
 
 
-def _find_core_target_evidence_failure(
+def _core_text_match(
+    text: object,
+    *,
+    full_text: str,
+    required_terms: set[str],
+) -> tuple[bool, int]:
+    cleaned = _clean_optional_text(text) or ""
+    if not cleaned or not required_terms:
+        return False, 0
+    lowered = cleaned.lower()
+    overlap = len(_meaningful_terms(cleaned) & required_terms)
+    return (
+        (
+            bool(full_text)
+            and len(full_text) >= 8
+            and full_text.lower() in lowered
+        )
+        or overlap >= _minimum_core_overlap(required_terms)
+    ), overlap
+
+
+def _core_target_entry_rank(entry: object) -> tuple[float, ...]:
+    payload = entry if isinstance(entry, dict) else {}
+    strength = str(payload.get("strength") or "")
+    strength_rank = {
+        "strong_direct": 3.0,
+        "weak_direct": 2.0,
+        "contextual_only": 1.0,
+        "none": 0.0,
+    }.get(strength, 0.0)
+    score = payload.get("provenance_score") or {}
+    return (
+        strength_rank,
+        1.0 if payload.get("direct_process_match") else 0.0,
+        1.0 if payload.get("direct_metric_match") else 0.0,
+        1.0 if not payload.get("weak_source") else 0.0,
+        1.0 if not payload.get("broad_page") else 0.0,
+        1.0 if not payload.get("generic_signal") else 0.0,
+        1.0 if not payload.get("mismatch_signal") else 0.0,
+        float(score.get("snippet_specificity") or 0.0),
+        float(score.get("overall") or 0.0),
+    )
+
+
+def _assess_core_target_evidence(
     payload: dict,
     *,
     critical_mapping_entries: list[dict],
@@ -666,29 +766,20 @@ def _find_core_target_evidence_failure(
         ) or ""
         snippet_text = _clean_optional_text(entry.get("evidence_snippet")) or ""
         source_text = _clean_optional_text(entry.get("source_reference")) or ""
-        combined_text = " ".join(
-            part
-            for part in (
-                (snippet_text, source_text)
-                if entry_type == "top_level_target_evidence"
-                else (claim_text, snippet_text, source_text)
-            )
-            if part
-        )
-        if not combined_text:
+        if not (claim_text or snippet_text or source_text):
             continue
 
-        combined_lower = combined_text.lower()
-        entry_terms = _meaningful_terms(combined_text)
+        score = entry.get("provenance_score") or {}
+        score_reasons = {
+            str(reason).strip().lower()
+            for reason in (score.get("reasons") or [])
+            if str(reason).strip()
+        }
+
         mechanism_match_terms = mechanism_terms
         metric_match_terms = metric_terms
         observable_match_terms = observable_terms
         if entry_type == "top_level_target_evidence":
-            filtered_entry_terms = {
-                term
-                for term in entry_terms
-                if term not in TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS
-            }
             filtered_mechanism_terms = {
                 term
                 for term in mechanism_terms
@@ -704,44 +795,51 @@ def _find_core_target_evidence_failure(
                 for term in observable_terms
                 if term not in TOP_LEVEL_TARGET_GENERIC_MATCH_TERMS
             }
-            entry_terms = filtered_entry_terms if filtered_entry_terms else entry_terms
             if filtered_mechanism_terms:
                 mechanism_match_terms = filtered_mechanism_terms
             if filtered_metric_terms:
                 metric_match_terms = filtered_metric_terms
             if filtered_observable_terms:
                 observable_match_terms = filtered_observable_terms
-        score = entry.get("provenance_score") or {}
-        score_reasons = {
-            str(reason).strip().lower()
-            for reason in (score.get("reasons") or [])
-            if str(reason).strip()
-        }
 
-        mechanism_overlap = len(entry_terms & mechanism_match_terms)
-        metric_overlap = len(entry_terms & metric_match_terms)
-        observable_overlap = len(entry_terms & observable_match_terms)
+        direct_process_match, mechanism_overlap = _core_text_match(
+            snippet_text,
+            full_text=mechanism_text,
+            required_terms=mechanism_match_terms,
+        )
+        direct_metric_match, metric_overlap = _core_text_match(
+            snippet_text,
+            full_text=metric_text,
+            required_terms=metric_match_terms,
+        )
+        direct_observable_match, observable_overlap = _core_text_match(
+            snippet_text,
+            full_text=observable_text,
+            required_terms=observable_match_terms,
+        )
+        claim_process_match, _ = _core_text_match(
+            claim_text,
+            full_text=mechanism_text,
+            required_terms=mechanism_match_terms,
+        )
+        claim_metric_match, _ = _core_text_match(
+            claim_text,
+            full_text=metric_text,
+            required_terms=metric_match_terms,
+        )
+        claim_observable_match, _ = _core_text_match(
+            claim_text,
+            full_text=observable_text,
+            required_terms=observable_match_terms,
+        )
 
-        matches_mechanism = bool(mechanism_match_terms) and (
-            (mechanism_text and len(mechanism_text) >= 12 and mechanism_text.lower() in combined_lower)
-            or mechanism_overlap >= _minimum_core_overlap(mechanism_match_terms)
+        direct_core_match = direct_process_match or direct_metric_match or (
+            not metric_match_terms and direct_observable_match
         )
-        matches_metric = bool(metric_match_terms) and (
-            (metric_text and len(metric_text) >= 8 and metric_text.lower() in combined_lower)
-            or metric_overlap
-            >= _minimum_core_overlap(metric_match_terms)
-        )
-        matches_observable = bool(observable_match_terms) and (
-            (
-                observable_text
-                and len(observable_text) >= 8
-                and observable_text.lower() in combined_lower
-            )
-            or observable_overlap
-            >= _minimum_core_overlap(observable_match_terms)
-        )
-        core_match = matches_mechanism or matches_metric or (
-            not metric_match_terms and matches_observable
+        claim_only_core_match = not direct_core_match and (
+            claim_process_match
+            or claim_metric_match
+            or (not metric_match_terms and claim_observable_match)
         )
 
         weak_source = _looks_like_weak_target_source(source_text)
@@ -749,84 +847,123 @@ def _find_core_target_evidence_failure(
         generic_signal = "generic evidence" in score_reasons
         mismatch_signal = "claim/snippet mismatch" in score_reasons
 
+        strength = "none"
+        if direct_core_match and not (
+            weak_source or broad_page or generic_signal or mismatch_signal
+        ):
+            strength = "strong_direct"
+        elif direct_core_match:
+            strength = "weak_direct"
+        elif claim_only_core_match:
+            strength = "contextual_only"
+
         evaluated_entries.append(
             {
                 "entry_type": entry_type,
-                "core_match": core_match,
+                "claim": claim_text,
+                "evidence_snippet": snippet_text,
+                "source_reference": source_text,
+                "provenance_score": score,
+                "strength": strength,
+                "direct_core_match": direct_core_match,
+                "direct_process_match": direct_process_match,
+                "direct_metric_match": direct_metric_match,
+                "direct_observable_match": direct_observable_match,
+                "claim_only_core_match": claim_only_core_match,
                 "weak_source": weak_source,
                 "broad_page": broad_page,
                 "generic_signal": generic_signal,
                 "mismatch_signal": mismatch_signal,
+                "mechanism_overlap": mechanism_overlap,
+                "metric_overlap": metric_overlap,
+                "observable_overlap": observable_overlap,
             }
         )
 
     if not evaluated_entries:
         return None
 
-    top_level_target_failures = [
+    strong_direct_entries = [
+        item for item in evaluated_entries if item.get("strength") == "strong_direct"
+    ]
+    direct_entries = [
         item
         for item in evaluated_entries
-        if item.get("entry_type") == "top_level_target_evidence"
-        and (
-            not item["core_match"]
-            or item["weak_source"]
-            or item["broad_page"]
-            or item["generic_signal"]
-            or item["mismatch_signal"]
-        )
+        if item.get("strength") in {"strong_direct", "weak_direct"}
     ]
-    if top_level_target_failures:
-        reasons: list[str] = []
-        if any(item["weak_source"] for item in top_level_target_failures):
-            reasons.append("core support relies on weak target source")
-        if any(item["broad_page"] for item in top_level_target_failures):
-            reasons.append("core support relies on broad overview-style page")
-        if any(item["generic_signal"] for item in top_level_target_failures):
-            reasons.append("core support remains generic")
-        if any(
-            (not item["core_match"]) or item["mismatch_signal"]
-            for item in top_level_target_failures
-        ):
-            reasons.append("core support does not clearly match process or metric")
-        return {
-            "message": "target evidence too weak for core claim",
-            "reasons": _dedupe_preserve_order(reasons),
-            "reason_codes": ["weak_core_target_evidence"],
-        }
-
-    core_entries = [item for item in evaluated_entries if item["core_match"]]
-    strong_core_entries = [
-        item
-        for item in core_entries
-        if not (
-            item["weak_source"]
-            or item["broad_page"]
-            or item["generic_signal"]
-            or item["mismatch_signal"]
-        )
+    contextual_entries = [
+        item for item in evaluated_entries if item.get("strength") == "contextual_only"
     ]
-    if strong_core_entries:
-        return None
+    best_entry = max(evaluated_entries, key=_core_target_entry_rank)
 
     reasons: list[str] = []
-    if core_entries:
-        if any(item["weak_source"] for item in core_entries):
+    reason_codes: list[str] = []
+    if strong_direct_entries:
+        strength = "strong_direct"
+    elif direct_entries:
+        strength = "weak_direct"
+        if any(item["weak_source"] for item in direct_entries):
             reasons.append("core support relies on weak target source")
-        if any(item["broad_page"] for item in core_entries):
+            reason_codes.append("weak_target_source")
+        if any(item["broad_page"] for item in direct_entries):
             reasons.append("core support relies on broad overview-style page")
-        if any(item["generic_signal"] for item in core_entries):
+            reason_codes.append("broad_target_page")
+        if any(item["generic_signal"] for item in direct_entries):
             reasons.append("core support remains generic")
-        if any(item["mismatch_signal"] for item in core_entries):
+            reason_codes.append("generic_core_support")
+        if any(item["mismatch_signal"] for item in direct_entries):
             reasons.append("core support does not clearly match process or metric")
+            reason_codes.append("claim_snippet_mismatch")
         if not reasons:
             reasons.append("core support relies mainly on weak target evidence")
+            reason_codes.append("weak_core_support")
+    elif contextual_entries:
+        strength = "contextual_only"
+        reasons.append("core support relies on claim wording more than direct target snippet")
+        reason_codes.append("claim_only_core_support")
+        if any(item["weak_source"] for item in contextual_entries):
+            reasons.append("core support relies on weak target source")
+            reason_codes.append("weak_target_source")
+        if any(item["broad_page"] for item in contextual_entries):
+            reasons.append("core support relies on broad overview-style page")
+            reason_codes.append("broad_target_page")
+        if any(item["generic_signal"] for item in contextual_entries):
+            reasons.append("core support remains generic")
+            reason_codes.append("generic_core_support")
     else:
+        strength = "none"
         reasons.append("no direct support for named process or core metric")
+        reason_codes.append("no_direct_core_support")
+
+    return {
+        "strength": strength,
+        "reasons": _dedupe_preserve_order(reasons),
+        "reason_codes": _dedupe_preserve_order(reason_codes),
+        "direct_entry_count": len(direct_entries),
+        "strong_direct_entry_count": len(strong_direct_entries),
+        "best_entry": best_entry,
+        "evaluated_entries": evaluated_entries,
+    }
+
+
+def _find_core_target_evidence_failure(
+    payload: dict,
+    *,
+    critical_mapping_entries: list[dict],
+    mechanism_entries: list[dict],
+) -> dict | None:
+    assessment = _assess_core_target_evidence(
+        payload,
+        critical_mapping_entries=critical_mapping_entries,
+        mechanism_entries=mechanism_entries,
+    )
+    if assessment is None or assessment.get("strength") == "strong_direct":
+        return None
 
     return {
         "message": "target evidence too weak for core claim",
-        "reasons": _dedupe_preserve_order(reasons),
-        "reason_codes": ["weak_core_target_evidence"],
+        "reasons": _dedupe_preserve_order(assessment.get("reasons") or []),
+        "reason_codes": ["weak_core_target_evidence", *(assessment.get("reason_codes") or [])],
     }
 
 
@@ -1515,12 +1652,7 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
             )
             continue
 
-        best_entry = max(
-            matching_entries,
-            key=lambda item: float(
-                ((item.get("provenance_score") or {}).get("overall")) or 0.0
-            ),
-        )
+        best_entry = max(matching_entries, key=_provenance_entry_rank)
         best_critical_mapping_entries.append(best_entry)
         score = best_entry.get("provenance_score") or {}
         quality_failures = _provenance_quality_failures(score)
@@ -1542,6 +1674,9 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
                     "message": message,
                     "reasons": quality_failures,
                     "reason_codes": failure.get("reason_codes") or [],
+                    "claim": best_entry.get("claim"),
+                    "evidence_snippet": best_entry.get("evidence_snippet"),
+                    "source_reference": best_entry.get("source_reference"),
                     "score": score,
                 }
             )
@@ -1597,9 +1732,7 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
         elif not supported_mechanism_assertions:
             best_entry = max(
                 scored_mechanism_assertions,
-                key=lambda item: float(
-                    ((item.get("provenance_score") or {}).get("overall")) or 0.0
-                ),
+                key=_provenance_entry_rank,
             )
             score = best_entry.get("provenance_score") or {}
             quality_failures = _provenance_quality_failures(score)
@@ -1619,10 +1752,17 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
                     "message": message,
                     "reasons": quality_failures,
                     "reason_codes": failure.get("reason_codes") or [],
+                    "evidence_snippet": best_entry.get("evidence_snippet"),
+                    "source_reference": best_entry.get("source_reference"),
                     "score": score,
                 }
             )
 
+    core_target_assessment = _assess_core_target_evidence(
+        payload,
+        critical_mapping_entries=best_critical_mapping_entries,
+        mechanism_entries=supported_mechanism_assertions,
+    )
     if not issues:
         core_target_failure = _find_core_target_evidence_failure(
             payload,
@@ -1654,6 +1794,33 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
         "supported_mechanism_assertion_count": len(supported_mechanism_assertions),
         "scored_variable_mappings": scored_variable_mappings,
         "scored_mechanism_assertions": scored_mechanism_assertions,
+        "core_target_evidence_strength": (
+            str(core_target_assessment.get("strength") or "").strip()
+            if isinstance(core_target_assessment, dict)
+            else ""
+        ),
+        "core_target_direct_entry_count": int(
+            (core_target_assessment or {}).get("direct_entry_count") or 0
+        ),
+        "core_target_strong_direct_entry_count": int(
+            (core_target_assessment or {}).get("strong_direct_entry_count") or 0
+        ),
+        "core_target_reasons": (
+            list(core_target_assessment.get("reasons") or [])
+            if isinstance(core_target_assessment, dict)
+            else []
+        ),
+        "core_target_reason_codes": (
+            list(core_target_assessment.get("reason_codes") or [])
+            if isinstance(core_target_assessment, dict)
+            else []
+        ),
+        "best_core_target_evidence": (
+            core_target_assessment.get("best_entry")
+            if isinstance(core_target_assessment, dict)
+            and isinstance(core_target_assessment.get("best_entry"), dict)
+            else None
+        ),
         "provenance_failures": provenance_failures,
         "failure_details": failure_details,
         "issues": issues,

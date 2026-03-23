@@ -1,3 +1,5 @@
+import json
+
 import jump
 
 
@@ -27,8 +29,8 @@ def _valid_stage2_payload() -> dict:
                 {
                     "source_variable": "catch_collision",
                     "target_variable": "activation_conflict",
-                    "claim": "Two tasks cannot share the same activation slot without a conflict.",
-                    "evidence_snippet": "Offset assignment must prevent simultaneous activation collisions.",
+                    "claim": "Offset assignment must prevent simultaneous activation collisions among periodic tasks.",
+                    "evidence_snippet": "Offset assignment must prevent simultaneous activation collisions among periodic tasks sharing execution resources.",
                     "source_reference": "Collision-free offset assignment for periodic tasks",
                 },
                 {
@@ -41,8 +43,8 @@ def _valid_stage2_payload() -> dict:
             ],
             "mechanism_assertions": [
                 {
-                    "mechanism_claim": "Discrete offset assignment prevents schedule collisions by enforcing modular exclusion.",
-                    "evidence_snippet": "Feasible schedules are constructed by assigning offsets that satisfy collision-avoidance constraints.",
+                    "mechanism_claim": "Feasible offset assignment prevents schedule collisions across the hyperperiod by satisfying collision-avoidance constraints.",
+                    "evidence_snippet": "Feasible schedules are constructed by assigning offsets that satisfy collision-avoidance constraints across the hyperperiod.",
                     "source_reference": "Collision-free offset assignment for periodic tasks",
                 }
             ],
@@ -103,6 +105,9 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "`edge_analysis.expected_asymmetry` must explain why the lever is plausibly underused rather than already standard target-domain wisdom." in prompt
     assert "For the first 3 critical mappings, the evidence_snippet must be specific enough to stand on its own" in prompt
     assert "If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, or the first 3 critical evidence snippets are only generic placeholders" in prompt
+    assert "keep variable_mapping to exactly those 3" in prompt
+    assert "Open `mechanism` with the exact target-domain process noun phrase used in the strongest supporting evidence snippet" in prompt
+    assert "Do not rename the target-domain process into a broader abstract label" in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
@@ -159,3 +164,72 @@ def test_build_repair_prompt_includes_targeted_guidance() -> None:
     assert "Rewrite `edge_analysis.why_missed` so it names one concrete search, framing, workflow, metric, or discipline-boundary reason" in repair_prompt
     assert "Rewrite `edge_analysis.expected_asymmetry` so it explains why the lever is plausibly underused rather than already standard target-domain wisdom" in repair_prompt
     assert "Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause" in repair_prompt
+
+
+def test_missing_required_fields_requests_repair_for_provenance_bottlenecks() -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "biochemical gating cascade coordinates membrane-state transitions across reactive media."
+    )
+    payload["evidence_map"]["variable_mappings"][1]["claim"] = (
+        "Periodic scheduling compares detected load surges against a programmable arbitration threshold before conflict resolution."
+    )
+    payload["evidence_map"]["variable_mappings"][1]["evidence_snippet"] = (
+        "Offset assignment must prevent simultaneous activation collisions among periodic tasks."
+    )
+
+    missing = jump._missing_required_fields(payload)
+
+    assert "mechanism" in missing
+    assert "evidence_map.variable_mappings" in missing
+
+
+def test_build_repair_prompt_includes_phase3_provenance_targets() -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "biochemical gating cascade coordinates membrane-state transitions across reactive media."
+    )
+    payload["evidence_map"]["variable_mappings"][1]["claim"] = (
+        "Periodic scheduling compares detected load surges against a programmable arbitration threshold before conflict resolution."
+    )
+    payload["evidence_map"]["variable_mappings"][1]["evidence_snippet"] = (
+        "Offset assignment must prevent simultaneous activation collisions among periodic tasks."
+    )
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["mechanism", "evidence_map.variable_mappings"],
+        original_data=payload,
+    )
+
+    assert "Pull the opening noun phrase of `mechanism` directly from target-domain evidence wording." in repair_prompt
+    assert (
+        "Best available anchor: "
+        "`Feasible offset assignment prevents schedule collisions across the hyperperiod by satisfying collision-avoidance constraints.`."
+        in repair_prompt
+    )
+    assert "Repair the critical mappings before touching non-critical ones." in repair_prompt
+    assert "Critical mapping to rewrite first: `catch_collision -> activation_conflict`" in repair_prompt
+
+
+def test_missing_required_fields_allows_mechanism_anchor_overlap_across_term_variants() -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "occupied-slot detection compares assigned offsets before switching release order."
+    )
+    payload["evidence_map"]["mechanism_assertions"][0] = {
+        "mechanism_claim": (
+            "occupied-slot detection compares assigned offsets before the scheduler "
+            "switches release order."
+        ),
+        "evidence_snippet": (
+            "Detected occupied slots cause the scheduler to switch release order "
+            "before simultaneous activation collisions occur."
+        ),
+        "source_reference": "Collision-free offset assignment for periodic tasks",
+    }
+
+    missing = jump._missing_required_fields(payload)
+
+    assert "mechanism" not in missing

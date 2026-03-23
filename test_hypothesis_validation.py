@@ -312,13 +312,12 @@ def test_summary_rejects_off_domain_top_level_target_evidence_with_generic_overl
                         "criterion."
                     ),
                     "evidence_snippet": (
-                        "Mode switching aims to achieve an appropriate "
-                        "ventricular rate during periods of atrial arrhythmias "
-                        "by the correct detection of premature atrial events."
+                        "Automatic mode switching compares the detected "
+                        "atrial rate with a programmable cutoff to decide "
+                        "when mode switch should occur."
                     ),
                     "source_reference": (
-                        "Mode switching for atrial tachyarrhythmias - "
-                        "ScienceDirect.com"
+                        "Automatic Mode Switching for Atrial Tachyarrhythmias"
                     ),
                 },
                 {
@@ -330,13 +329,12 @@ def test_summary_rejects_off_domain_top_level_target_evidence_with_generic_overl
                         "alternative pacing mode."
                     ),
                     "evidence_snippet": (
-                        "Mode switching aims to achieve an appropriate "
-                        "ventricular rate during periods of atrial arrhythmias "
-                        "by the correct detection of premature atrial events."
+                        "Automatic mode switching switches to a non-tracking "
+                        "mode when the atrial rate exceeds the programmed "
+                        "cutoff."
                     ),
                     "source_reference": (
-                        "Mode switching for atrial tachyarrhythmias - "
-                        "ScienceDirect.com"
+                        "Automatic Mode Switching for Atrial Tachyarrhythmias"
                     ),
                 },
             ],
@@ -349,14 +347,11 @@ def test_summary_rejects_off_domain_top_level_target_evidence_with_generic_overl
                         "tachyarrhythmia."
                     ),
                     "evidence_snippet": (
-                        "Mode switching aims to achieve an appropriate "
-                        "ventricular rate during periods of atrial arrhythmias "
-                        "by the correct detection of premature atrial events."
+                        "Automatic mode switching compares sensed atrial rate "
+                        "against the programmed cutoff and switches to a "
+                        "non-tracking mode when the cutoff is exceeded."
                     ),
-                    "source_reference": (
-                        "Mode switching for atrial tachyarrhythmias - "
-                        "ScienceDirect.com"
-                    ),
+                    "source_reference": "Automatic Mode Switching for Atrial Tachyarrhythmias",
                 }
             ],
         },
@@ -366,3 +361,96 @@ def test_summary_rejects_off_domain_top_level_target_evidence_with_generic_overl
 
     assert report["passes"] is False
     assert "target evidence too weak for core claim" in report["issues"]
+
+
+def test_summary_flags_critical_mapping_claim_that_outruns_its_snippet() -> None:
+    payload = {
+        "variable_mapping": {
+            "atrial event sampling": "premature atrial event detection",
+            "detection rate threshold": "mode-switch trigger criterion",
+            "mode-switch trigger criterion": "non-tracking ventricular pacing",
+        },
+        "mechanism": (
+            "interval-by-interval atrial event detection compares sensed atrial rates "
+            "against the mode-switch cutoff, triggering non-tracking ventricular pacing."
+        ),
+        "evidence_map": {
+            "variable_mappings": [
+                {
+                    "source_variable": "atrial event sampling",
+                    "target_variable": "premature atrial event detection",
+                    "claim": (
+                        "Pacemaker mode switching relies on correct detection of "
+                        "premature atrial events."
+                    ),
+                    "evidence_snippet": (
+                        "Mode switching aims to achieve an appropriate ventricular "
+                        "rate during periods of atrial arrhythmias by the correct "
+                        "detection of premature atrial events."
+                    ),
+                    "source_reference": (
+                        "Mode switching for atrial tachyarrhythmias - "
+                        "ScienceDirect.com"
+                    ),
+                },
+                {
+                    "source_variable": "detection rate threshold",
+                    "target_variable": "mode-switch trigger criterion",
+                    "claim": (
+                        "The pacemaker mode-switching algorithm compares detected "
+                        "atrial rates against a programmable mode-switch trigger "
+                        "criterion before changing pacing mode."
+                    ),
+                    "evidence_snippet": (
+                        "Mode switching aims to achieve an appropriate ventricular "
+                        "rate during periods of atrial arrhythmias by the correct "
+                        "detection of premature atrial events."
+                    ),
+                    "source_reference": (
+                        "Mode switching for atrial tachyarrhythmias - "
+                        "ScienceDirect.com"
+                    ),
+                },
+                {
+                    "source_variable": "mode-switch trigger criterion",
+                    "target_variable": "non-tracking ventricular pacing",
+                    "claim": (
+                        "When the atrial rate exceeds the programmed cutoff, the "
+                        "pacemaker enters a non-tracking pacing mode."
+                    ),
+                    "evidence_snippet": (
+                        "Automatic mode switching switches to a non-tracking mode "
+                        "when the atrial rate exceeds the programmed cutoff."
+                    ),
+                    "source_reference": (
+                        "Automatic Mode Switching for Atrial Tachyarrhythmias"
+                    ),
+                },
+            ],
+            "mechanism_assertions": [
+                {
+                    "mechanism_claim": (
+                        "Atrial event detection compares sensed atrial rate against "
+                        "a programmed cutoff and triggers non-tracking pacing."
+                    ),
+                    "evidence_snippet": (
+                        "Automatic mode switching switches to a non-tracking mode "
+                        "when the atrial rate exceeds the programmed cutoff."
+                    ),
+                    "source_reference": (
+                        "Automatic Mode Switching for Atrial Tachyarrhythmias"
+                    ),
+                }
+            ],
+        },
+    }
+
+    report = summarize_evidence_map_provenance(payload)
+
+    assert report["passes"] is False
+    assert any(
+        detail.get("kind") == "variable_mapping"
+        and detail.get("target_variable") == "mode-switch trigger criterion"
+        and "claim_snippet_mismatch" in (detail.get("reason_codes") or [])
+        for detail in report["failure_details"]
+    )

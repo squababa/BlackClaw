@@ -12,6 +12,7 @@ from hypothesis_validation import (
     MECHANISM_TYPE_V1_VOCAB,
     normalize_evidence_map,
     normalize_mechanism_typing,
+    summarize_evidence_map_provenance,
 )
 from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
@@ -69,6 +70,7 @@ Requirements:
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
 - Order variable_mapping so the first 3 mappings are the strongest-supported critical mappings. If more mappings are included, put weaker or less direct ones after those first 3.
+- If the retrieved target evidence only cleanly supports 3 critical mappings, keep variable_mapping to exactly those 3 instead of padding in weaker broad mappings.
 - Provide `mechanism_type` using exactly one tag from this controlled v1 vocabulary:
   {mechanism_vocab}
 - Provide `mechanism_type_confidence` as a numeric value in the 0.00-1.00 range.
@@ -79,6 +81,7 @@ Requirements:
 - The first 3 variable_mapping entries are the critical mappings, so the first 3 evidence_map.variable_mappings entries must be the strongest-supported ones and must align to those same critical mappings.
 - For each critical mapping, the claim must closely match the mapped variables, the evidence_snippet must directly support that exact claim, and the source_reference must point to the specific search result containing that snippet.
 - For critical mappings, write the claim as a direct restatement of what the evidence_snippet literally supports. Do not let the claim become broader, more abstract, or more mechanistic than the snippet itself.
+- For the first 3 critical mappings, keep the claim as a narrow paraphrase of the snippet and reuse concrete target-domain wording from the snippet where possible.
 - For critical mappings, prefer direct support over inferential support whenever possible.
 - For the first 3 critical mappings, the evidence_snippet must be specific enough to stand on its own: prefer 8+ words, at least one or two concrete overlapping terms with the claim/mapped variable, and enough local detail that it does not read like generic background context.
 - Prefer fewer, better-supported critical mappings over extra weak ones. If support is thin, keep the first 3 mappings narrow and well-supported instead of inventing broader weak critical mappings. Non-critical mappings are lower priority.
@@ -93,6 +96,9 @@ Requirements:
   - evidence_map.mechanism_assertions must include at least 1 entry with mechanism_claim, evidence_snippet, and source_reference.
   - mechanism_assertions must support the actual causal operator or control logic in the mechanism (what triggers, routes, switches, inhibits, amplifies, or accumulates), not just background context about the target domain.
   - At least one target-domain snippet or mechanism_assertion must directly support the named target-domain process or the exact metric/immediate observable consequence used in the test.
+  - Treat the evidence_snippet itself as the core proof. Do not let mechanism_claim carry stronger process language than the snippet actually supports.
+  - For the core claim, prefer one direct target-domain snippet that explicitly names the same process noun phrase or the same canonical test metric. If you only have adjacent context, background explanation, or broad domain framing, return `no_connection`.
+  - Prefer direct core target evidence over broad contextual target evidence. A weaker overview-style snippet should never be the main support if a narrower direct mechanism or metric snippet is available.
   - For the named target-domain process, `test.metric`, and the first 3 critical mappings, prefer scholarly, technical, primary, standards, or otherwise domain-credible target evidence when available.
   - Reject off-domain or generic background target evidence. If a result title or evidence_snippet is not clearly about the target domain, named process, or named metric, treat it as unusable and return `no_connection`.
   - Treat generic blogs, broad explainers, hobbyist pages, or weakly related overviews as weak evidence for the core target-domain process or metric. Do not use them as the main grounding for the core claim if reasonably domain-appropriate evidence is unavailable; return `no_connection` instead.
@@ -116,6 +122,8 @@ Requirements:
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
 - The mechanism sentence must name a specific target-domain process that is directly evidenced in the retrieved target material or mechanism assertions.
 - The first clause of `mechanism` must open with the named target-domain process noun phrase itself, not with a consequence sentence, threshold/result summary, or broad pattern description.
+- Open `mechanism` with the exact target-domain process noun phrase used in the strongest supporting evidence snippet, or a very close paraphrase of that wording.
+- Do not rename the target-domain process into a broader abstract label. If the evidence says `offset assignment`, `mode switching`, `atrial event detection`, or `token bucket refill saturation`, start from that wording.
 - The first clause should read like: `[specific target-domain process] [acts on/monitors/routes/tests] [control or monitored quantity]`, then state the discrete or measurable change that process causes.
 - Name the operative process itself, not an abstract pattern behind it. Do not stop at generic labels like threshold crossing, feedback loop, accumulation, switching, or competition without the target-domain process that performs that action.
 - Do not upgrade generic threshold, redundancy, routing, competition, or feedback language into a stronger target-domain mechanism unless the retrieved target evidence directly supports that stronger process claim.
@@ -210,6 +218,12 @@ Requirements:
 - Bad edge advantages are generic usefulness claims. Examples:
   - `This could be useful.`
   - `This may provide an edge.`
+- Good direct core target evidence explicitly names the same process or metric used in `mechanism` or `test.metric`. Examples:
+  - `Automatic mode switching compares the detected atrial rate with a programmable cutoff and switches to a non-tracking mode when the cutoff is exceeded.`
+  - `Feasible schedules are constructed by assigning offsets that satisfy collision-avoidance constraints across the hyperperiod.`
+- Bad direct core target evidence is only adjacent context or broad framing. Examples:
+  - `The article discusses how scheduling matters in real-time systems.`
+  - `The paper explains why mode switching is important in device management.`
 - Good `why_missed` explanations name one concrete reason the idea may be undernoticed. Examples:
   - `Scheduling teams usually search scheduling heuristics within scheduling literature, not combinatorial juggling notation, so this filter is cross-silo.`
   - `Doorway planning workflows often assume smooth throughput scaling and may not explicitly test for a plateau regime.`
@@ -236,7 +250,7 @@ If valid:
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
   "connection": "2-4 sentence explanation that starts with an evidence-bounded primary target-domain claim/process, then links the source-domain correspondence without broadening beyond the retrieved target evidence",
-  "mechanism": "one directly evidenced operative target-domain causal process opening with a grounded process noun phrase, then naming the operator, control/monitored variable, and resulting discrete or measurable change measured by the test",
+  "mechanism": "one directly evidenced operative target-domain causal process opening with the exact or near-exact target-domain process noun phrase from the strongest evidence snippet, then naming the operator, control/monitored variable, and resulting discrete or measurable change measured by the test",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],
@@ -704,6 +718,316 @@ def _apply_normalized_mechanism_typing(data: dict) -> dict:
     return out
 
 
+REPAIR_TERM_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "via",
+    "with",
+}
+
+
+def _repair_term_list(text: object) -> list[str]:
+    cleaned = str(text or "").lower()
+    terms: list[str] = []
+    for token in re.findall(r"[a-z0-9]+(?:[_/\-][a-z0-9]+)*", cleaned):
+        for part in re.split(r"[_/\-]+", token):
+            if len(part) < 4 or part.isdigit() or part in REPAIR_TERM_STOPWORDS:
+                continue
+            if part not in terms:
+                terms.append(part)
+    return terms
+
+
+def _repair_term_variants(token: str) -> set[str]:
+    variants = {token}
+    if len(token) < 5 or token.isdigit():
+        return variants
+
+    if token.endswith("ies") and len(token) > 6:
+        variants.add(token[:-3] + "y")
+
+    for suffix in ("ing", "ed", "ions", "ion", "es", "s"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+            variants.add(token[: -len(suffix)])
+            break
+
+    return {
+        value
+        for value in variants
+        if len(value) >= 4 and not value.isdigit()
+    }
+
+
+def _repair_term_set(text: object) -> set[str]:
+    terms: set[str] = set()
+    for token in _repair_term_list(text):
+        terms.update(_repair_term_variants(token))
+    return terms
+
+
+MECHANISM_ANCHOR_PROCESS_TERMS = {
+    "accumulat",
+    "accumulation",
+    "assign",
+    "assignment",
+    "avoidance",
+    "collision",
+    "compar",
+    "compare",
+    "compares",
+    "count",
+    "counts",
+    "cutoff",
+    "detect",
+    "detection",
+    "enforc",
+    "enforce",
+    "enforces",
+    "filter",
+    "filtering",
+    "gating",
+    "hyperperiod",
+    "inhibit",
+    "inhibition",
+    "monitor",
+    "prevent",
+    "prevents",
+    "rate",
+    "refill",
+    "route",
+    "routing",
+    "sample",
+    "sampling",
+    "saturation",
+    "slot",
+    "switch",
+    "switching",
+    "threshold",
+    "trigger",
+    "triggers",
+}
+
+
+def _process_anchor_score(text: object) -> int:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return 0
+
+    lowered = cleaned.lower()
+    if any(phrase in lowered for phrase in GENERIC_MECHANISM_FILLERS):
+        return 0
+
+    terms = _repair_term_set(cleaned)
+    if len(terms) < 3:
+        return 0
+
+    process_hits = len(terms & MECHANISM_ANCHOR_PROCESS_TERMS)
+    if process_hits == 0:
+        return 0
+
+    score = (process_hits * 3) + min(len(terms), 6)
+    if re.search(
+        r"\b(?:against|across|before|during|under|within|through|via)\b",
+        lowered,
+    ):
+        score += 1
+    if len(cleaned.split()) >= 8:
+        score += 1
+    return score
+
+
+def _mechanism_anchor_rank(candidate: dict) -> tuple[int, int, float, int]:
+    return (
+        int(candidate.get("process_score") or 0),
+        int(candidate.get("source_priority") or 0),
+        float(candidate.get("provenance_score") or 0.0),
+        len(str(candidate.get("text") or "")),
+    )
+
+
+def _phase3_repair_context(data: dict | None) -> dict:
+    payload = data if isinstance(data, dict) else {}
+    evidence_map = normalize_evidence_map(payload.get("evidence_map"))
+    provenance = summarize_evidence_map_provenance(
+        {
+            **payload,
+            "evidence_map": evidence_map,
+        }
+    )
+
+    mechanism_candidates: list[dict] = []
+
+    def _add_candidate(
+        *,
+        text: object,
+        snippet: object,
+        source_reference: object,
+        provenance_score: float,
+        source_priority: int,
+        require_process_level: bool,
+    ) -> None:
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return
+        process_score = _process_anchor_score(clean_text)
+        if require_process_level and process_score <= 0:
+            return
+        mechanism_candidates.append(
+            {
+                "text": clean_text,
+                "snippet": str(snippet or "").strip(),
+                "source_reference": str(source_reference or "").strip(),
+                "provenance_score": provenance_score,
+                "process_score": process_score,
+                "source_priority": source_priority,
+            }
+        )
+
+    for entry in provenance.get("scored_mechanism_assertions") or []:
+        if not isinstance(entry, dict):
+            continue
+        score = float(((entry.get("provenance_score") or {}).get("overall")) or 0.0)
+        _add_candidate(
+            text=entry.get("mechanism_claim"),
+            snippet=entry.get("evidence_snippet"),
+            source_reference=entry.get("source_reference"),
+            provenance_score=score,
+            source_priority=4,
+            require_process_level=False,
+        )
+        _add_candidate(
+            text=entry.get("evidence_snippet"),
+            snippet=entry.get("evidence_snippet"),
+            source_reference=entry.get("source_reference"),
+            provenance_score=score,
+            source_priority=3,
+            require_process_level=False,
+        )
+    for entry in evidence_map.get("variable_mappings", [])[:3]:
+        if not isinstance(entry, dict):
+            continue
+        _add_candidate(
+            text=entry.get("claim"),
+            snippet=entry.get("evidence_snippet"),
+            source_reference=entry.get("source_reference"),
+            provenance_score=0.0,
+            source_priority=2,
+            require_process_level=True,
+        )
+        _add_candidate(
+            text=entry.get("evidence_snippet"),
+            snippet=entry.get("evidence_snippet"),
+            source_reference=entry.get("source_reference"),
+            provenance_score=0.0,
+            source_priority=1,
+            require_process_level=True,
+        )
+    if str(payload.get("evidence") or "").strip():
+        _add_candidate(
+            text=payload.get("evidence"),
+            snippet="",
+            source_reference="",
+            provenance_score=0.0,
+            source_priority=0,
+            require_process_level=False,
+        )
+
+    mechanism_anchor = max(
+        (
+            candidate
+            for candidate in mechanism_candidates
+            if candidate.get("text")
+        ),
+        key=_mechanism_anchor_rank,
+        default=None,
+    )
+
+    critical_failures: list[dict] = []
+    for detail in provenance.get("failure_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        if str(detail.get("kind") or "").strip() != "variable_mapping":
+            continue
+        source_variable = str(detail.get("source_variable") or "").strip()
+        target_variable = str(detail.get("target_variable") or "").strip()
+        pair = " -> ".join(part for part in (source_variable, target_variable) if part)
+        critical_failures.append(
+            {
+                "pair": pair,
+                "reason_codes": [
+                    str(code).strip()
+                    for code in (detail.get("reason_codes") or [])
+                    if str(code).strip()
+                ],
+                "claim": str(detail.get("claim") or "").strip(),
+                "evidence_snippet": str(detail.get("evidence_snippet") or "").strip(),
+                "source_reference": str(detail.get("source_reference") or "").strip(),
+            }
+        )
+
+    missing_critical_pairs = []
+    for item in provenance.get("missing_critical_mappings") or []:
+        if not isinstance(item, dict):
+            continue
+        source_variable = str(item.get("source_variable") or "").strip()
+        target_variable = str(item.get("target_variable") or "").strip()
+        pair = " -> ".join(part for part in (source_variable, target_variable) if part)
+        if pair:
+            missing_critical_pairs.append(pair)
+
+    mechanism_text = str(payload.get("mechanism") or "").strip()
+    mechanism_terms = set()
+    for token in _repair_term_list(mechanism_text)[:5]:
+        mechanism_terms.update(_repair_term_variants(token))
+    mechanism_overlap = 0
+    for candidate in mechanism_candidates:
+        candidate_terms = _repair_term_set(
+            " ".join(
+                part
+                for part in (
+                    candidate.get("text"),
+                    candidate.get("snippet"),
+                    candidate.get("source_reference"),
+                )
+                if part
+            )
+        )
+        mechanism_overlap = max(
+            mechanism_overlap,
+            len(mechanism_terms & candidate_terms),
+        )
+
+    return {
+        "provenance": provenance,
+        "mechanism_anchor": mechanism_anchor,
+        "critical_failures": critical_failures,
+        "missing_critical_pairs": missing_critical_pairs,
+        "mechanism_overlap": mechanism_overlap,
+    }
+
+
 def _missing_required_fields(data: dict) -> list[str]:
     def _is_non_empty(value: object) -> bool:
         if isinstance(value, str):
@@ -921,6 +1245,17 @@ def _missing_required_fields(data: dict) -> list[str]:
                 return True
         return False
 
+    def _mechanism_anchor_needs_repair(repair_context: dict) -> bool:
+        mechanism = str(data.get("mechanism") or "").strip()
+        if not mechanism:
+            return True
+        if _mechanism_needs_repair(mechanism):
+            return True
+        mechanism_terms = _repair_term_list(mechanism)[:5]
+        if len(mechanism_terms) < 2:
+            return True
+        return int(repair_context.get("mechanism_overlap") or 0) == 0
+
     def _prediction_missing_fields(prediction: object) -> list[str]:
         if not isinstance(prediction, dict):
             return [
@@ -1017,21 +1352,78 @@ def _missing_required_fields(data: dict) -> list[str]:
     if not _is_non_empty(data.get("evidence")):
         missing.append("evidence")
     evidence_map = normalize_evidence_map(data.get("evidence_map"))
+    repair_context = _phase3_repair_context(
+        {
+            **data,
+            "evidence_map": evidence_map,
+        }
+    )
+    provenance = (
+        repair_context.get("provenance")
+        if isinstance(repair_context.get("provenance"), dict)
+        else {}
+    )
+    critical_failure_codes = {
+        code
+        for failure in (repair_context.get("critical_failures") or [])
+        if isinstance(failure, dict)
+        for code in (failure.get("reason_codes") or [])
+        if str(code).strip()
+    }
     if len(evidence_map.get("variable_mappings", [])) < 3:
         missing.append("evidence_map.variable_mappings")
-    elif _critical_evidence_snippets_need_repair(evidence_map):
+    elif (
+        _critical_evidence_snippets_need_repair(evidence_map)
+        or int(provenance.get("supported_critical_mapping_count") or 0) < 3
+        or bool(repair_context.get("missing_critical_pairs"))
+        or bool(
+            critical_failure_codes
+            & {
+                "claim_snippet_mismatch",
+                "vague_snippet",
+                "missing_source_reference",
+                "low_overall_provenance_quality",
+            }
+        )
+    ):
         missing.append("evidence_map.variable_mappings")
     if len(evidence_map.get("mechanism_assertions", [])) < 1:
         missing.append("evidence_map.mechanism_assertions")
-    return missing
+    elif int(provenance.get("supported_mechanism_assertion_count") or 0) < int(
+        provenance.get("required_mechanism_assertion_count") or 0
+    ):
+        missing.append("evidence_map.mechanism_assertions")
+    if _mechanism_anchor_needs_repair(repair_context):
+        missing.append("mechanism")
+    deduped_missing: list[str] = []
+    for field in missing:
+        if field not in deduped_missing:
+            deduped_missing.append(field)
+    return deduped_missing
 
 
-def _repair_guidance_for_missing_fields(missing_fields: list[str]) -> str:
+def _repair_guidance_for_missing_fields(
+    missing_fields: list[str],
+    *,
+    original_data: dict | None = None,
+) -> str:
     guidance: list[str] = []
+    repair_context = _phase3_repair_context(original_data)
+    mechanism_anchor = (
+        repair_context.get("mechanism_anchor")
+        if isinstance(repair_context.get("mechanism_anchor"), dict)
+        else {}
+    )
     if any(field == "mechanism" for field in missing_fields):
         guidance.append(
             "- Rewrite `mechanism` as one process-first sentence that opens with the exact target-domain process noun phrase, then names the operator, monitored/control variable, and resulting measurable change. Do not start with `when`, `as`, `if`, or a result summary."
         )
+        anchor_text = str(mechanism_anchor.get("text") or "").strip()
+        if anchor_text:
+            guidance.append(
+                "- Pull the opening noun phrase of `mechanism` directly from target-domain evidence wording. Best available anchor: "
+                f"`{anchor_text}`."
+            )
     if any(field in {"test", "test.metric"} for field in missing_fields):
         guidance.append(
             "- Rewrite `test` so `metric` names one concrete literature-facing quantity, not placeholders like `performance`, `efficiency`, or `outcomes`. Make `confirm` and `falsify` explicitly refer to that same metric."
@@ -1064,6 +1456,43 @@ def _repair_guidance_for_missing_fields(missing_fields: list[str]) -> str:
         guidance.append(
             "- Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause with concrete overlapping terms from the claim or mapped variable. Do not use vague background snippets."
         )
+        guidance.append(
+            "- Repair the critical mappings before touching non-critical ones. Keep exactly 3 critical mappings if support is thin, and make those the first 3 `variable_mapping` plus `evidence_map.variable_mappings` entries."
+        )
+        for failure in (repair_context.get("critical_failures") or [])[:3]:
+            if not isinstance(failure, dict):
+                continue
+            pair = str(failure.get("pair") or "").strip()
+            codes = ", ".join(
+                str(code).strip()
+                for code in (failure.get("reason_codes") or [])
+                if str(code).strip()
+            )
+            claim = str(failure.get("claim") or "").strip()
+            snippet = str(failure.get("evidence_snippet") or "").strip()
+            if pair:
+                guidance.append(
+                    f"- Critical mapping to rewrite first: `{pair}`"
+                    + (f" (`{codes}`)." if codes else ".")
+                )
+            if claim:
+                guidance.append(f"  Current claim: `{claim}`.")
+            if snippet:
+                guidance.append(f"  Current snippet: `{snippet}`.")
+        missing_pairs = [
+            str(pair).strip()
+            for pair in (repair_context.get("missing_critical_pairs") or [])
+            if str(pair).strip()
+        ]
+        if missing_pairs:
+            guidance.append(
+                "- Missing critical mapping support that must be restored first: "
+                + ", ".join(f"`{pair}`" for pair in missing_pairs[:3])
+                + "."
+            )
+        guidance.append(
+            "- For each repaired critical mapping, make the claim a narrow paraphrase of the snippet. If a mapping cannot be supported directly, weaken it or move/drop it instead of keeping it in the first 3."
+        )
     if not guidance:
         return ""
     return "\nExtra repair rules:\n" + "\n".join(guidance)
@@ -1073,11 +1502,16 @@ def _build_repair_prompt(
     full_prompt: str,
     original_json: str,
     missing_fields: list[str],
+    *,
+    original_data: dict | None = None,
 ) -> str:
     repair_prompt = MISSING_FIELDS_REPAIR_PROMPT.format(
         missing_fields=", ".join(missing_fields)
     )
-    repair_guidance = _repair_guidance_for_missing_fields(missing_fields)
+    repair_guidance = _repair_guidance_for_missing_fields(
+        missing_fields,
+        original_data=original_data,
+    )
     return (
         f"{repair_prompt}{repair_guidance}\n\nOriginal instruction:\n{full_prompt}\n\nOriginal JSON:\n{original_json}"
     )
@@ -1087,8 +1521,15 @@ def _repair_missing_fields(
     full_prompt: str,
     original_json: str,
     missing_fields: list[str],
+    *,
+    original_data: dict | None = None,
 ) -> dict | None:
-    repair_prompt = _build_repair_prompt(full_prompt, original_json, missing_fields)
+    repair_prompt = _build_repair_prompt(
+        full_prompt,
+        original_json,
+        missing_fields,
+        original_data=original_data,
+    )
     try:
         response = _llm_client.generate_content(
             repair_prompt,
@@ -1176,7 +1617,12 @@ def _stage_two_hypothesize(
     data = _apply_normalized_mechanism_typing(data)
     missing_fields = _missing_required_fields(data)
     if missing_fields:
-        repaired = _repair_missing_fields(prompt, extracted_json, missing_fields)
+        repaired = _repair_missing_fields(
+            prompt,
+            extracted_json,
+            missing_fields,
+            original_data=data,
+        )
         if repaired is None or repaired.get("no_connection", True):
             return None
         repaired = _apply_normalized_mechanism_typing(repaired)
