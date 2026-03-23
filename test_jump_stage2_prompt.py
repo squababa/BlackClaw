@@ -571,3 +571,39 @@ def test_salvage_high_value_candidate_keeps_nonmechanism_fields_stable_during_me
     assert repaired["prediction"] == payload["prediction"]
     assert repaired["test"] == payload["test"]
     assert repaired["edge_analysis"] == payload["edge_analysis"]
+
+
+def test_salvage_high_value_candidate_adds_benchmark_conversion_guidance(
+    monkeypatch,
+) -> None:
+    payload = _valid_stage2_payload()
+    captured: dict[str, object] = {}
+
+    def fake_repair(
+        full_prompt: str,
+        _original_json: str,
+        _missing_fields: list[str],
+        *,
+        original_data: dict | None = None,
+    ) -> dict:
+        captured["prompt"] = full_prompt
+        captured["original_data"] = original_data
+        return {"mechanism": payload["mechanism"]}
+
+    monkeypatch.setattr(jump, "_repair_missing_fields", fake_repair)
+
+    repaired = jump.salvage_high_value_candidate(
+        payload,
+        ["mechanism"],
+        failure_reasons=["mechanism must name a specific process"],
+        benchmark_profile={
+            "benchmark_edge_candidate": True,
+            "operator_value_shape": "threshold tuning",
+            "remaining_blocker_category": "benchmark_packaging",
+        },
+    )
+
+    assert repaired is not None
+    assert "Benchmark conversion priority:" in captured["prompt"]
+    assert "threshold tuning" in captured["prompt"]
+    assert "benchmark_packaging" in captured["prompt"]

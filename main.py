@@ -184,6 +184,64 @@ PHASE6_EDGE_LAYER_FIELDS = (
     "edge_analysis.cheap_test",
     "edge_analysis.edge_if_right",
 )
+BENCHMARK_REPAIRABLE_BLOCKER_CATEGORIES = {
+    "mechanism_packaging",
+    "operator_edge_packaging",
+    "benchmark_packaging",
+}
+BENCHMARK_OPERATOR_VALUE_SHAPES = (
+    (
+        "normalization audit",
+        (
+            "normalization",
+            "normalized score",
+            "reference range",
+            "reference boundary",
+            "divisor",
+            "vendor",
+            "misclassification",
+        ),
+    ),
+    (
+        "threshold tuning",
+        (
+            "threshold",
+            "pre-conditioning",
+            "preconditioning",
+            "pulse",
+            "voltage",
+            "switching",
+            "field-induced",
+            "field accumulation",
+        ),
+    ),
+    (
+        "workflow replay",
+        (
+            "replay",
+            "queue",
+            "backlog",
+            "subset",
+            "rollout",
+            "holdout",
+            "compare",
+            "rerank",
+            "triage",
+        ),
+    ),
+    (
+        "screening or filter intervention",
+        (
+            "filter",
+            "screen",
+            "gate",
+            "threshold",
+            "audit",
+            "prioritize",
+            "route",
+        ),
+    ),
+)
 
 
 def _dedupe_preserving_order(values: list[str]) -> list[str]:
@@ -2452,9 +2510,199 @@ def _replay_stage_failures_display(
     return effective, schema_era
 
 
+def _replay_remaining_blocker_category(blockers: list[str]) -> str:
+    """Collapse replay blockers into one operator-facing category."""
+    cleaned_blockers = [
+        (_clean_strong_rejection_reason_text(blocker) or str(blocker).strip()).lower()
+        for blocker in blockers or []
+        if str(blocker).strip()
+    ]
+    has_provenance = any(
+        blocker.startswith("claim_provenance:")
+        or blocker.startswith("provenance:")
+        or "evidence_map" in blocker
+        or "source_reference" in blocker
+        or "claim_snippet_mismatch" in blocker
+        for blocker in cleaned_blockers
+    )
+    if has_provenance:
+        return "provenance_control"
+
+    has_mechanism = any(
+        "mechanism must name a specific process" in blocker
+        or "mechanism typing" in blocker
+        or "mechanism_type" in blocker
+        for blocker in cleaned_blockers
+    )
+    has_edge = any(
+        blocker.startswith("usefulness:")
+        or "edge_analysis" in blocker
+        for blocker in cleaned_blockers
+    )
+    if has_mechanism and has_edge:
+        return "benchmark_packaging"
+    if has_mechanism:
+        return "mechanism_packaging"
+    if has_edge:
+        return "operator_edge_packaging"
+    if any(blocker.startswith("below_threshold:") for blocker in cleaned_blockers):
+        return "score_threshold"
+    if any("evidence" in blocker for blocker in cleaned_blockers):
+        return "transmit_evidence"
+    if any(blocker.startswith("adversarial:") for blocker in cleaned_blockers):
+        return "adversarial_stress"
+    if any(blocker.startswith("invariance:") for blocker in cleaned_blockers):
+        return "invariance_stress"
+    if any(
+        blocker.startswith("distance:") or blocker.startswith("novelty:")
+        for blocker in cleaned_blockers
+    ):
+        return "novelty_distance"
+    return "other"
+
+
+def _benchmark_operator_value_shape(connection: dict | None) -> str | None:
+    """Infer the operator-value pattern already present in a replay payload."""
+    payload = connection if isinstance(connection, dict) else {}
+    edge_analysis = normalize_edge_analysis(payload)
+    cheap_test = (
+        edge_analysis.get("cheap_test")
+        if isinstance(edge_analysis.get("cheap_test"), dict)
+        else {}
+    )
+    has_edge_text = any(
+        _clean_inline_text(edge_analysis.get(field))
+        for field in (
+            "problem_statement",
+            "actionable_lever",
+            "edge_if_right",
+            "why_missed",
+            "expected_asymmetry",
+            "primary_operator",
+        )
+    ) or any(
+        _clean_inline_text(cheap_test.get(field))
+        for field in ("setup", "metric", "confirm", "falsify")
+    )
+    if not has_edge_text:
+        return None
+    combined_text = " ".join(
+        str(item).strip()
+        for item in (
+            payload.get("mechanism"),
+            edge_analysis.get("problem_statement"),
+            edge_analysis.get("actionable_lever"),
+            cheap_test.get("setup"),
+            cheap_test.get("metric"),
+            edge_analysis.get("edge_if_right"),
+            payload.get("target_domain"),
+        )
+        if str(item).strip()
+    ).lower()
+    if not combined_text:
+        return None
+
+    for shape, keywords in BENCHMARK_OPERATOR_VALUE_SHAPES:
+        if any(keyword in combined_text for keyword in keywords):
+            return shape
+    return "workflow intervention"
+
+
+def _strong_rejection_replay_benchmark_profile(
+    *,
+    replay_context: dict | None,
+    connection: dict | None,
+    total_score: float | None,
+    threshold: float,
+    blocker_reasons: list[str],
+    claim_provenance: dict | None,
+) -> dict | None:
+    """Classify whether a replayed strong rejection looks like a benchmark edge candidate."""
+    context = replay_context if isinstance(replay_context, dict) else {}
+    if context.get("mode") != "strong_rejection_replay":
+        return None
+
+    payload = connection if isinstance(connection, dict) else {}
+    edge_analysis = normalize_edge_analysis(payload)
+    cheap_test = (
+        edge_analysis.get("cheap_test")
+        if isinstance(edge_analysis.get("cheap_test"), dict)
+        else {}
+    )
+    alignment = summarize_edge_usefulness_alignment(payload, payload)
+    why_missed = _usefulness_first_present(edge_analysis.get("why_missed")) or ""
+    expected_asymmetry = _usefulness_first_present(
+        edge_analysis.get("expected_asymmetry")
+    ) or ""
+    known_or_obvious = _usefulness_contains_phrase(
+        why_missed, USEFULNESS_KNOWNNESS_MARKERS
+    ) or _usefulness_contains_phrase(
+        expected_asymmetry, USEFULNESS_KNOWNNESS_MARKERS
+    )
+    underexploited_signal = not known_or_obvious and (
+        bool(why_missed.strip())
+        or bool(expected_asymmetry.strip())
+        or _usefulness_contains_phrase(why_missed, USEFULNESS_UNDEREXPLOITED_HINTS)
+        or _usefulness_contains_phrase(
+            expected_asymmetry, USEFULNESS_UNDEREXPLOITED_HINTS
+        )
+    )
+    operator_edge_present = all(
+        _clean_inline_text(edge_analysis.get(field))
+        for field in (
+            "problem_statement",
+            "actionable_lever",
+            "edge_if_right",
+            "primary_operator",
+        )
+    ) and all(
+        _clean_inline_text(cheap_test.get(field))
+        for field in ("setup", "metric", "confirm", "falsify")
+    ) and (
+        bool(alignment.get("problem_aligned"))
+        or bool(alignment.get("actionable_lever_aligned"))
+        or bool(alignment.get("cheap_test_operator_move"))
+    )
+
+    blocker_category = _replay_remaining_blocker_category(blocker_reasons)
+    operator_value_shape = _benchmark_operator_value_shape(payload)
+    provenance_ok = bool(
+        isinstance(claim_provenance, dict) and claim_provenance.get("passes")
+    )
+    current_score = float(total_score) if total_score is not None else None
+    stored_score = context.get("stored_original_total_score")
+    stored_score = (
+        float(stored_score) if isinstance(stored_score, (int, float)) else None
+    )
+    candidate_score = max(
+        score for score in (current_score, stored_score) if score is not None
+    ) if any(score is not None for score in (current_score, stored_score)) else 0.0
+    score_ok = candidate_score >= max(float(threshold), PHASE6_SALVAGE_SCORE_FLOOR)
+
+    benchmark_edge_candidate = bool(
+        score_ok
+        and provenance_ok
+        and blocker_category in BENCHMARK_REPAIRABLE_BLOCKER_CATEGORIES
+        and operator_edge_present
+        and underexploited_signal
+        and operator_value_shape
+    )
+
+    return {
+        "benchmark_edge_candidate": benchmark_edge_candidate,
+        "operator_value_shape": operator_value_shape,
+        "remaining_blocker_category": blocker_category,
+        "provenance_control_case": blocker_category == "provenance_control",
+        "operator_edge_present": operator_edge_present,
+        "underexploited_signal": underexploited_signal,
+        "known_or_obvious": known_or_obvious,
+    }
+
+
 def _build_strong_rejection_replay_diagnostics(
     *,
     replay_context: dict | None,
+    connection: dict | None,
     stage_failures: list[str],
     legacy_profile: dict | None,
     legacy_reasons: list[str],
@@ -2462,6 +2710,7 @@ def _build_strong_rejection_replay_diagnostics(
     salvage_applied: bool,
     total_score: float | None,
     threshold: float,
+    claim_provenance: dict | None,
 ) -> dict | None:
     """Summarize replay-only failure families without changing live evaluation."""
     context = replay_context if isinstance(replay_context, dict) else {}
@@ -2479,6 +2728,14 @@ def _build_strong_rejection_replay_diagnostics(
     current_display, legacy_display = _replay_stage_failures_display(
         stage_failures,
         legacy_reasons=legacy_reasons,
+    )
+    benchmark_profile = _strong_rejection_replay_benchmark_profile(
+        replay_context=replay_context,
+        connection=connection,
+        total_score=total_score,
+        threshold=threshold,
+        blocker_reasons=current_display or stage_failures,
+        claim_provenance=claim_provenance,
     )
     current_clean = [
         _clean_strong_rejection_reason_text(reason) or str(reason).strip()
@@ -2526,6 +2783,16 @@ def _build_strong_rejection_replay_diagnostics(
             salvage_attempted and not salvage_applied
         ),
         "salvage_used_original_score": salvage_used_original_score,
+        "benchmark_edge_candidate": bool(
+            (benchmark_profile or {}).get("benchmark_edge_candidate")
+        ),
+        "operator_value_shape": (benchmark_profile or {}).get("operator_value_shape"),
+        "remaining_blocker_category": (
+            benchmark_profile or {}
+        ).get("remaining_blocker_category"),
+        "provenance_control_case": bool(
+            (benchmark_profile or {}).get("provenance_control_case")
+        ),
     }
 
 
@@ -2774,6 +3041,18 @@ def _replay_strong_rejection(rejection_id: int, threshold: float) -> bool:
     print(
         "new_current_pipeline_failure\t"
         f"{'yes' if replay_diagnostics.get('new_current_pipeline_failures') else 'no'}"
+    )
+    print(
+        "benchmark_edge_candidate\t"
+        f"{'yes' if replay_diagnostics.get('benchmark_edge_candidate') else 'no'}"
+    )
+    print(
+        "operator_value_shape\t"
+        f"{replay_diagnostics.get('operator_value_shape') or '—'}"
+    )
+    print(
+        "remaining_blocker_category\t"
+        f"{replay_diagnostics.get('remaining_blocker_category') or '—'}"
     )
     if replay_diagnostics.get("salvage_used_original_score"):
         print("salvage_eligibility_score_source\tstored_original_total_score")
@@ -6981,10 +7260,25 @@ def _evaluate_connection_candidate(
                     f"{index}/{len(salvage_stages)} "
                     f"({stage_name}): {', '.join(stage_fields)}"
                 )
+                salvage_kwargs = {
+                    "failure_reasons": stage_reasons,
+                }
+                stage_benchmark_profile = _strong_rejection_replay_benchmark_profile(
+                    replay_context=replay_context,
+                    connection=working_connection,
+                    total_score=scores.get("total"),
+                    threshold=threshold,
+                    blocker_reasons=stage_reasons,
+                    claim_provenance=claim_provenance,
+                )
+                if stage_benchmark_profile and stage_benchmark_profile.get(
+                    "benchmark_edge_candidate"
+                ):
+                    salvage_kwargs["benchmark_profile"] = stage_benchmark_profile
                 salvaged_connection = salvage_high_value_candidate(
                     working_connection,
                     stage_fields,
-                    failure_reasons=stage_reasons,
+                    **salvage_kwargs,
                 )
                 if salvaged_connection is None:
                     salvage_stage_attempts.append(
@@ -7361,6 +7655,7 @@ def _evaluate_connection_candidate(
     )
     replay_diagnostics = _build_strong_rejection_replay_diagnostics(
         replay_context=replay_context,
+        connection=connection,
         stage_failures=stage_failures,
         legacy_profile=replay_legacy_profile,
         legacy_reasons=replay_legacy_reasons,
@@ -7368,6 +7663,7 @@ def _evaluate_connection_candidate(
         salvage_applied=salvage_applied,
         total_score=scores.get("total"),
         threshold=threshold,
+        claim_provenance=claim_provenance,
     )
 
     finalized_late_stage_timing = _finalize_late_stage_timing(late_stage_timing)

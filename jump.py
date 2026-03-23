@@ -1847,6 +1847,48 @@ def _requested_salvage_fields_still_missing(
     return unresolved
 
 
+def _benchmark_salvage_guidance(benchmark_profile: dict | None) -> str:
+    """Add narrow operator-edge guidance for replay benchmark candidates."""
+    profile = benchmark_profile if isinstance(benchmark_profile, dict) else {}
+    if not profile.get("benchmark_edge_candidate"):
+        return ""
+
+    operator_value_shape = str(profile.get("operator_value_shape") or "").strip()
+    blocker_category = str(profile.get("remaining_blocker_category") or "").strip()
+    guidance = [
+        "Benchmark conversion priority:",
+        "- This replay candidate already appears to contain real operator edge. Preserve that edge rather than broadening the claim into a generic research framing.",
+    ]
+    if operator_value_shape:
+        guidance.append(
+            f"- Current operator value shape: `{operator_value_shape}`."
+        )
+    if blocker_category:
+        guidance.append(
+            f"- Current blocker category: `{blocker_category}`. Repair only the packaging/alignment needed to clear that blocker."
+        )
+    guidance.append(
+        "- Keep the same target-domain operator, metric, comparator, and workflow slice already grounded by `prediction`, `test`, and `edge_analysis`."
+    )
+    if blocker_category in {"operator_edge_packaging", "benchmark_packaging"}:
+        guidance.append(
+            "- When rewriting the edge layer, keep `cheap_test` as one narrow operator move such as a replay, audit, filter, or controlled compare on an existing workflow slice."
+        )
+    if blocker_category in {"mechanism_packaging", "benchmark_packaging"}:
+        guidance.append(
+            "- When rewriting `mechanism`, keep the same measurable target-domain process and do not drift into broader explanatory prose."
+        )
+    if operator_value_shape == "threshold tuning":
+        guidance.append(
+            "- Keep the edge framed as threshold calibration or tuning on the existing switching metric, not as a generic materials-study hypothesis."
+        )
+    elif operator_value_shape == "normalization audit":
+        guidance.append(
+            "- Keep the edge framed as a normalization or decision-threshold audit for the same borderline-value workflow, not as a generic informatics quality-improvement claim."
+        )
+    return "\n".join(guidance) + "\n"
+
+
 def _repair_missing_fields(
     full_prompt: str,
     original_json: str,
@@ -1892,6 +1934,7 @@ def salvage_high_value_candidate(
     missing_fields: list[str],
     *,
     failure_reasons: list[str] | None = None,
+    benchmark_profile: dict | None = None,
 ) -> dict | None:
     """Run one selective Phase 6 salvage rewrite for a strong near-miss."""
     if not isinstance(original_data, dict) or not missing_fields:
@@ -1906,6 +1949,7 @@ def salvage_high_value_candidate(
         guidance_prompt += (
             "\nCurrent blockers:\n- " + "\n- ".join(normalized_reasons[:6]) + "\n"
         )
+    guidance_prompt += _benchmark_salvage_guidance(benchmark_profile)
     repaired = _repair_missing_fields(
         guidance_prompt,
         json.dumps(original_data, ensure_ascii=False, sort_keys=True),
