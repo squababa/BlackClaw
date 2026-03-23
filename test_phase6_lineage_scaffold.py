@@ -180,6 +180,211 @@ def _build_strong_rejection_candidate() -> dict:
     }
 
 
+def _build_benchmark_replay_connection(
+    *,
+    operator_value_shape: str = "threshold tuning",
+) -> dict:
+    if operator_value_shape == "normalization audit":
+        return {
+            "source_domain": "Optical Illusions",
+            "target_domain": "Laboratory test value normalization in clinical informatics",
+            "connection": (
+                "Reference range normalization can rescale identical raw values into "
+                "different clinical scores when the imported boundary changes."
+            ),
+            "mechanism": (
+                "Reference range rescaling divides the same raw laboratory value by "
+                "the currently imported upper boundary, changing the normalized score "
+                "and decision classification when that boundary differs across vendor "
+                "or subgroup reference pools."
+            ),
+            "prediction": {
+                "observable": "normalized score for a fixed borderline raw value",
+                "time_horizon": "immediate at formula application time",
+                "direction": "higher",
+                "magnitude": (
+                    "The normalized score increases when the imported upper "
+                    "reference boundary is narrower."
+                ),
+                "confidence": "high",
+                "falsification_condition": (
+                    "Normalized scores do not change when the upper reference "
+                    "boundary changes for the same raw value."
+                ),
+                "utility_rationale": (
+                    "Clinical teams can catch silent threshold drift before a "
+                    "decision rule reclassifies borderline patients."
+                ),
+                "who_benefits": "clinical informatics teams",
+            },
+            "test": {
+                "data": "One fixed borderline raw value evaluated across imported reference boundaries.",
+                "metric": "normalized score",
+                "horizon": "same day in an EHR extract",
+                "confirm": (
+                    "The normalized score changes across imported reference boundaries "
+                    "for the same raw value."
+                ),
+                "falsify": (
+                    "The normalized score remains invariant across imported reference "
+                    "boundaries for the same raw value."
+                ),
+            },
+            "edge_analysis": {
+                "problem_statement": (
+                    "Normalized-score decision rules can silently misclassify "
+                    "borderline patients when vendor-specific reference boundaries "
+                    "change the divisor used in the rescaling formula."
+                ),
+                "why_missed": (
+                    "Normalization reviews usually check unit algebra, not whether "
+                    "imported reference boundaries rescale identical raw values "
+                    "differently across vendor feeds."
+                ),
+                "actionable_lever": (
+                    "Audit one high-volume test by comparing the normalized score for "
+                    "the same borderline raw value across all imported reference "
+                    "boundaries before deploying the rule."
+                ),
+                "cheap_test": {
+                    "setup": (
+                        "Audit the active vendor reference boundaries for one "
+                        "high-volume test and compare the normalized score for one "
+                        "borderline raw value across those boundaries."
+                    ),
+                    "metric": "normalized score",
+                    "confirm": (
+                        "The normalized score crosses the rule threshold for at least "
+                        "one imported boundary while staying below it for another."
+                    ),
+                    "falsify": (
+                        "The normalized score stays on the same side of the rule "
+                        "threshold across all imported boundaries."
+                    ),
+                    "time_to_signal": "same day from one EHR extract",
+                },
+                "edge_if_right": (
+                    "Clinical informatics leads can catch reference-boundary-driven "
+                    "misclassification before the decision rule goes live."
+                ),
+                "expected_asymmetry": (
+                    "Vendor import drift and divisor-pool effects are rarely reviewed "
+                    "as a borderline-value audit problem."
+                ),
+                "primary_operator": "clinical informatics lead",
+                "deployment_scope": "one high-volume lab normalization rule",
+            },
+            "evidence_map": {
+                "variable_mappings": [],
+                "mechanism_assertions": [],
+            },
+            "mechanism_typing": {
+                "mechanism_type": "saturation",
+                "mechanism_type_confidence": 0.71,
+                "secondary_mechanism_types": [],
+            },
+            "mechanism_type": "saturation",
+        }
+
+    return {
+        "source_domain": "Mushroom Foraging",
+        "target_domain": "Phase-change memory threshold switching",
+        "connection": (
+            "Sub-threshold field history can lower the effective switching threshold "
+            "in phase-change memory."
+        ),
+        "mechanism": (
+            "Field accumulation in the amorphous phase lowers the effective switching "
+            "threshold once repeated sub-threshold pulses push the device toward the "
+            "crystallization boundary."
+        ),
+        "prediction": {
+            "observable": "threshold switching voltage",
+            "time_horizon": "within one device-characterization session",
+            "direction": "lower",
+            "magnitude": (
+                "The mean threshold switching voltage drops after sub-threshold "
+                "pre-conditioning pulses."
+            ),
+            "confidence": "medium",
+            "falsification_condition": (
+                "The mean threshold switching voltage does not change after "
+                "sub-threshold pre-conditioning pulses."
+            ),
+            "utility_rationale": (
+                "Device engineers can tune write protocols to reduce switching energy "
+                "without changing array architecture."
+            ),
+            "who_benefits": "phase-change memory device engineers",
+        },
+        "test": {
+            "data": "Compare naive cells against pre-conditioned cells under the same final pulse.",
+            "metric": "threshold switching voltage",
+            "horizon": "1-2 days in one characterization run",
+            "confirm": (
+                "The mean threshold switching voltage is lower after sub-threshold "
+                "pre-conditioning pulses."
+            ),
+            "falsify": (
+                "The mean threshold switching voltage is unchanged after "
+                "sub-threshold pre-conditioning pulses."
+            ),
+        },
+        "edge_analysis": {
+            "problem_statement": (
+                "Write-energy tuning can miss effective threshold drift when "
+                "characterization protocols treat switching voltage as a fixed "
+                "material constant."
+            ),
+            "why_missed": (
+                "Standard characterization resets the cell before measuring the "
+                "threshold, which screens out accumulation-sensitive pre-history."
+            ),
+            "actionable_lever": (
+                "Compare naive cells against a small pre-conditioned subset before "
+                "locking the write-voltage margin."
+            ),
+            "cheap_test": {
+                "setup": (
+                    "Compare one small batch of naive cells against pre-conditioned "
+                    "cells by replaying a fixed sub-threshold pulse sequence before "
+                    "the final threshold sweep."
+                ),
+                "metric": "threshold switching voltage",
+                "confirm": (
+                    "The pre-conditioned subset shows a lower mean threshold "
+                    "switching voltage."
+                ),
+                "falsify": (
+                    "The pre-conditioned subset shows no lower mean threshold "
+                    "switching voltage."
+                ),
+                "time_to_signal": "1-2 days in lab",
+            },
+            "edge_if_right": (
+                "PCM engineers can lower write-voltage margin and switching energy "
+                "without redesigning the array."
+            ),
+            "expected_asymmetry": (
+                "Sub-threshold history is rarely treated as a tuning lever in the "
+                "standard threshold-characterization workflow."
+            ),
+            "primary_operator": "PCM device engineer",
+            "deployment_scope": "one GST write-voltage characterization workflow",
+        },
+        "evidence_map": {
+            "variable_mappings": [],
+            "mechanism_assertions": [],
+        },
+        "mechanism_typing": {
+            "mechanism_type": "threshold_switching",
+            "mechanism_type_confidence": 0.91,
+            "secondary_mechanism_types": ["phase_transition"],
+        },
+        "mechanism_type": "threshold_switching",
+    }
+
+
 def _save_legacy_strong_rejection(
     db_path,
     *,
@@ -1035,6 +1240,192 @@ def test_replay_stages_narrow_mechanism_rescue_before_failed_edge_rewrite(
     assert "[StrongRejectionReplay] Verdict: salvage then fail later" in output
     assert "salvage_attempted\tyes" in output
     assert "salvage_applied\tyes" in output
+
+
+def test_replay_reports_benchmark_candidate_diagnostics_for_operator_edge_near_miss(
+    temp_db, monkeypatch, capsys
+) -> None:
+    exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="Mushroom Foraging",
+        target_domain="Phase-change memory threshold switching",
+    )
+    payload = _build_benchmark_replay_connection()
+    rejection_id = store.save_strong_rejection(
+        exploration_id=exploration_id,
+        seed_domain="Mushroom Foraging",
+        target_domain="Phase-change memory threshold switching",
+        total_score=0.928,
+        novelty_score=0.81,
+        distance_score=0.74,
+        depth_score=0.79,
+        prediction_quality_score=0.88,
+        mechanism_type=payload["mechanism_type"],
+        rejection_stage="mechanism_typing",
+        rejection_reasons=[
+            "usefulness:weak_claim_evidence_alignment",
+            "usefulness:missing_cheap_test",
+        ],
+        salvage_reason="revisit: mechanism packaging fail",
+        connection_payload=payload,
+        validation={
+            "passed": False,
+            "rejection_reasons": [
+                "usefulness:weak_claim_evidence_alignment",
+                "usefulness:missing_cheap_test",
+            ],
+            "claim_provenance": {"passes": True, "issues": []},
+            "mechanism_typing": payload["mechanism_typing"],
+        },
+        evidence_map=payload["evidence_map"],
+        mechanism_typing=payload["mechanism_typing"],
+    )
+
+    monkeypatch.setattr(
+        main,
+        "score_connection",
+        lambda *_args, **_kwargs: {
+            "total": 0.928,
+            "depth": 0.79,
+            "distance": 0.74,
+            "novelty": 0.81,
+            "prediction_quality": {"passes": True, "score": 0.88},
+        },
+    )
+    monkeypatch.setattr(main, "validate_hypothesis", lambda _payload: (True, []))
+    monkeypatch.setattr(
+        main,
+        "summarize_evidence_map_provenance",
+        lambda connection: {
+            "passes": True,
+            "issues": [],
+            "evidence_map": connection.get("evidence_map"),
+            "supported_critical_mapping_count": 3,
+            "critical_mapping_count": 3,
+            "supported_mechanism_assertion_count": 1,
+            "required_mechanism_assertion_count": 1,
+            "core_target_evidence_strength": "strong_direct",
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_extract_seed_provenance",
+        lambda _patterns: ("https://seed.test/article", "seed excerpt"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_evaluate_usefulness_proof_gate",
+        lambda **_kwargs: {
+            "passes": False,
+            "reasons": [
+                "usefulness:weak_claim_evidence_alignment",
+                "usefulness:missing_cheap_test",
+            ],
+            "repair_fields": ["edge_analysis.cheap_test"],
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_salvage(
+        _connection, missing_fields, failure_reasons=None, benchmark_profile=None
+    ):
+        captured["missing_fields"] = list(missing_fields)
+        captured["failure_reasons"] = list(failure_reasons or [])
+        captured["benchmark_profile"] = benchmark_profile
+        return None
+
+    monkeypatch.setattr(main, "salvage_high_value_candidate", fake_salvage)
+
+    assert main._replay_strong_rejection(rejection_id, threshold=0.64) is True
+    output = capsys.readouterr().out
+
+    assert captured["missing_fields"] == [
+        "edge_analysis.problem_statement",
+        "edge_analysis.actionable_lever",
+        "edge_analysis.cheap_test",
+        "edge_analysis.edge_if_right",
+    ]
+    assert captured["failure_reasons"] == [
+        "usefulness:weak_claim_evidence_alignment",
+        "usefulness:missing_cheap_test",
+    ]
+    assert captured["benchmark_profile"] == {
+        "benchmark_edge_candidate": True,
+        "operator_value_shape": "threshold tuning",
+        "remaining_blocker_category": "operator_edge_packaging",
+        "provenance_control_case": False,
+        "operator_edge_present": True,
+        "underexploited_signal": True,
+        "known_or_obvious": False,
+    }
+    assert "benchmark_edge_candidate\tyes" in output
+    assert "operator_value_shape\tthreshold tuning" in output
+    assert "remaining_blocker_category\toperator_edge_packaging" in output
+    assert "[StrongRejectionReplay] Verdict: salvage attempted but rewrite failed" in output
+
+
+def test_replay_benchmark_diagnostics_exclude_provenance_control_cases(
+    temp_db, monkeypatch, capsys
+) -> None:
+    rejection_id = _save_legacy_strong_rejection(temp_db)
+
+    monkeypatch.setattr(
+        main,
+        "score_connection",
+        lambda *_args, **_kwargs: {
+            "total": 0.911,
+            "depth": 0.79,
+            "distance": 0.74,
+            "novelty": 0.81,
+            "prediction_quality": {"passes": True, "score": 0.88},
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "validate_hypothesis",
+        lambda _payload: (
+            False,
+            [
+                (
+                    "evidence_map missing support for variable mapping "
+                    "'queue pressure' -> 'response latency'"
+                ),
+                "mechanism assertion missing source_reference",
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "summarize_evidence_map_provenance",
+        lambda connection: {
+            "passes": False,
+            "issues": [
+                (
+                    "evidence_map missing support for variable mapping "
+                    "'queue pressure' -> 'response latency'"
+                ),
+                "mechanism assertion missing source_reference",
+            ],
+            "evidence_map": connection.get("evidence_map"),
+            "supported_critical_mapping_count": 2,
+            "critical_mapping_count": 3,
+            "supported_mechanism_assertion_count": 0,
+            "required_mechanism_assertion_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_extract_seed_provenance",
+        lambda _patterns: ("https://seed.test/article", "seed excerpt"),
+    )
+
+    assert main._replay_strong_rejection(rejection_id, threshold=0.64) is True
+    output = capsys.readouterr().out
+
+    assert "benchmark_edge_candidate\tno" in output
+    assert "remaining_blocker_category\tprovenance_control" in output
+    assert "operator_value_shape\t—" in output
 
 
 def test_resolve_lineage_links_child_transmission_to_prior_transmission_cluster(
