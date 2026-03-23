@@ -69,6 +69,23 @@ def _optional_alias(var_names: tuple[str, ...], default):
                 return default
         return val.strip()
     return default
+
+
+def _model_matches_provider(provider: str, model_name: str) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return False
+    if provider == "claude":
+        return normalized.startswith("claude-")
+    if provider == "gemini":
+        return normalized.startswith("gemini-") or normalized.startswith("models/gemini-")
+    if provider == "ollama":
+        return not (
+            normalized.startswith("claude-")
+            or normalized.startswith("gemini-")
+            or normalized.startswith("models/gemini-")
+        )
+    return False
 # Load .env on import
 _load_env()
 # --- Required ---
@@ -109,6 +126,15 @@ elif LLM_PROVIDER == "claude":
     MODEL = _optional("BLACKCLAW_MODEL", "claude-sonnet-4-6")
 else:
     MODEL = _optional("BLACKCLAW_MODEL", "gemini-2.5-flash")
+if not _model_matches_provider(LLM_PROVIDER, MODEL):
+    print(
+        f"\n[BlackClaw] FATAL: BLACKCLAW_MODEL={MODEL!r} is not compatible with "
+        f"LLM_PROVIDER={LLM_PROVIDER!r}"
+    )
+    print("  → claude provider expects models like 'claude-sonnet-4-6'")
+    print("  → gemini provider expects models like 'gemini-2.5-flash'")
+    print("  → ollama provider expects a local model name such as 'qwen3:8b'\n")
+    sys.exit(1)
 OLLAMA_BASE_URL: str = _optional("OLLAMA_BASE_URL", "http://localhost:11434")
 TRANSMIT_THRESHOLD: float = _optional("BLACKCLAW_THRESHOLD", 0.6)
 EMBEDDING_DUP_THRESHOLD: float = _optional(

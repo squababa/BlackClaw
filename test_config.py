@@ -7,13 +7,16 @@ def _reload_config(monkeypatch, **env_overrides):
         "BLACKCLAW_CYCLE_COOLDOWN",
         "BLACKCLAW_COOLDOWN",
         "GEMINI_API_KEY",
+        "ANTHROPIC_API_KEY",
         "TAVILY_API_KEY",
         "LLM_PROVIDER",
         "LOCAL_LLM_ONLY",
+        "BLACKCLAW_MODEL",
     ):
         monkeypatch.delenv(var, raising=False)
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
 
     for var, value in env_overrides.items():
@@ -61,3 +64,63 @@ def test_cycle_cooldown_invalid_override_falls_back_to_default_with_warning(
     assert "WARNING" in captured.out
     assert "BLACKCLAW_CYCLE_COOLDOWN" in captured.out
     assert "default 300" in captured.out
+
+
+def test_valid_claude_provider_model_pair_loads(monkeypatch) -> None:
+    config = _reload_config(
+        monkeypatch,
+        LLM_PROVIDER="claude",
+        BLACKCLAW_MODEL="claude-sonnet-4-6",
+    )
+    assert config.LLM_PROVIDER == "claude"
+    assert config.MODEL == "claude-sonnet-4-6"
+
+
+def test_valid_gemini_provider_model_pair_loads(monkeypatch) -> None:
+    config = _reload_config(
+        monkeypatch,
+        LLM_PROVIDER="gemini",
+        BLACKCLAW_MODEL="gemini-2.5-flash",
+    )
+    assert config.LLM_PROVIDER == "gemini"
+    assert config.MODEL == "gemini-2.5-flash"
+
+
+def test_invalid_gemini_provider_with_claude_model_fails_fast(
+    monkeypatch,
+    capsys,
+) -> None:
+    try:
+        _reload_config(
+            monkeypatch,
+            LLM_PROVIDER="gemini",
+            BLACKCLAW_MODEL="claude-sonnet-4-6",
+        )
+        raise AssertionError("Expected config import to fail for invalid provider/model pair")
+    except SystemExit as exc:
+        assert exc.code == 1
+
+    captured = capsys.readouterr()
+    assert "BLACKCLAW_MODEL='claude-sonnet-4-6'" in captured.out
+    assert "LLM_PROVIDER='gemini'" in captured.out
+    assert "not compatible" in captured.out
+
+
+def test_invalid_claude_provider_with_gemini_model_fails_fast(
+    monkeypatch,
+    capsys,
+) -> None:
+    try:
+        _reload_config(
+            monkeypatch,
+            LLM_PROVIDER="claude",
+            BLACKCLAW_MODEL="gemini-2.5-flash",
+        )
+        raise AssertionError("Expected config import to fail for invalid provider/model pair")
+    except SystemExit as exc:
+        assert exc.code == 1
+
+    captured = capsys.readouterr()
+    assert "BLACKCLAW_MODEL='gemini-2.5-flash'" in captured.out
+    assert "LLM_PROVIDER='claude'" in captured.out
+    assert "not compatible" in captured.out
