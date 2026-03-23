@@ -179,9 +179,14 @@ def test_summary_rejects_weak_core_target_evidence_even_when_provenance_passes()
 
     assert report["passes"] is False
     assert "target evidence too weak for core claim" in report["issues"]
+    assert report["core_target_evidence_strength"] == "weak_direct"
+    assert any(
+        code in report["core_target_reason_codes"]
+        for code in ("weak_target_source", "broad_target_page", "generic_core_support")
+    )
 
 
-def test_summary_rejects_weak_top_level_target_evidence_even_with_strong_evidence_map() -> None:
+def test_summary_prefers_strong_direct_evidence_map_over_weak_top_level_target_evidence() -> None:
     payload = {
         "variable_mapping": {
             "queue depth": "response latency",
@@ -245,11 +250,15 @@ def test_summary_rejects_weak_top_level_target_evidence_even_with_strong_evidenc
 
     report = summarize_evidence_map_provenance(payload)
 
-    assert report["passes"] is False
-    assert "target evidence too weak for core claim" in report["issues"]
+    assert report["passes"] is True
+    assert report["issues"] == []
+    assert report["core_target_evidence_strength"] == "strong_direct"
+    best_entry = report["best_core_target_evidence"] or {}
+    assert best_entry.get("source_reference") == "Queue Saturation and Response Latency"
+    assert best_entry.get("entry_type") == "mechanism_assertion"
 
 
-def test_summary_rejects_off_domain_top_level_target_evidence_with_generic_overlap() -> None:
+def test_summary_ignores_off_domain_top_level_target_evidence_when_direct_core_support_exists() -> None:
     payload = {
         "variable_mapping": {
             "atrial event sampling": "premature atrial event detection",
@@ -359,8 +368,9 @@ def test_summary_rejects_off_domain_top_level_target_evidence_with_generic_overl
 
     report = summarize_evidence_map_provenance(payload)
 
-    assert report["passes"] is False
-    assert "target evidence too weak for core claim" in report["issues"]
+    assert report["passes"] is True
+    assert report["issues"] == []
+    assert report["core_target_evidence_strength"] == "strong_direct"
 
 
 def test_summary_flags_critical_mapping_claim_that_outruns_its_snippet() -> None:

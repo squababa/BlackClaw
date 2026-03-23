@@ -22,6 +22,7 @@ from hypothesis_validation import (
     normalize_edge_analysis,
     normalize_evidence_map,
     normalize_mechanism_typing,
+    summarize_edge_usefulness_alignment,
     summarize_evidence_map_provenance,
     validate_hypothesis,
 )
@@ -99,6 +100,7 @@ GOLDEN_EVALS_PATH = Path(__file__).with_name("golden_eval_pairs.json")
 LATE_STAGE_TIMING_LABELS = {
     "score": "Score",
     "validation": "Validation",
+    "salvage": "Salvage",
     "adversarial": "Adversarial",
     "invariance": "Invariance",
     "rewrite": "Rewrite",
@@ -111,6 +113,19 @@ NEAR_MISS_BUCKET_LABELS = {
     "generic_weak": "noise: generic low-value failure",
 }
 NEAR_MISS_PACKAGING_CONFIDENCE_FLOOR = 0.75
+PHASE6_SALVAGE_SCORE_FLOOR = 0.88
+PHASE6_MAX_REPAIRABLE_REASONS = 4
+PHASE6_REPAIRABLE_VALIDATION_REASONS = {
+    "mechanism must name a specific process",
+}
+PHASE6_REPAIRABLE_USEFULNESS_REASONS = {
+    "usefulness:weak_claim_evidence_alignment",
+    "usefulness:missing_cheap_test",
+    "usefulness:edge_layer_misaligned",
+    "usefulness:missing_edge_problem",
+    "usefulness:missing_actionable_lever",
+    "usefulness:missing_edge_advantage",
+}
 
 
 def _print_credibility_weighting_summary(score_label: str, scores: dict):
@@ -3318,7 +3333,7 @@ from config import (
     MAX_PATTERNS_PER_CYCLE,
 )
 from explore import dive
-from jump import lateral_jump
+from jump import lateral_jump, salvage_high_value_candidate
 from score import (
     score_connection,
     deep_dive_convergence,
@@ -5381,6 +5396,7 @@ def _evaluate_usefulness_proof_gate(
         else normalize_evidence_map(payload.get("evidence_map"))
     )
     edge_analysis = normalize_edge_analysis(payload)
+    edge_alignment = summarize_edge_usefulness_alignment(payload, payload)
 
     observable = _usefulness_first_present(
         prediction_payload.get("observable"),
@@ -5489,13 +5505,16 @@ def _evaluate_usefulness_proof_gate(
     claim_alignment_ok = bool(claim_anchor_terms) and best_claim_overlap >= 3
     mechanism_alignment_ok = not mechanism_terms or best_mechanism_overlap >= 2
     edge_problem_ok = bool(edge_problem) and (
-        _usefulness_overlap(edge_problem, observable_terms) >= 1
-        or _usefulness_overlap(edge_problem, claim_anchor_terms) >= 1
-        or _usefulness_overlap(edge_problem, mechanism_terms) >= 1
+        bool(edge_alignment.get("problem_aligned"))
+        and (
+            _usefulness_overlap(edge_problem, observable_terms) >= 1
+            or _usefulness_overlap(edge_problem, claim_anchor_terms) >= 1
+            or _usefulness_overlap(edge_problem, mechanism_terms) >= 1
+        )
     )
     actionable_lever_ok = bool(edge_lever) and not any(
         phrase in edge_lever.lower() for phrase in generic_edge_phrases
-    ) and (
+    ) and bool(edge_alignment.get("actionable_lever_aligned")) and (
         _usefulness_overlap(edge_lever, mechanism_terms) >= 1
         or _usefulness_overlap(edge_lever, claim_anchor_terms) >= 1
         or _usefulness_overlap(edge_lever, observable_terms) >= 1
@@ -5504,9 +5523,18 @@ def _evaluate_usefulness_proof_gate(
         _usefulness_overlap(cheap_metric, _usefulness_terms(test_payload.get("metric"))) >= 1
         or _usefulness_overlap(cheap_metric, observable_terms) >= 1
     )
+    cheap_test_operator_move_ok = bool(edge_alignment.get("cheap_test_operator_move"))
+    cheap_test_generic_validation = bool(
+        edge_alignment.get("cheap_test_generic_validation")
+    )
+    cheap_test_restates_main_test = bool(
+        edge_alignment.get("cheap_test_restates_main_test")
+    )
     cheap_test_ok = (
         all((cheap_setup, cheap_metric, cheap_confirm, cheap_falsify))
         and cheap_metric_aligned
+        and bool(edge_alignment.get("cheap_test_decision_aligned"))
+        and bool(edge_alignment.get("cheap_test_real_operator_move"))
         and (
             _usefulness_overlap(cheap_confirm, edge_problem_terms | observable_terms) >= 1
             or _usefulness_overlap(cheap_falsify, edge_problem_terms | observable_terms) >= 1
@@ -5518,7 +5546,7 @@ def _evaluate_usefulness_proof_gate(
             len(edge_advantage.split()) < 6
             and any(term in edge_advantage.lower() for term in generic_advantage_terms)
         )
-    )
+    ) and bool(edge_alignment.get("edge_advantage_aligned"))
     why_missed_ok = bool(why_missed) and not (
         _usefulness_contains_phrase(
             why_missed, USEFULNESS_GENERIC_UNDEREXPLOITED_PHRASES
@@ -5544,10 +5572,46 @@ def _evaluate_usefulness_proof_gate(
     underexploited_ok = not known_or_obvious and (
         why_missed_ok or expected_asymmetry_ok
     )
+    core_target_evidence_strength = (
+        str(claim_provenance.get("core_target_evidence_strength") or "").strip()
+        if isinstance(claim_provenance, dict)
+        else ""
+    )
+    strongly_evidenced_edge = core_target_evidence_strength == "strong_direct"
     edge_layer_aligned = (
-        (not edge_problem_terms or _usefulness_overlap(edge_problem, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
-        and (not edge_lever_terms or _usefulness_overlap(edge_lever, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
-        and (not edge_metric_terms or _usefulness_overlap(cheap_metric, _usefulness_terms(test_payload.get("metric")) | observable_terms) >= 1)
+        bool(edge_alignment.get("problem_aligned"))
+        and bool(edge_alignment.get("actionable_lever_aligned"))
+        and bool(edge_alignment.get("edge_advantage_aligned"))
+        and (
+            not edge_problem_terms
+            or _usefulness_overlap(
+                edge_problem,
+                claim_anchor_terms | mechanism_terms | observable_terms,
+            )
+            >= 1
+        )
+        and (
+            not edge_lever_terms
+            or _usefulness_overlap(
+                edge_lever,
+                claim_anchor_terms | mechanism_terms | observable_terms,
+            )
+            >= 1
+        )
+        and (
+            not edge_metric_terms
+            or _usefulness_overlap(
+                cheap_metric,
+                _usefulness_terms(test_payload.get("metric")) | observable_terms,
+            )
+            >= 1
+        )
+    )
+    edge_operator_decision_ok = (
+        actionable_lever_ok
+        and cheap_test_ok
+        and edge_advantage_ok
+        and bool(edge_primary_operator)
     )
 
     reasons: list[str] = []
@@ -5586,15 +5650,85 @@ def _evaluate_usefulness_proof_gate(
         "edge_problem_ok": edge_problem_ok,
         "actionable_lever_ok": actionable_lever_ok,
         "cheap_test_ok": cheap_test_ok,
+        "cheap_test_operator_move_ok": cheap_test_operator_move_ok,
+        "cheap_test_generic_validation": cheap_test_generic_validation,
+        "cheap_test_restates_main_test": cheap_test_restates_main_test,
         "edge_advantage_ok": edge_advantage_ok,
+        "edge_operator_decision_ok": edge_operator_decision_ok,
         "why_missed_ok": why_missed_ok,
         "expected_asymmetry_ok": expected_asymmetry_ok,
         "underexploited_ok": underexploited_ok,
         "known_or_obvious": known_or_obvious,
+        "core_target_evidence_strength": core_target_evidence_strength,
+        "strongly_evidenced_edge": strongly_evidenced_edge,
         "edge_layer_aligned": edge_layer_aligned,
+        "repair_fields": list(edge_alignment.get("repair_fields") or []),
         "claim_anchor": claim_anchor,
         "best_claim_overlap": best_claim_overlap,
         "best_mechanism_overlap": best_mechanism_overlap,
+    }
+
+
+def _plan_phase6_salvage(
+    *,
+    total_score: float,
+    threshold: float,
+    validation_reasons: list[str],
+    usefulness_proof: dict | None,
+    claim_provenance_ok: bool,
+    prediction_quality_ok: bool,
+) -> dict:
+    """Plan one selective Phase 6 salvage pass for high-value near-misses."""
+    normalized_validation = [
+        str(reason).strip()
+        for reason in (validation_reasons or [])
+        if str(reason).strip()
+    ]
+    usefulness_reasons = [
+        str(reason).strip()
+        for reason in ((usefulness_proof or {}).get("reasons") or [])
+        if str(reason).strip()
+    ]
+    combined_reasons: list[str] = []
+    for reason in normalized_validation + usefulness_reasons:
+        if reason not in combined_reasons:
+            combined_reasons.append(reason)
+
+    repair_fields: list[str] = []
+    if "mechanism must name a specific process" in combined_reasons:
+        repair_fields.append("mechanism")
+
+    usefulness_blocked = any(
+        reason in PHASE6_REPAIRABLE_USEFULNESS_REASONS for reason in combined_reasons
+    )
+    if usefulness_blocked:
+        for field in (
+            "edge_analysis.problem_statement",
+            "edge_analysis.actionable_lever",
+            "edge_analysis.cheap_test",
+            "edge_analysis.edge_if_right",
+        ):
+            if field not in repair_fields:
+                repair_fields.append(field)
+        for field in (usefulness_proof or {}).get("repair_fields") or []:
+            if field.startswith("edge_analysis.") and field not in repair_fields:
+                repair_fields.append(field)
+
+    allowed_reasons = (
+        PHASE6_REPAIRABLE_VALIDATION_REASONS
+        | PHASE6_REPAIRABLE_USEFULNESS_REASONS
+    )
+    eligible = bool(repair_fields) and all(
+        reason in allowed_reasons for reason in combined_reasons
+    )
+    eligible = eligible and len(combined_reasons) <= PHASE6_MAX_REPAIRABLE_REASONS
+    eligible = eligible and total_score >= max(threshold, PHASE6_SALVAGE_SCORE_FLOOR)
+    eligible = eligible and claim_provenance_ok and prediction_quality_ok
+
+    return {
+        "eligible": eligible,
+        "repair_fields": repair_fields,
+        "reasons": combined_reasons,
     }
 
 
@@ -5903,6 +6037,10 @@ def _evaluate_connection_candidate(
     boring = False
     semantic_duplicate = False
     transmission_embedding = None
+    salvage_attempted = False
+    salvage_applied = False
+    salvage_fields: list[str] = []
+    salvage_reasons: list[str] = []
 
     if passes_threshold:
         validation_started = time.monotonic()
@@ -5952,6 +6090,115 @@ def _evaluate_connection_candidate(
             print("  [Usefulness] Blocked transmission - skipping transmission")
             for reason in usefulness_proof.get("reasons") or []:
                 print(f"  [Usefulness] - {reason}")
+
+    if passes_threshold and claim_provenance_ok:
+        salvage_plan = _plan_phase6_salvage(
+            total_score=float(scores.get("total") or 0.0),
+            threshold=threshold,
+            validation_reasons=validation_reasons,
+            usefulness_proof=usefulness_proof,
+            claim_provenance_ok=claim_provenance_ok,
+            prediction_quality_ok=prediction_quality_ok,
+        )
+        if salvage_plan.get("eligible"):
+            salvage_attempted = True
+            salvage_fields = list(salvage_plan.get("repair_fields") or [])
+            salvage_reasons = list(salvage_plan.get("reasons") or [])
+            print(
+                "  [Salvage] Attempting targeted rescue for high-value near-miss "
+                f"({', '.join(salvage_fields)})"
+            )
+            salvage_started = time.monotonic()
+            salvaged_connection = salvage_high_value_candidate(
+                connection,
+                salvage_fields,
+                failure_reasons=salvage_reasons,
+            )
+            _record_late_stage_timing(late_stage_timing, "salvage", salvage_started)
+            if salvaged_connection is None:
+                print("  [Salvage] No valid targeted rewrite produced")
+            else:
+                salvage_applied = True
+                connection = dict(salvaged_connection)
+                mechanism_typing = normalize_mechanism_typing(connection)
+                connection["mechanism_typing"] = mechanism_typing
+                connection["mechanism_type"] = mechanism_typing.get("mechanism_type")
+                connection["mechanism_type_confidence"] = mechanism_typing.get(
+                    "mechanism_type_confidence"
+                )
+                connection["secondary_mechanism_types"] = mechanism_typing.get(
+                    "secondary_mechanism_types", []
+                )
+                connection["evidence_map"] = normalize_evidence_map(
+                    connection.get("evidence_map")
+                )
+                rewritten_description = connection.get("connection", "")
+                claim_provenance = summarize_evidence_map_provenance(connection)
+                claim_provenance_ok = bool(claim_provenance.get("passes"))
+                validation_started = time.monotonic()
+                validation_ok, validation_reasons = validate_hypothesis(connection)
+                if not prediction_quality_ok:
+                    quality_reasons = (
+                        prediction_quality.get("blocking_reasons")
+                        or prediction_quality.get("issues")
+                        or ["prediction quality below enforcement threshold"]
+                    )
+                    validation_reasons.extend(
+                        reason
+                        for reason in quality_reasons
+                        if isinstance(reason, str) and reason not in validation_reasons
+                    )
+                    validation_ok = False
+                _record_late_stage_timing(
+                    late_stage_timing, "validation", validation_started
+                )
+                validation_log = {
+                    "passed": validation_ok,
+                    "rejection_reasons": validation_reasons if not validation_ok else [],
+                    "prediction_quality": prediction_quality,
+                    "claim_provenance": claim_provenance,
+                    "mechanism_typing": mechanism_typing,
+                    "phase6_salvage": {
+                        "attempted": True,
+                        "applied": True,
+                        "repair_fields": salvage_fields,
+                        "trigger_reasons": salvage_reasons,
+                    },
+                }
+                usefulness_ok = True
+                usefulness_proof = None
+                if validation_ok and claim_provenance_ok:
+                    usefulness_proof = _evaluate_usefulness_proof_gate(
+                        connection=connection,
+                        prediction_quality=prediction_quality,
+                        claim_provenance=claim_provenance,
+                    )
+                    usefulness_ok = bool(usefulness_proof.get("passes"))
+                    validation_log["usefulness_proof"] = usefulness_proof
+                    if not usefulness_ok:
+                        for reason in usefulness_proof.get("reasons") or []:
+                            if reason and reason not in validation_reasons:
+                                validation_reasons.append(reason)
+                        validation_log["passed"] = False
+                        validation_log["rejection_reasons"] = validation_reasons
+                        print("  [Salvage] Usefulness still blocked after rewrite")
+                        for reason in usefulness_proof.get("reasons") or []:
+                            print(f"  [Salvage] - {reason}")
+                elif not validation_ok:
+                    print("  [Salvage] Validation still blocked after rewrite")
+                    for reason in validation_reasons:
+                        print(f"  [Salvage] - {reason}")
+                elif not claim_provenance_ok:
+                    print("  [Salvage] Rewritten candidate lost provenance support")
+                    for issue in (claim_provenance.get("issues") or [])[:4]:
+                        print(f"  [Salvage] - {issue}")
+        elif validation_log is not None:
+            validation_log["phase6_salvage"] = {
+                "attempted": False,
+                "applied": False,
+                "repair_fields": [],
+                "trigger_reasons": [],
+            }
 
     if passes_threshold and validation_ok and claim_provenance_ok and usefulness_ok:
         evidence_credibility = _evaluate_transmit_evidence_gate(
@@ -6229,6 +6476,10 @@ def _evaluate_connection_candidate(
         "boring": boring,
         "semantic_duplicate": semantic_duplicate,
         "transmission_embedding": transmission_embedding,
+        "salvage_attempted": salvage_attempted,
+        "salvage_applied": salvage_applied,
+        "salvage_fields": salvage_fields,
+        "salvage_reasons": salvage_reasons,
         "seed_url": seed_url,
         "seed_excerpt": seed_excerpt,
         "target_url": target_url,
