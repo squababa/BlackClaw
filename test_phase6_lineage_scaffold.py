@@ -898,6 +898,145 @@ def test_replay_reporting_distinguishes_salvage_attempted_but_no_valid_rewrite(
     assert "salvage_attempted_but_no_valid_rewrite\tyes" in output
 
 
+def test_replay_stages_narrow_mechanism_rescue_before_failed_edge_rewrite(
+    temp_db, monkeypatch, capsys
+) -> None:
+    exploration_id = _insert_exploration(
+        temp_db,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+    )
+    payload = _build_strong_rejection_candidate()["prepared_connection"]
+    payload["edge_analysis"] = {
+        "problem_statement": "Queue tuning may hide a latency bottleneck.",
+        "actionable_lever": "Investigate the queue.",
+        "cheap_test": {
+            "setup": "Replay the queue.",
+            "metric": "response latency",
+            "confirm": "latency improves",
+            "falsify": "latency does not improve",
+        },
+        "edge_if_right": "This could be useful.",
+    }
+    rejection_id = store.save_strong_rejection(
+        exploration_id=exploration_id,
+        seed_domain="systems.test",
+        target_domain="latency.test",
+        total_score=0.934,
+        novelty_score=0.81,
+        distance_score=0.74,
+        depth_score=0.79,
+        prediction_quality_score=0.88,
+        mechanism_type=payload["mechanism_type"],
+        rejection_stage="validation",
+        rejection_reasons=[
+            "validation:mechanism must name a specific process",
+            "validation:edge_analysis edge_if_right is too generic",
+        ],
+        salvage_reason="revisit: mechanism packaging fail",
+        connection_payload=payload,
+        validation={
+            "passed": False,
+            "rejection_reasons": [
+                "mechanism must name a specific process",
+                "edge_analysis edge_if_right is too generic",
+            ],
+        },
+        evidence_map=payload["evidence_map"],
+        mechanism_typing=payload["mechanism_typing"],
+    )
+
+    monkeypatch.setattr(
+        main,
+        "score_connection",
+        lambda *_args, **_kwargs: {
+            "total": 0.934,
+            "depth": 0.79,
+            "distance": 0.74,
+            "novelty": 0.81,
+            "prediction_quality": {"passes": True, "score": 0.88},
+        },
+    )
+
+    validate_calls = {"count": 0}
+
+    def fake_validate(_payload: dict) -> tuple[bool, list[str]]:
+        validate_calls["count"] += 1
+        if validate_calls["count"] == 1:
+            return False, [
+                "mechanism must name a specific process",
+                "edge_analysis edge_if_right is too generic",
+            ]
+        return True, []
+
+    monkeypatch.setattr(main, "validate_hypothesis", fake_validate)
+    monkeypatch.setattr(
+        main,
+        "summarize_evidence_map_provenance",
+        lambda connection: {
+            "passes": True,
+            "issues": [],
+            "evidence_map": connection.get("evidence_map"),
+            "supported_critical_mapping_count": 3,
+            "critical_mapping_count": 3,
+            "supported_mechanism_assertion_count": 1,
+            "required_mechanism_assertion_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_extract_seed_provenance",
+        lambda _patterns: ("https://seed.test/article", "seed excerpt"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_evaluate_usefulness_proof_gate",
+        lambda **kwargs: {
+            "passes": False,
+            "reasons": ["usefulness:missing_cheap_test"],
+            "repair_fields": ["edge_analysis.cheap_test"],
+        }
+        if str(kwargs["connection"].get("mechanism", "")).startswith("queue pressure monitor")
+        else {"passes": True, "reasons": [], "repair_fields": []},
+    )
+
+    captured_calls = []
+
+    def fake_salvage(_connection, missing_fields, failure_reasons=None):
+        captured_calls.append(
+            (list(missing_fields), list(failure_reasons or []))
+        )
+        if missing_fields == ["mechanism"]:
+            repaired = dict(payload)
+            repaired["mechanism"] = (
+                "queue pressure monitor compares backlog growth against the latency budget, "
+                "triggering response-delay escalation when queued retries accumulate."
+            )
+            return repaired
+        return None
+
+    monkeypatch.setattr(main, "salvage_high_value_candidate", fake_salvage)
+
+    assert main._replay_strong_rejection(rejection_id, threshold=0.64) is True
+    output = capsys.readouterr().out
+
+    assert captured_calls == [
+        (["mechanism"], ["mechanism must name a specific process"]),
+        (
+            [
+                "edge_analysis.problem_statement",
+                "edge_analysis.actionable_lever",
+                "edge_analysis.cheap_test",
+                "edge_analysis.edge_if_right",
+            ],
+            ["edge_analysis edge_if_right is too generic"],
+        ),
+    ]
+    assert "[StrongRejectionReplay] Verdict: salvage then fail later" in output
+    assert "salvage_attempted\tyes" in output
+    assert "salvage_applied\tyes" in output
+
+
 def test_resolve_lineage_links_child_transmission_to_prior_transmission_cluster(
     temp_db,
 ) -> None:

@@ -178,6 +178,150 @@ REPLAY_LEGACY_EDGE_REASON_TO_FIELDS = {
         "edge_analysis.primary_operator",
     ],
 }
+PHASE6_EDGE_LAYER_FIELDS = (
+    "edge_analysis.problem_statement",
+    "edge_analysis.actionable_lever",
+    "edge_analysis.cheap_test",
+    "edge_analysis.edge_if_right",
+)
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    """Keep the first occurrence of each non-empty value."""
+    deduped: list[str] = []
+    for value in values:
+        cleaned = str(value).strip()
+        if cleaned and cleaned not in deduped:
+            deduped.append(cleaned)
+    return deduped
+
+
+def _build_phase6_salvage_stages(
+    repair_fields: list[str],
+    reasons: list[str],
+) -> list[dict]:
+    """Prefer narrow mechanism rescue before broader edge-layer rewrites."""
+    deduped_fields = _dedupe_preserving_order(repair_fields)
+    deduped_reasons = _dedupe_preserving_order(reasons)
+    mechanism_fields = [field for field in deduped_fields if field == "mechanism"]
+    edge_fields = [
+        field for field in deduped_fields if field in PHASE6_EDGE_LAYER_FIELDS
+    ]
+    other_fields = [
+        field
+        for field in deduped_fields
+        if field not in mechanism_fields and field not in edge_fields
+    ]
+    mechanism_reasons = [
+        reason for reason in deduped_reasons if "mechanism" in reason.lower()
+    ]
+    edge_reasons = [
+        reason for reason in deduped_reasons if reason not in mechanism_reasons
+    ]
+
+    if mechanism_fields and edge_fields and not other_fields:
+        stages = [
+            {
+                "name": "mechanism_first",
+                "repair_fields": mechanism_fields,
+                "reasons": mechanism_reasons or deduped_reasons,
+            },
+            {
+                "name": "edge_layer",
+                "repair_fields": edge_fields,
+                "reasons": edge_reasons or deduped_reasons,
+            },
+        ]
+        return [stage for stage in stages if stage.get("repair_fields")]
+
+    return [
+        {
+            "name": "targeted",
+            "repair_fields": deduped_fields,
+            "reasons": deduped_reasons,
+        }
+    ]
+
+
+def _evaluate_phase6_salvage_candidate_state(
+    connection: dict,
+    prediction_quality: dict,
+) -> dict:
+    """Re-run strict late-stage gates for one salvage rewrite candidate."""
+    candidate = dict(connection) if isinstance(connection, dict) else {}
+    mechanism_typing = normalize_mechanism_typing(candidate)
+    candidate["mechanism_typing"] = mechanism_typing
+    candidate["mechanism_type"] = mechanism_typing.get("mechanism_type")
+    candidate["mechanism_type_confidence"] = mechanism_typing.get(
+        "mechanism_type_confidence"
+    )
+    candidate["secondary_mechanism_types"] = mechanism_typing.get(
+        "secondary_mechanism_types", []
+    )
+    candidate["evidence_map"] = normalize_evidence_map(candidate.get("evidence_map"))
+
+    claim_provenance = summarize_evidence_map_provenance(candidate)
+    claim_provenance_ok = bool(claim_provenance.get("passes"))
+    validation_ok, validation_reasons = validate_hypothesis(candidate)
+    prediction_quality_ok = bool(prediction_quality.get("passes"))
+    if not prediction_quality_ok:
+        quality_reasons = (
+            prediction_quality.get("blocking_reasons")
+            or prediction_quality.get("issues")
+            or ["prediction quality below enforcement threshold"]
+        )
+        validation_reasons.extend(
+            reason
+            for reason in quality_reasons
+            if isinstance(reason, str) and reason not in validation_reasons
+        )
+        validation_ok = False
+
+    usefulness_ok = True
+    usefulness_proof = None
+    if validation_ok and claim_provenance_ok:
+        usefulness_proof = _evaluate_usefulness_proof_gate(
+            connection=candidate,
+            prediction_quality=prediction_quality,
+            claim_provenance=claim_provenance,
+        )
+        usefulness_ok = bool(usefulness_proof.get("passes"))
+        if not usefulness_ok:
+            validation_reasons.extend(
+                reason
+                for reason in (usefulness_proof.get("reasons") or [])
+                if isinstance(reason, str) and reason not in validation_reasons
+            )
+
+    return {
+        "connection": candidate,
+        "mechanism_typing": mechanism_typing,
+        "claim_provenance": claim_provenance,
+        "claim_provenance_ok": claim_provenance_ok,
+        "validation_ok": validation_ok,
+        "validation_reasons": validation_reasons,
+        "prediction_quality_ok": prediction_quality_ok,
+        "usefulness_ok": usefulness_ok,
+        "usefulness_proof": usefulness_proof,
+    }
+
+
+def _phase6_salvage_state_is_stageable(state: dict) -> bool:
+    """Only continue from rewrites that preserve provenance and remaining repairability."""
+    if not bool(state.get("claim_provenance_ok")):
+        return False
+    reasons = [
+        str(reason).strip()
+        for reason in (state.get("validation_reasons") or [])
+        if str(reason).strip()
+    ]
+    if "mechanism must name a specific process" in reasons:
+        return False
+    allowed_reasons = (
+        PHASE6_REPAIRABLE_VALIDATION_REASONS
+        | PHASE6_REPAIRABLE_USEFULNESS_REASONS
+    )
+    return all(reason in allowed_reasons for reason in reasons)
 
 
 def _print_credibility_weighting_summary(score_label: str, scores: dict):
@@ -6405,9 +6549,13 @@ def _plan_phase6_salvage(
     )
     eligible = eligible and claim_provenance_ok and prediction_quality_ok
 
+    repair_fields = _dedupe_preserving_order(repair_fields)
+    combined_reasons = _dedupe_preserving_order(combined_reasons)
+
     return {
         "eligible": eligible,
         "repair_fields": repair_fields,
+        "repair_stages": _build_phase6_salvage_stages(repair_fields, combined_reasons),
         "reasons": combined_reasons,
         "ignored_reasons": sorted(ignored_reason_set),
         "eligibility_score": eligibility_score,
@@ -6815,18 +6963,85 @@ def _evaluate_connection_candidate(
             salvage_attempted = True
             salvage_fields = list(salvage_plan.get("repair_fields") or [])
             salvage_reasons = list(salvage_plan.get("reasons") or [])
+            salvage_stages = list(salvage_plan.get("repair_stages") or [])
+            salvage_stage_attempts: list[dict] = []
             print(
                 "  [Salvage] Attempting targeted rescue for high-value near-miss "
                 f"({', '.join(salvage_fields)})"
             )
             salvage_started = time.monotonic()
-            salvaged_connection = salvage_high_value_candidate(
-                connection,
-                salvage_fields,
-                failure_reasons=salvage_reasons,
-            )
+            working_connection = dict(connection)
+            best_salvage_state = None
+            for index, stage in enumerate(salvage_stages, start=1):
+                stage_fields = list(stage.get("repair_fields") or [])
+                stage_reasons = list(stage.get("reasons") or salvage_reasons)
+                stage_name = str(stage.get("name") or f"stage_{index}").strip()
+                print(
+                    "  [Salvage] Stage "
+                    f"{index}/{len(salvage_stages)} "
+                    f"({stage_name}): {', '.join(stage_fields)}"
+                )
+                salvaged_connection = salvage_high_value_candidate(
+                    working_connection,
+                    stage_fields,
+                    failure_reasons=stage_reasons,
+                )
+                if salvaged_connection is None:
+                    salvage_stage_attempts.append(
+                        {
+                            "stage": stage_name,
+                            "repair_fields": stage_fields,
+                            "trigger_reasons": stage_reasons,
+                            "applied": False,
+                            "rewrite_failed": True,
+                        }
+                    )
+                    print("  [Salvage] No valid targeted rewrite produced")
+                    break
+
+                stage_state = _evaluate_phase6_salvage_candidate_state(
+                    salvaged_connection,
+                    prediction_quality,
+                )
+                stage_blockers = list(stage_state.get("validation_reasons") or [])
+                stage_stageable = _phase6_salvage_state_is_stageable(stage_state)
+                salvage_stage_attempts.append(
+                    {
+                        "stage": stage_name,
+                        "repair_fields": stage_fields,
+                        "trigger_reasons": stage_reasons,
+                        "applied": stage_stageable,
+                        "rewrite_failed": not stage_stageable,
+                        "blocking_reasons": stage_blockers,
+                    }
+                )
+
+                if not stage_stageable:
+                    if not stage_state.get("claim_provenance_ok"):
+                        print("  [Salvage] Rewritten candidate lost provenance support")
+                        for issue in (stage_state["claim_provenance"].get("issues") or [])[:4]:
+                            print(f"  [Salvage] - {issue}")
+                    else:
+                        print("  [Salvage] Validation still blocked after rewrite")
+                        for reason in stage_blockers:
+                            print(f"  [Salvage] - {reason}")
+                    break
+
+                best_salvage_state = stage_state
+                salvage_applied = True
+                working_connection = dict(stage_state["connection"])
+                if (
+                    stage_state.get("validation_ok")
+                    and stage_state.get("claim_provenance_ok")
+                    and stage_state.get("usefulness_ok")
+                ):
+                    break
+                if index < len(salvage_stages):
+                    print("  [Salvage] Narrow rewrite landed; checking remaining bottlenecks")
+                    for reason in stage_blockers:
+                        print(f"  [Salvage] - {reason}")
             _record_late_stage_timing(late_stage_timing, "salvage", salvage_started)
-            if salvaged_connection is None:
+            if best_salvage_state is None:
                 print("  [Salvage] No valid targeted rewrite produced")
                 if validation_log is not None:
                     validation_log["phase6_salvage"] = {
@@ -6835,44 +7050,20 @@ def _evaluate_connection_candidate(
                         "repair_fields": salvage_fields,
                         "trigger_reasons": salvage_reasons,
                         "rewrite_failed": True,
+                        "stages": salvage_stage_attempts,
                     }
             else:
-                salvage_applied = True
-                connection = dict(salvaged_connection)
-                mechanism_typing = normalize_mechanism_typing(connection)
-                connection["mechanism_typing"] = mechanism_typing
-                connection["mechanism_type"] = mechanism_typing.get("mechanism_type")
-                connection["mechanism_type_confidence"] = mechanism_typing.get(
-                    "mechanism_type_confidence"
-                )
-                connection["secondary_mechanism_types"] = mechanism_typing.get(
-                    "secondary_mechanism_types", []
-                )
-                connection["evidence_map"] = normalize_evidence_map(
-                    connection.get("evidence_map")
-                )
+                connection = dict(best_salvage_state["connection"])
+                mechanism_typing = best_salvage_state["mechanism_typing"]
                 rewritten_description = connection.get("connection", "")
-                claim_provenance = summarize_evidence_map_provenance(connection)
-                claim_provenance_ok = bool(claim_provenance.get("passes"))
-                validation_started = time.monotonic()
-                validation_ok, validation_reasons = validate_hypothesis(connection)
-                if not prediction_quality_ok:
-                    quality_reasons = (
-                        prediction_quality.get("blocking_reasons")
-                        or prediction_quality.get("issues")
-                        or ["prediction quality below enforcement threshold"]
-                    )
-                    validation_reasons.extend(
-                        reason
-                        for reason in quality_reasons
-                        if isinstance(reason, str) and reason not in validation_reasons
-                    )
-                    validation_ok = False
-                _record_late_stage_timing(
-                    late_stage_timing, "validation", validation_started
-                )
+                claim_provenance = best_salvage_state["claim_provenance"]
+                claim_provenance_ok = bool(best_salvage_state["claim_provenance_ok"])
+                validation_ok = bool(best_salvage_state["validation_ok"])
+                validation_reasons = list(best_salvage_state["validation_reasons"] or [])
+                usefulness_ok = bool(best_salvage_state["usefulness_ok"])
+                usefulness_proof = best_salvage_state["usefulness_proof"]
                 validation_log = {
-                    "passed": validation_ok,
+                    "passed": validation_ok and usefulness_ok and claim_provenance_ok,
                     "rejection_reasons": validation_reasons if not validation_ok else [],
                     "prediction_quality": prediction_quality,
                     "claim_provenance": claim_provenance,
@@ -6882,30 +7073,20 @@ def _evaluate_connection_candidate(
                         "applied": True,
                         "repair_fields": salvage_fields,
                         "trigger_reasons": salvage_reasons,
+                        "stages": salvage_stage_attempts,
                     },
                 }
-                usefulness_ok = True
-                usefulness_proof = None
-                if validation_ok and claim_provenance_ok:
-                    usefulness_proof = _evaluate_usefulness_proof_gate(
-                        connection=connection,
-                        prediction_quality=prediction_quality,
-                        claim_provenance=claim_provenance,
-                    )
-                    usefulness_ok = bool(usefulness_proof.get("passes"))
+                if usefulness_proof is not None:
                     validation_log["usefulness_proof"] = usefulness_proof
-                    if not usefulness_ok:
-                        for reason in usefulness_proof.get("reasons") or []:
-                            if reason and reason not in validation_reasons:
-                                validation_reasons.append(reason)
-                        validation_log["passed"] = False
-                        validation_log["rejection_reasons"] = validation_reasons
-                        print("  [Salvage] Usefulness still blocked after rewrite")
-                        for reason in usefulness_proof.get("reasons") or []:
-                            print(f"  [Salvage] - {reason}")
-                elif not validation_ok:
+                if not validation_ok:
                     print("  [Salvage] Validation still blocked after rewrite")
                     for reason in validation_reasons:
+                        print(f"  [Salvage] - {reason}")
+                elif not usefulness_ok:
+                    validation_log["passed"] = False
+                    validation_log["rejection_reasons"] = validation_reasons
+                    print("  [Salvage] Usefulness still blocked after rewrite")
+                    for reason in (usefulness_proof or {}).get("reasons") or []:
                         print(f"  [Salvage] - {reason}")
                 elif not claim_provenance_ok:
                     print("  [Salvage] Rewritten candidate lost provenance support")

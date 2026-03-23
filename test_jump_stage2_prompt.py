@@ -124,12 +124,14 @@ def test_phase6_salvage_prompt_stays_selective() -> None:
 
     assert "high-value near-miss" in prompt
     assert "one narrow rescue pass" in prompt
+    assert "Prefer the smallest valid rewrite" in prompt
     assert "rewrite it to open with one exact target-domain process noun phrase" in prompt
     assert (
         "rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, "
         "`edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together"
         in prompt
     )
+    assert "reuse the same observable, metric, comparator, and operator-decision language" in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
@@ -441,5 +443,25 @@ def test_build_repair_prompt_targets_usefulness_alignment_bottleneck() -> None:
 
     assert "Phase 5 usefulness-alignment bottleneck" in repair_prompt
     assert "keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable" in repair_prompt
+    assert "Reuse the existing confirm-side comparator language instead of paraphrasing it" in repair_prompt
+    assert "Reuse the existing falsify-side decision language" in repair_prompt
+    assert "Keep `edge_analysis.cheap_test.metric` identical to `test.metric`" in repair_prompt
     assert "Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move" in repair_prompt
     assert "The current cheap test sounds like generic validation rather than an operator move." in repair_prompt
+
+
+def test_build_repair_prompt_marks_mechanism_only_rescue_as_narrow() -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "when a threshold is crossed the scheduler changes state and collisions fall."
+    )
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["mechanism"],
+        original_data=payload,
+    )
+
+    assert "This is a mechanism-only rescue pass." in repair_prompt
+    assert "Prefer the smallest wording change that restores direct process anchoring" in repair_prompt
