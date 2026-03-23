@@ -368,3 +368,139 @@ def test_format_transmission_is_problem_first() -> None:
     assert "Add a siteswap-style validity filter" in output
     assert "Metric: collision rate per hyperperiod" in output
     assert "Primary operator: real-time scheduling engineer" in output
+
+
+def test_phase6_salvage_plan_targets_high_scoring_usefulness_near_miss() -> None:
+    usefulness_proof = {
+        "reasons": [
+            "usefulness:weak_claim_evidence_alignment",
+            "usefulness:missing_cheap_test",
+        ],
+        "repair_fields": ["edge_analysis.cheap_test"],
+    }
+
+    plan = main._plan_phase6_salvage(
+        total_score=0.93,
+        threshold=0.64,
+        validation_reasons=[],
+        usefulness_proof=usefulness_proof,
+        claim_provenance_ok=True,
+        prediction_quality_ok=True,
+    )
+
+    assert plan["eligible"] is True
+    assert plan["repair_fields"] == [
+        "edge_analysis.problem_statement",
+        "edge_analysis.actionable_lever",
+        "edge_analysis.cheap_test",
+        "edge_analysis.edge_if_right",
+    ]
+
+
+def test_phase6_salvage_plan_rejects_unrepairable_or_weak_candidates() -> None:
+    plan = main._plan_phase6_salvage(
+        total_score=0.79,
+        threshold=0.64,
+        validation_reasons=["target evidence too weak for core claim"],
+        usefulness_proof=None,
+        claim_provenance_ok=True,
+        prediction_quality_ok=True,
+    )
+
+    assert plan["eligible"] is False
+    assert plan["repair_fields"] == []
+
+
+def test_evaluate_connection_candidate_applies_phase6_salvage_once(monkeypatch) -> None:
+    payload = _build_edge_first_payload()
+    payload["mechanism"] = (
+        "In the target domain, a threshold is crossed and the system changes state."
+    )
+    repaired = _build_edge_first_payload()
+
+    validate_calls = {"count": 0}
+
+    def fake_validate(_payload: dict) -> tuple[bool, list[str]]:
+        validate_calls["count"] += 1
+        if validate_calls["count"] == 1:
+            return False, ["mechanism must name a specific process"]
+        return True, []
+
+    monkeypatch.setattr(
+        main,
+        "score_connection",
+        lambda *_args, **_kwargs: {
+            "total": 0.93,
+            "depth": 0.84,
+            "distance": 0.81,
+            "novelty": 0.62,
+            "prediction_quality": {"passes": True, "score": 1.0},
+        },
+    )
+    monkeypatch.setattr(main, "validate_hypothesis", fake_validate)
+    monkeypatch.setattr(
+        main,
+        "summarize_evidence_map_provenance",
+        lambda connection: {
+            "passes": True,
+            "issues": [],
+            "evidence_map": connection.get("evidence_map"),
+            "supported_critical_mapping_count": 3,
+            "critical_mapping_count": 3,
+            "supported_mechanism_assertion_count": 1,
+            "required_mechanism_assertion_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_extract_seed_provenance",
+        lambda _patterns: ("https://example.com/seed", "seed excerpt"),
+    )
+    monkeypatch.setattr(
+        main,
+        "salvage_high_value_candidate",
+        lambda connection, missing_fields, failure_reasons=None: repaired
+        if missing_fields == ["mechanism"]
+        else None,
+    )
+    monkeypatch.setattr(
+        main,
+        "_evaluate_usefulness_proof_gate",
+        lambda **_kwargs: {"passes": True, "reasons": [], "repair_fields": []},
+    )
+    monkeypatch.setattr(
+        main,
+        "_evaluate_transmit_evidence_gate",
+        lambda **_kwargs: {"passes": True, "reasons": []},
+    )
+    monkeypatch.setattr(
+        main,
+        "run_adversarial_rubric",
+        lambda *_args, **_kwargs: (True, {"kill_reasons": []}),
+    )
+    monkeypatch.setattr(
+        main,
+        "run_invariance_check",
+        lambda *_args, **_kwargs: (True, {"invariance_score": 1.0}),
+    )
+    monkeypatch.setattr(
+        main,
+        "rewrite_transmission",
+        lambda **_kwargs: {"boring": True, "rewritten": None},
+    )
+
+    candidate = main._evaluate_connection_candidate(
+        score_label="Phase6 Test",
+        source_domain="Juggling",
+        target_domain="Time-triggered scheduling",
+        patterns_payload=[],
+        connection=payload,
+        threshold=0.64,
+        dedup_enabled=False,
+    )
+
+    assert candidate["salvage_attempted"] is True
+    assert candidate["salvage_applied"] is True
+    assert candidate["salvage_fields"] == ["mechanism"]
+    assert candidate["validation_ok"] is True
+    assert candidate["prepared_connection"]["mechanism"] == repaired["mechanism"]

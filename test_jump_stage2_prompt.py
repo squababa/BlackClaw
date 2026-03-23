@@ -119,6 +119,19 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Do not rename the target-domain process into a broader abstract label" in prompt
 
 
+def test_phase6_salvage_prompt_stays_selective() -> None:
+    prompt = jump.PHASE6_SALVAGE_PROMPT
+
+    assert "high-value near-miss" in prompt
+    assert "one narrow rescue pass" in prompt
+    assert "rewrite it to open with one exact target-domain process noun phrase" in prompt
+    assert (
+        "rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, "
+        "`edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together"
+        in prompt
+    )
+
+
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
     payload = _valid_stage2_payload()
     payload["mechanism"] = "In the target domain, the system transitions to a new state when the threshold is crossed."

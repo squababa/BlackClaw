@@ -329,6 +329,20 @@ MISSING_FIELDS_REPAIR_PROMPT = (
     "Do not change the source_domain or target_domain. Do not add a depth field."
 )
 
+PHASE6_SALVAGE_PROMPT = """Targeted salvage rewrite for a high-value near-miss.
+
+Repair only the listed fields. Keep `source_domain`, `target_domain`, `connection`, `prediction`, `test`, `variable_mapping`, `evidence_map`, `boundary_conditions`, `assumptions`, and mechanism typing stable unless one of the listed fields must change to satisfy the repair.
+
+Phase 6 rules:
+- This candidate already scored well enough to deserve one narrow rescue pass. Do not broaden the claim, add new unsupported mechanisms, or relax evidence discipline.
+- If `mechanism` is listed, rewrite it to open with one exact target-domain process noun phrase pulled from the strongest direct target-domain evidence.
+- If any edge-analysis fields are listed, rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together so they stay on the same claim, process, comparator, and metric already grounded by `mechanism` / `prediction` / `test`.
+- `edge_analysis.cheap_test` must describe one real operator move on a narrow slice of workflow, not a generic validation suggestion and not a restatement of the full test.
+- If you cannot repair the listed fields without inventing unsupported detail, return `{"no_connection": true}`.
+
+Return JSON only.
+"""
+
 GENERIC_MECHANISM_FILLERS = (
     "threshold mechanism",
     "gating effect",
@@ -1725,6 +1739,40 @@ def _repair_missing_fields(
     except Exception as e:
         print(f"  [!] Jump stage2 repair call failed: {e}")
         return None
+
+
+def salvage_high_value_candidate(
+    original_data: dict,
+    missing_fields: list[str],
+    *,
+    failure_reasons: list[str] | None = None,
+) -> dict | None:
+    """Run one selective Phase 6 salvage rewrite for a strong near-miss."""
+    if not isinstance(original_data, dict) or not missing_fields:
+        return None
+    guidance_prompt = PHASE6_SALVAGE_PROMPT
+    normalized_reasons = [
+        str(reason).strip()
+        for reason in (failure_reasons or [])
+        if str(reason).strip()
+    ]
+    if normalized_reasons:
+        guidance_prompt += (
+            "\nCurrent blockers:\n- " + "\n- ".join(normalized_reasons[:6]) + "\n"
+        )
+    repaired = _repair_missing_fields(
+        guidance_prompt,
+        json.dumps(original_data, ensure_ascii=False, sort_keys=True),
+        missing_fields,
+        original_data=original_data,
+    )
+    if repaired is None or repaired.get("no_connection", False):
+        return None
+    repaired = _apply_normalized_mechanism_typing(repaired)
+    if _missing_required_fields(repaired):
+        return None
+    repaired["evidence_map"] = normalize_evidence_map(repaired.get("evidence_map"))
+    return repaired
 
 
 def _stage_one_detect(
