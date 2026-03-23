@@ -148,6 +148,36 @@ PHASE6_VALIDATION_REASON_TO_FIELDS = {
         "edge_analysis.cheap_test",
     ],
 }
+REPLAY_LEGACY_EDGE_REASON_TO_FIELDS = {
+    "edge_analysis problem_statement must name a specific target-domain problem": [
+        "edge_analysis.problem_statement",
+    ],
+    "edge_analysis actionable_lever must name a concrete action": [
+        "edge_analysis.actionable_lever",
+    ],
+    "edge_analysis cheap_test must include setup, metric, confirm, and falsify": [
+        "edge_analysis.cheap_test",
+    ],
+    "edge_analysis edge_if_right must name a concrete operator advantage": [
+        "edge_analysis.edge_if_right",
+    ],
+    "edge_analysis primary_operator must name a specific operator": [
+        "edge_analysis.primary_operator",
+    ],
+    "usefulness:missing_edge_problem": [
+        "edge_analysis.problem_statement",
+    ],
+    "usefulness:missing_actionable_lever": [
+        "edge_analysis.actionable_lever",
+    ],
+    "usefulness:missing_cheap_test": [
+        "edge_analysis.cheap_test",
+    ],
+    "usefulness:missing_edge_advantage": [
+        "edge_analysis.edge_if_right",
+        "edge_analysis.primary_operator",
+    ],
+}
 
 
 def _print_credibility_weighting_summary(score_label: str, scores: dict):
@@ -2164,10 +2194,203 @@ def _load_strong_rejection_replay_context(rejection_id: int) -> dict | None:
     }
 
 
+def _strong_rejection_replay_context(row: dict) -> dict:
+    """Build replay-only metadata without mutating the stored row."""
+    original_reasons = _strong_rejection_reason_list(row.get("rejection_reasons"))
+    if not original_reasons and _clean_inline_text(row.get("salvage_reason")):
+        original_reasons = [str(row.get("salvage_reason")).strip()]
+
+    return {
+        "mode": "strong_rejection_replay",
+        "stored_original_total_score": row.get("total_score"),
+        "original_rejection_reasons": original_reasons,
+    }
+
+
+def _replay_reason_mentions_edge_schema(reason: object) -> bool:
+    """Detect whether a stored rejection already targeted the modern edge layer."""
+    text = (_clean_strong_rejection_reason_text(reason) or "").lower()
+    if not text:
+        return False
+    return text.startswith("edge_analysis ") or text.startswith("usefulness:missing_")
+
+
+def _replay_legacy_edge_profile(
+    connection: dict,
+    *,
+    original_reasons: list[str] | None = None,
+) -> dict:
+    """Infer whether a replay payload predates the newer edge-analysis schema."""
+    payload = connection if isinstance(connection, dict) else {}
+    nested_edge = payload.get("edge_analysis")
+    if isinstance(nested_edge, dict):
+        return {
+            "is_legacy_payload": False,
+            "missing_fields": [],
+        }
+    if any(_replay_reason_mentions_edge_schema(reason) for reason in (original_reasons or [])):
+        return {
+            "is_legacy_payload": False,
+            "missing_fields": [],
+        }
+
+    normalized_edge = normalize_edge_analysis(payload)
+    cheap_test = (
+        normalized_edge.get("cheap_test")
+        if isinstance(normalized_edge.get("cheap_test"), dict)
+        else {}
+    )
+    missing_fields: list[str] = []
+    if not _clean_inline_text(normalized_edge.get("problem_statement")):
+        missing_fields.append("edge_analysis.problem_statement")
+    if not _clean_inline_text(normalized_edge.get("actionable_lever")):
+        missing_fields.append("edge_analysis.actionable_lever")
+    if not all(
+        _clean_inline_text(cheap_test.get(key))
+        for key in ("setup", "metric", "confirm", "falsify")
+    ):
+        missing_fields.append("edge_analysis.cheap_test")
+    if not _clean_inline_text(normalized_edge.get("edge_if_right")):
+        missing_fields.append("edge_analysis.edge_if_right")
+    if not _clean_inline_text(normalized_edge.get("primary_operator")):
+        missing_fields.append("edge_analysis.primary_operator")
+
+    return {
+        "is_legacy_payload": len(missing_fields) == 5,
+        "missing_fields": missing_fields if len(missing_fields) == 5 else [],
+    }
+
+
+def _replay_legacy_schema_reasons(
+    reasons: list[str],
+    *,
+    legacy_profile: dict | None = None,
+) -> list[str]:
+    """Collect replay-only schema-era failures caused by missing newer edge fields."""
+    profile = legacy_profile if isinstance(legacy_profile, dict) else {}
+    missing_fields = {
+        str(field).strip()
+        for field in (profile.get("missing_fields") or [])
+        if str(field).strip()
+    }
+    if not missing_fields:
+        return []
+
+    legacy_reasons: list[str] = []
+    for raw_reason in reasons or []:
+        reason = str(raw_reason).strip()
+        if not reason:
+            continue
+        mapped_fields = REPLAY_LEGACY_EDGE_REASON_TO_FIELDS.get(reason, [])
+        if mapped_fields and all(field in missing_fields for field in mapped_fields):
+            legacy_reasons.append(reason)
+    return legacy_reasons
+
+
+def _replay_stage_failures_display(
+    stage_failures: list[str],
+    *,
+    legacy_reasons: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split replay failures into effective vs schema-era display lists."""
+    legacy_set = set(legacy_reasons)
+    effective: list[str] = []
+    schema_era: list[str] = []
+    for raw_failure in stage_failures or []:
+        failure = str(raw_failure).strip()
+        if not failure:
+            continue
+        cleaned = _clean_strong_rejection_reason_text(failure) or failure
+        if cleaned in legacy_set:
+            schema_era.append(failure)
+        else:
+            effective.append(failure)
+    return effective, schema_era
+
+
+def _build_strong_rejection_replay_diagnostics(
+    *,
+    replay_context: dict | None,
+    stage_failures: list[str],
+    legacy_profile: dict | None,
+    legacy_reasons: list[str],
+    salvage_attempted: bool,
+    salvage_applied: bool,
+    total_score: float | None,
+    threshold: float,
+) -> dict | None:
+    """Summarize replay-only failure families without changing live evaluation."""
+    context = replay_context if isinstance(replay_context, dict) else {}
+    if context.get("mode") != "strong_rejection_replay":
+        return None
+
+    original_display = _strong_rejection_reason_list(
+        context.get("original_rejection_reasons")
+    )
+    original_clean = [
+        _clean_strong_rejection_reason_text(reason) or str(reason).strip()
+        for reason in original_display
+        if str(reason).strip()
+    ]
+    current_display, legacy_display = _replay_stage_failures_display(
+        stage_failures,
+        legacy_reasons=legacy_reasons,
+    )
+    current_clean = [
+        _clean_strong_rejection_reason_text(reason) or str(reason).strip()
+        for reason in current_display
+        if str(reason).strip()
+    ]
+
+    original_bottleneck_reasons: list[str] = []
+    for reason in original_clean:
+        if reason and reason in current_clean and reason not in original_bottleneck_reasons:
+            original_bottleneck_reasons.append(reason)
+
+    new_current_pipeline_failures: list[str] = []
+    for reason in current_clean:
+        if reason and reason not in original_clean and reason not in new_current_pipeline_failures:
+            new_current_pipeline_failures.append(reason)
+
+    stored_original_total = context.get("stored_original_total_score")
+    floor = max(float(threshold), PHASE6_SALVAGE_SCORE_FLOOR)
+    current_total = float(total_score) if total_score is not None else None
+    stored_total = (
+        float(stored_original_total)
+        if isinstance(stored_original_total, (int, float))
+        else None
+    )
+    salvage_used_original_score = bool(
+        stored_total is not None
+        and current_total is not None
+        and current_total < floor <= stored_total
+    )
+
+    return {
+        "original_rejection_reasons": original_display,
+        "current_rejection_reasons": current_display,
+        "legacy_schema_failures": legacy_display,
+        "legacy_payload_missing_newer_fields": bool(
+            isinstance(legacy_profile, dict)
+            and legacy_profile.get("is_legacy_payload")
+        ),
+        "legacy_missing_fields": list((legacy_profile or {}).get("missing_fields") or []),
+        "original_bottleneck_reasons": original_bottleneck_reasons,
+        "original_bottleneck_still_present": bool(original_bottleneck_reasons),
+        "new_current_pipeline_failures": new_current_pipeline_failures,
+        "salvage_attempted_but_no_valid_rewrite": bool(
+            salvage_attempted and not salvage_applied
+        ),
+        "salvage_used_original_score": salvage_used_original_score,
+    }
+
+
 def _strong_rejection_replay_verdict(candidate: dict) -> str:
     """Classify replay output into the requested operator-facing verdicts."""
     if candidate.get("should_transmit"):
         return "would now transmit"
+    if candidate.get("salvage_attempted") and not candidate.get("salvage_applied"):
+        return "salvage attempted but rewrite failed"
 
     claim_provenance = (
         candidate.get("claim_provenance")
@@ -2310,6 +2533,7 @@ def _replay_strong_rejection(rejection_id: int, threshold: float) -> bool:
         f"against threshold {float(threshold):.3f}"
     )
     print(f"[StrongRejectionReplay] Domains: {source_domain} → {target_domain}")
+    replay_context = _strong_rejection_replay_context(row)
 
     candidate = _evaluate_connection_candidate(
         score_label=f"StrongRejection Replay #{rejection_id}",
@@ -2318,14 +2542,21 @@ def _replay_strong_rejection(rejection_id: int, threshold: float) -> bool:
         patterns_payload=context.get("patterns_payload") or [],
         connection=context["connection"],
         threshold=float(threshold),
+        replay_context=replay_context,
     )
 
-    original_reasons = _strong_rejection_reason_list(row.get("rejection_reasons"))
-    if not original_reasons and _clean_inline_text(row.get("salvage_reason")):
-        original_reasons = [str(row.get("salvage_reason")).strip()]
-    new_reasons = _strong_rejection_reason_list(
+    replay_diagnostics = (
+        candidate.get("replay_diagnostics")
+        if isinstance(candidate.get("replay_diagnostics"), dict)
+        else {}
+    )
+    original_reasons = replay_diagnostics.get("original_rejection_reasons") or list(
+        replay_context.get("original_rejection_reasons") or []
+    )
+    new_reasons = replay_diagnostics.get("current_rejection_reasons") or _strong_rejection_reason_list(
         candidate.get("stage_failures") or candidate.get("validation_reasons") or []
     )
+    legacy_reasons = replay_diagnostics.get("legacy_schema_failures") or []
     original_total = row.get("total_score")
     new_total = candidate.get("total_score")
     salvage_fields = [
@@ -2376,6 +2607,47 @@ def _replay_strong_rejection(rejection_id: int, threshold: float) -> bool:
         "[StrongRejectionReplay] New rejection reasons",
         new_reasons,
     )
+    if legacy_reasons:
+        _print_reason_block(
+            "[StrongRejectionReplay] Legacy schema-era reasons",
+            legacy_reasons,
+        )
+
+    print("[StrongRejectionReplay] Diagnostics")
+    print("diagnostic\tvalue")
+    print(
+        "original_bottleneck_still_present\t"
+        f"{'yes' if replay_diagnostics.get('original_bottleneck_still_present') else 'no'}"
+    )
+    print(
+        "salvage_attempted_but_no_valid_rewrite\t"
+        f"{'yes' if replay_diagnostics.get('salvage_attempted_but_no_valid_rewrite') else 'no'}"
+    )
+    print(
+        "legacy_payload_missing_newer_fields\t"
+        f"{'yes' if replay_diagnostics.get('legacy_payload_missing_newer_fields') else 'no'}"
+    )
+    print(
+        "new_current_pipeline_failure\t"
+        f"{'yes' if replay_diagnostics.get('new_current_pipeline_failures') else 'no'}"
+    )
+    if replay_diagnostics.get("salvage_used_original_score"):
+        print("salvage_eligibility_score_source\tstored_original_total_score")
+    if replay_diagnostics.get("legacy_missing_fields"):
+        print(
+            "legacy_missing_fields\t"
+            f"{', '.join(replay_diagnostics.get('legacy_missing_fields') or [])}"
+        )
+    if replay_diagnostics.get("original_bottleneck_reasons"):
+        print(
+            "original_bottleneck_reasons\t"
+            f"{', '.join(replay_diagnostics.get('original_bottleneck_reasons') or [])}"
+        )
+    if replay_diagnostics.get("new_current_pipeline_failures"):
+        print(
+            "new_current_pipeline_failures\t"
+            f"{', '.join(replay_diagnostics.get('new_current_pipeline_failures') or [])}"
+        )
 
     print("[StrongRejectionReplay] Gate outcomes")
     print("gate\toutcome")
@@ -6058,17 +6330,26 @@ def _plan_phase6_salvage(
     usefulness_proof: dict | None,
     claim_provenance_ok: bool,
     prediction_quality_ok: bool,
+    alternate_total_scores: list[float] | None = None,
+    ignored_reasons: list[str] | None = None,
 ) -> dict:
     """Plan one selective Phase 6 salvage pass for high-value near-misses."""
+    ignored_reason_set = {
+        str(reason).strip()
+        for reason in (ignored_reasons or [])
+        if str(reason).strip()
+    }
     normalized_validation = [
         str(reason).strip()
         for reason in (validation_reasons or [])
         if str(reason).strip()
+        and str(reason).strip() not in ignored_reason_set
     ]
     usefulness_reasons = [
         str(reason).strip()
         for reason in ((usefulness_proof or {}).get("reasons") or [])
         if str(reason).strip()
+        and str(reason).strip() not in ignored_reason_set
     ]
     combined_reasons: list[str] = []
     for reason in normalized_validation + usefulness_reasons:
@@ -6109,17 +6390,27 @@ def _plan_phase6_salvage(
         PHASE6_REPAIRABLE_VALIDATION_REASONS
         | PHASE6_REPAIRABLE_USEFULNESS_REASONS
     )
+    score_candidates = [float(total_score)]
+    for raw_score in alternate_total_scores or []:
+        if isinstance(raw_score, (int, float)):
+            score_candidates.append(float(raw_score))
+    eligibility_score = max(score_candidates) if score_candidates else float(total_score)
     eligible = bool(repair_fields) and all(
         reason in allowed_reasons for reason in combined_reasons
     )
     eligible = eligible and len(combined_reasons) <= PHASE6_MAX_REPAIRABLE_REASONS
-    eligible = eligible and total_score >= max(threshold, PHASE6_SALVAGE_SCORE_FLOOR)
+    eligible = eligible and eligibility_score >= max(
+        threshold,
+        PHASE6_SALVAGE_SCORE_FLOOR,
+    )
     eligible = eligible and claim_provenance_ok and prediction_quality_ok
 
     return {
         "eligible": eligible,
         "repair_fields": repair_fields,
         "reasons": combined_reasons,
+        "ignored_reasons": sorted(ignored_reason_set),
+        "eligibility_score": eligibility_score,
     }
 
 
@@ -6381,9 +6672,24 @@ def _evaluate_connection_candidate(
     connection: dict,
     threshold: float,
     dedup_enabled: bool = True,
+    replay_context: dict | None = None,
 ) -> dict:
     """Run scoring and all gating logic for one candidate connection."""
     connection = dict(connection) if isinstance(connection, dict) else {}
+    replay_mode = (
+        isinstance(replay_context, dict)
+        and replay_context.get("mode") == "strong_rejection_replay"
+    )
+    replay_legacy_profile = (
+        _replay_legacy_edge_profile(
+            connection,
+            original_reasons=list(
+                replay_context.get("original_rejection_reasons") or []
+            ),
+        )
+        if replay_mode
+        else {"is_legacy_payload": False, "missing_fields": []}
+    )
     mechanism_typing = normalize_mechanism_typing(connection)
     connection["mechanism_typing"] = mechanism_typing
     connection["mechanism_type"] = mechanism_typing.get("mechanism_type")
@@ -6483,6 +6789,14 @@ def _evaluate_connection_candidate(
                 print(f"  [Usefulness] - {reason}")
 
     if passes_threshold and claim_provenance_ok:
+        replay_legacy_schema_failures = (
+            _replay_legacy_schema_reasons(
+                validation_reasons,
+                legacy_profile=replay_legacy_profile,
+            )
+            if replay_mode
+            else []
+        )
         salvage_plan = _plan_phase6_salvage(
             total_score=float(scores.get("total") or 0.0),
             threshold=threshold,
@@ -6490,6 +6804,12 @@ def _evaluate_connection_candidate(
             usefulness_proof=usefulness_proof,
             claim_provenance_ok=claim_provenance_ok,
             prediction_quality_ok=prediction_quality_ok,
+            alternate_total_scores=[
+                replay_context.get("stored_original_total_score")
+            ]
+            if replay_mode
+            else None,
+            ignored_reasons=replay_legacy_schema_failures,
         )
         if salvage_plan.get("eligible"):
             salvage_attempted = True
@@ -6508,6 +6828,14 @@ def _evaluate_connection_candidate(
             _record_late_stage_timing(late_stage_timing, "salvage", salvage_started)
             if salvaged_connection is None:
                 print("  [Salvage] No valid targeted rewrite produced")
+                if validation_log is not None:
+                    validation_log["phase6_salvage"] = {
+                        "attempted": True,
+                        "applied": False,
+                        "repair_fields": salvage_fields,
+                        "trigger_reasons": salvage_reasons,
+                        "rewrite_failed": True,
+                    }
             else:
                 salvage_applied = True
                 connection = dict(salvaged_connection)
@@ -6589,6 +6917,8 @@ def _evaluate_connection_candidate(
                 "applied": False,
                 "repair_fields": [],
                 "trigger_reasons": [],
+                "rewrite_failed": False,
+                "ignored_reasons": list(salvage_plan.get("ignored_reasons") or []),
             }
 
     if passes_threshold and validation_ok and claim_provenance_ok and usefulness_ok:
@@ -6840,6 +7170,25 @@ def _evaluate_connection_candidate(
     if white_detected:
         stage_failures.append("novelty:white_detected")
 
+    replay_legacy_reasons = (
+        _replay_legacy_schema_reasons(
+            validation_reasons,
+            legacy_profile=replay_legacy_profile,
+        )
+        if replay_mode
+        else []
+    )
+    replay_diagnostics = _build_strong_rejection_replay_diagnostics(
+        replay_context=replay_context,
+        stage_failures=stage_failures,
+        legacy_profile=replay_legacy_profile,
+        legacy_reasons=replay_legacy_reasons,
+        salvage_attempted=salvage_attempted,
+        salvage_applied=salvage_applied,
+        total_score=scores.get("total"),
+        threshold=threshold,
+    )
+
     finalized_late_stage_timing = _finalize_late_stage_timing(late_stage_timing)
 
     return {
@@ -6883,6 +7232,7 @@ def _evaluate_connection_candidate(
         "scholarly_prior_art_summary": scholarly_prior_art_summary,
         "prepared_connection": prepared_connection,
         "stage_failures": stage_failures,
+        "replay_diagnostics": replay_diagnostics,
         "late_stage_timing": finalized_late_stage_timing,
         "actual_target": target_domain,
     }
