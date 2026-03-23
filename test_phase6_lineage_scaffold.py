@@ -395,6 +395,103 @@ def test_empty_lineage_payloads_do_not_break_report_helpers(temp_db, capsys) -> 
     )
 
 
+def test_replay_strong_rejection_reuses_stored_payload_and_reports_outcome(
+    temp_db, monkeypatch, capsys
+) -> None:
+    rejection_id = _save_legacy_strong_rejection(temp_db)
+    captured: dict[str, object] = {}
+
+    def fake_evaluate_connection_candidate(
+        *,
+        score_label: str,
+        source_domain: str,
+        target_domain: str,
+        patterns_payload: list[dict],
+        connection: dict,
+        threshold: float,
+        dedup_enabled: bool = True,
+    ) -> dict:
+        captured["score_label"] = score_label
+        captured["source_domain"] = source_domain
+        captured["target_domain"] = target_domain
+        captured["patterns_payload"] = patterns_payload
+        captured["connection"] = connection
+        captured["threshold"] = threshold
+        captured["dedup_enabled"] = dedup_enabled
+        return {
+            "total_score": 0.971,
+            "passes_threshold": True,
+            "validation_ok": True,
+            "claim_provenance": {
+                "passes": True,
+                "issues": [],
+            },
+            "usefulness_ok": False,
+            "usefulness_proof": {
+                "passes": False,
+                "reasons": ["usefulness:missing_cheap_test"],
+            },
+            "evidence_credibility_ok": True,
+            "evidence_credibility": None,
+            "adversarial_ok": True,
+            "adversarial_rubric": None,
+            "invariance_ok": True,
+            "invariance_result": None,
+            "provenance_ok": False,
+            "distance_ok": True,
+            "white_detected": False,
+            "salvage_attempted": True,
+            "salvage_applied": True,
+            "salvage_fields": ["mechanism"],
+            "should_transmit": False,
+            "stage_failures": [
+                "usefulness:missing_cheap_test",
+                "provenance:incomplete",
+            ],
+            "validation_reasons": [],
+        }
+
+    monkeypatch.setattr(
+        main,
+        "_evaluate_connection_candidate",
+        fake_evaluate_connection_candidate,
+    )
+
+    assert main._replay_strong_rejection(rejection_id, threshold=0.64) is True
+    output = capsys.readouterr().out
+
+    assert captured["score_label"] == f"StrongRejection Replay #{rejection_id}"
+    assert captured["source_domain"] == "systems.test"
+    assert captured["target_domain"] == "latency.test"
+    assert captured["threshold"] == 0.64
+    assert captured["dedup_enabled"] is True
+    assert captured["patterns_payload"] == [
+        {
+            "seed_url": "https://seed.test/article",
+            "seed_excerpt": "Queue pressure accumulates during overload windows.",
+        }
+    ]
+    assert isinstance(captured["connection"], dict)
+    assert (
+        captured["connection"]["mechanism"]
+        == "queue pressure amplifies response latency"
+    )
+    assert "[StrongRejectionReplay] Verdict: salvage then fail later" in output
+    assert "salvage_attempted\tyes" in output
+    assert "salvage_applied\tyes" in output
+    assert "original_total_score\t0.940" in output
+    assert "new_total_score\t0.971" in output
+    assert "[StrongRejectionReplay] Original rejection reasons" in output
+    assert (
+        "- validation:evidence_map missing support for variable mapping "
+        "'queue pressure' -> 'response latency'"
+    ) in output
+    assert "[StrongRejectionReplay] New rejection reasons" in output
+    assert "- usefulness:missing_cheap_test" in output
+    assert "usefulness\tfail" in output
+    assert "evidence_credibility\tnot_run" in output
+
+
 def test_resolve_lineage_links_child_transmission_to_prior_transmission_cluster(
     temp_db,
 ) -> None:

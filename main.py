@@ -396,6 +396,12 @@ def _parse_report_only_args():
         metavar="ID",
     )
     parser.add_argument(
+        "--replay-strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
         "--mark-salvaged",
         type=int,
         default=None,
@@ -2039,6 +2045,345 @@ def _print_strong_rejection_detail(rejection_id: int) -> bool:
     return True
 
 
+def _strong_rejection_reason_list(value: object) -> list[str]:
+    """Normalize a reason payload into a clean, de-duplicated list."""
+    raw_values = value if isinstance(value, list) else []
+    reasons: list[str] = []
+    for raw_reason in raw_values:
+        reason = str(raw_reason or "").strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return reasons
+
+
+def _load_strong_rejection_replay_context(rejection_id: int) -> dict | None:
+    """Load one stored strong rejection plus the minimal replay context."""
+    row = get_strong_rejection(rejection_id)
+    if row is None:
+        return None
+
+    connection_payload = (
+        row.get("connection_payload")
+        if isinstance(row.get("connection_payload"), dict)
+        else None
+    )
+    if connection_payload is None:
+        return {
+            "row": row,
+            "error": "stored connection payload is unavailable",
+        }
+
+    exploration_context: dict[str, object] = {}
+    exploration_id = row.get("exploration_id")
+    if exploration_id is not None:
+        conn = _connect()
+        exploration_row = conn.execute(
+            """SELECT
+                patterns_found,
+                jump_target_domain,
+                seed_url,
+                seed_excerpt,
+                target_url,
+                target_excerpt
+            FROM explorations
+            WHERE id = ?
+            LIMIT 1""",
+            (exploration_id,),
+        ).fetchone()
+        conn.close()
+        if exploration_row is not None:
+            try:
+                parsed_patterns = json.loads(exploration_row["patterns_found"] or "[]")
+            except Exception:
+                parsed_patterns = []
+            if not isinstance(parsed_patterns, list):
+                parsed_patterns = []
+            exploration_context = {
+                "patterns_payload": [
+                    item for item in parsed_patterns if isinstance(item, dict)
+                ],
+                "target_domain": _clean_inline_text(
+                    exploration_row["jump_target_domain"]
+                ),
+                "seed_url": _clean_inline_text(exploration_row["seed_url"]),
+                "seed_excerpt": _clean_inline_text(exploration_row["seed_excerpt"]),
+                "target_url": _clean_inline_text(exploration_row["target_url"]),
+                "target_excerpt": _clean_inline_text(exploration_row["target_excerpt"]),
+            }
+
+    connection = dict(connection_payload)
+    if not isinstance(connection.get("evidence_map"), dict) and isinstance(
+        row.get("evidence_map"), dict
+    ):
+        connection["evidence_map"] = row.get("evidence_map")
+    if not isinstance(connection.get("mechanism_typing"), dict) and isinstance(
+        row.get("mechanism_typing"), dict
+    ):
+        connection["mechanism_typing"] = row.get("mechanism_typing")
+    if not _clean_inline_text(connection.get("mechanism_type")):
+        mechanism_type = _clean_inline_text(row.get("mechanism_type"))
+        if mechanism_type is not None:
+            connection["mechanism_type"] = mechanism_type
+    for field in ("target_url", "target_excerpt"):
+        if not _clean_inline_text(connection.get(field)):
+            fallback = _clean_inline_text(exploration_context.get(field))
+            if fallback is not None:
+                connection[field] = fallback
+
+    patterns_payload = list(exploration_context.get("patterns_payload") or [])
+    if not patterns_payload:
+        seed_url = _clean_inline_text(connection.get("seed_url")) or _clean_inline_text(
+            exploration_context.get("seed_url")
+        )
+        seed_excerpt = _clean_inline_text(
+            connection.get("seed_excerpt")
+        ) or _clean_inline_text(exploration_context.get("seed_excerpt"))
+        if seed_url is not None or seed_excerpt is not None:
+            patterns_payload = [
+                {
+                    "seed_url": seed_url,
+                    "seed_excerpt": seed_excerpt,
+                }
+            ]
+
+    target_domain = _clean_inline_text(row.get("target_domain")) or _clean_inline_text(
+        exploration_context.get("target_domain")
+    )
+    if target_domain is None:
+        return {
+            "row": row,
+            "error": "stored target domain is unavailable",
+        }
+
+    return {
+        "row": row,
+        "connection": connection,
+        "patterns_payload": patterns_payload,
+        "source_domain": row.get("seed_domain"),
+        "target_domain": target_domain,
+    }
+
+
+def _strong_rejection_replay_verdict(candidate: dict) -> str:
+    """Classify replay output into the requested operator-facing verdicts."""
+    if candidate.get("should_transmit"):
+        return "would now transmit"
+
+    claim_provenance = (
+        candidate.get("claim_provenance")
+        if isinstance(candidate.get("claim_provenance"), dict)
+        else {}
+    )
+    if (
+        candidate.get("salvage_applied")
+        and candidate.get("validation_ok")
+        and bool(claim_provenance.get("passes"))
+    ):
+        return "salvage then fail later"
+    return "still fail"
+
+
+def _replay_gate_outcomes(candidate: dict) -> list[tuple[str, str]]:
+    """Render major gate outcomes without marking skipped stages as passes."""
+    claim_provenance = (
+        candidate.get("claim_provenance")
+        if isinstance(candidate.get("claim_provenance"), dict)
+        else {}
+    )
+    threshold_ok = bool(candidate.get("passes_threshold"))
+    validation_ok = bool(candidate.get("validation_ok"))
+    claim_provenance_ok = bool(claim_provenance.get("passes"))
+    usefulness_payload = candidate.get("usefulness_proof")
+    evidence_payload = candidate.get("evidence_credibility")
+    adversarial_payload = candidate.get("adversarial_rubric")
+    invariance_payload = candidate.get("invariance_result")
+
+    def _status(value: bool | None) -> str:
+        if value is None:
+            return "not_run"
+        return "pass" if value else "fail"
+
+    usefulness_status = (
+        bool(candidate.get("usefulness_ok"))
+        if isinstance(usefulness_payload, dict)
+        else None
+    )
+    evidence_status = (
+        bool(candidate.get("evidence_credibility_ok"))
+        if isinstance(evidence_payload, dict)
+        else None
+    )
+    adversarial_status = (
+        bool(candidate.get("adversarial_ok"))
+        if isinstance(adversarial_payload, dict)
+        else None
+    )
+    invariance_status = (
+        bool(candidate.get("invariance_ok"))
+        if isinstance(invariance_payload, dict)
+        else None
+    )
+
+    return [
+        ("threshold", _status(threshold_ok)),
+        ("validation", _status(validation_ok if threshold_ok else None)),
+        ("claim_provenance", _status(claim_provenance_ok)),
+        (
+            "usefulness",
+            _status(
+                usefulness_status
+                if threshold_ok and validation_ok and claim_provenance_ok
+                else None
+            ),
+        ),
+        (
+            "evidence_credibility",
+            _status(
+                evidence_status
+                if threshold_ok
+                and validation_ok
+                and claim_provenance_ok
+                and usefulness_status is True
+                else None
+            ),
+        ),
+        (
+            "adversarial",
+            _status(
+                adversarial_status
+                if threshold_ok
+                and validation_ok
+                and claim_provenance_ok
+                and usefulness_status is True
+                and evidence_status is True
+                else None
+            ),
+        ),
+        (
+            "invariance",
+            _status(
+                invariance_status
+                if threshold_ok
+                and validation_ok
+                and claim_provenance_ok
+                and usefulness_status is True
+                and evidence_status is True
+                and adversarial_status is True
+                else None
+            ),
+        ),
+        ("provenance_complete", _status(bool(candidate.get("provenance_ok")))),
+        ("distance", _status(bool(candidate.get("distance_ok")))),
+        ("white_novelty", _status(not bool(candidate.get("white_detected")))),
+    ]
+
+
+def _print_reason_block(header: str, reasons: list[str]):
+    """Print a stable reason block."""
+    print(header)
+    if not reasons:
+        print("none")
+        return
+    for reason in reasons:
+        print(f"- {reason}")
+
+
+def _replay_strong_rejection(rejection_id: int, threshold: float) -> bool:
+    """Replay one stored strong rejection through the current late-stage path."""
+    context = _load_strong_rejection_replay_context(rejection_id)
+    if context is None:
+        print(f"  [!] Strong rejection #{rejection_id} not found.")
+        return False
+    if context.get("error") is not None:
+        print(
+            f"  [!] Strong rejection #{rejection_id} cannot be replayed: "
+            f"{context.get('error')}."
+        )
+        return False
+
+    row = context["row"]
+    source_domain = _clean_inline_text(context.get("source_domain")) or "Unknown"
+    target_domain = _clean_inline_text(context.get("target_domain")) or "Unknown"
+
+    print(
+        f"[StrongRejectionReplay] Replaying #{rejection_id} read-only "
+        f"against threshold {float(threshold):.3f}"
+    )
+    print(f"[StrongRejectionReplay] Domains: {source_domain} → {target_domain}")
+
+    candidate = _evaluate_connection_candidate(
+        score_label=f"StrongRejection Replay #{rejection_id}",
+        source_domain=source_domain,
+        target_domain=target_domain,
+        patterns_payload=context.get("patterns_payload") or [],
+        connection=context["connection"],
+        threshold=float(threshold),
+    )
+
+    original_reasons = _strong_rejection_reason_list(row.get("rejection_reasons"))
+    if not original_reasons and _clean_inline_text(row.get("salvage_reason")):
+        original_reasons = [str(row.get("salvage_reason")).strip()]
+    new_reasons = _strong_rejection_reason_list(
+        candidate.get("stage_failures") or candidate.get("validation_reasons") or []
+    )
+    original_total = row.get("total_score")
+    new_total = candidate.get("total_score")
+    salvage_fields = [
+        str(field).strip()
+        for field in (candidate.get("salvage_fields") or [])
+        if str(field).strip()
+    ]
+
+    print(
+        "[StrongRejectionReplay] Verdict: "
+        f"{_strong_rejection_replay_verdict(candidate)}"
+    )
+    print("field\tvalue")
+    print("read_only\tyes")
+    print(f"original_rejection_stage\t{row.get('rejection_stage') or '—'}")
+    print(
+        f"original_total_score\t{float(original_total):.3f}"
+        if original_total is not None
+        else "original_total_score\t—"
+    )
+    print(
+        f"new_total_score\t{float(new_total):.3f}"
+        if new_total is not None
+        else "new_total_score\t—"
+    )
+    print(
+        "salvage_attempted\t"
+        f"{'yes' if candidate.get('salvage_attempted') else 'no'}"
+    )
+    print(
+        "salvage_applied\t"
+        f"{'yes' if candidate.get('salvage_applied') else 'no'}"
+    )
+    print(
+        "salvage_fields\t"
+        f"{', '.join(salvage_fields) if salvage_fields else '—'}"
+    )
+    print(
+        "should_transmit\t"
+        f"{'yes' if candidate.get('should_transmit') else 'no'}"
+    )
+
+    _print_reason_block(
+        "[StrongRejectionReplay] Original rejection reasons",
+        original_reasons,
+    )
+    _print_reason_block(
+        "[StrongRejectionReplay] New rejection reasons",
+        new_reasons,
+    )
+
+    print("[StrongRejectionReplay] Gate outcomes")
+    print("gate\toutcome")
+    for gate_name, outcome in _replay_gate_outcomes(candidate):
+        print(f"{gate_name}\t{outcome}")
+    return True
+
+
 def _lineage_change_summary_text(payload: dict | None) -> str:
     """Render a compact lineage-change summary from stored JSON."""
     if not isinstance(payload, dict) or not payload:
@@ -2875,6 +3220,7 @@ if __name__ == "__main__":
         [
             _early_report_args.strong_rejections,
             _early_report_args.strong_rejection is not None,
+            _early_report_args.replay_strong_rejection is not None,
             _early_report_args.mark_salvaged is not None,
             _early_report_args.dismiss_strong_rejection is not None,
         ]
@@ -2957,7 +3303,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
+            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --replay-strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
         )
         sys.exit(1)
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
@@ -3053,6 +3399,10 @@ if __name__ == "__main__":
         ("--mark-failed", _early_report_args.mark_failed),
         ("--mark-unknown", _early_report_args.mark_unknown),
         ("--strong-rejection", _early_report_args.strong_rejection),
+        (
+            "--replay-strong-rejection",
+            _early_report_args.replay_strong_rejection,
+        ),
         ("--grade-transmission", _early_report_args.grade_transmission),
         ("--mark-salvaged", _early_report_args.mark_salvaged),
         (
@@ -3087,6 +3437,7 @@ if __name__ == "__main__":
         or _early_report_args.prediction is not None
         or _early_report_args.strong_rejections
         or _early_report_args.strong_rejection is not None
+        or _early_report_args.replay_strong_rejection is not None
         or _early_report_args.review_recent
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
@@ -3221,6 +3572,14 @@ if __name__ == "__main__":
         if (
             _early_report_args.strong_rejection is not None
             and not _print_strong_rejection_detail(_early_report_args.strong_rejection)
+        ):
+            sys.exit(1)
+        if (
+            _early_report_args.replay_strong_rejection is not None
+            and not _replay_strong_rejection(
+                _early_report_args.replay_strong_rejection,
+                _resolve_diagnostic_threshold(_early_report_args.threshold),
+            )
         ):
             sys.exit(1)
         if (
@@ -3715,6 +4074,13 @@ def parse_args():
         default=None,
         metavar="ID",
         help="Show full details for a stored strong rejection id and exit",
+    )
+    parser.add_argument(
+        "--replay-strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Reload a stored strong rejection payload, rerun the current late-stage evaluation read-only, and exit",
     )
     parser.add_argument(
         "--strong-rejection-lineage",
@@ -7216,6 +7582,7 @@ def main():
         [
             args.strong_rejections,
             args.strong_rejection is not None,
+            args.replay_strong_rejection is not None,
             args.strong_rejection_lineage is not None,
             args.backfill_lineage_scars,
             args.populate_scar_summaries,
@@ -7265,7 +7632,7 @@ def main():
         sys.exit(1)
     if strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one of --strong-rejections, --strong-rejection, --strong-rejection-lineage, --backfill-lineage-scars, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
+            "  [!] Use only one of --strong-rejections, --strong-rejection, --replay-strong-rejection, --strong-rejection-lineage, --backfill-lineage-scars, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and (
@@ -7368,6 +7735,7 @@ def main():
         ("--mark-failed", args.mark_failed),
         ("--mark-unknown", args.mark_unknown),
         ("--strong-rejection", args.strong_rejection),
+        ("--replay-strong-rejection", args.replay_strong_rejection),
         ("--strong-rejection-lineage", args.strong_rejection_lineage),
         ("--mark-salvaged", args.mark_salvaged),
         ("--dismiss-strong-rejection", args.dismiss_strong_rejection),
@@ -7508,6 +7876,11 @@ def main():
 
     if args.strong_rejection is not None:
         if not _print_strong_rejection_detail(args.strong_rejection):
+            sys.exit(1)
+        return
+
+    if args.replay_strong_rejection is not None:
+        if not _replay_strong_rejection(args.replay_strong_rejection, args.threshold):
             sys.exit(1)
         return
 
