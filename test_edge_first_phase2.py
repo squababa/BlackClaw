@@ -186,6 +186,24 @@ def test_validate_hypothesis_rejects_generic_actionable_lever() -> None:
     assert "edge_analysis actionable_lever is too generic" in reasons
 
 
+def test_validate_hypothesis_rejects_generic_validation_cheap_test() -> None:
+    payload = _build_edge_first_payload()
+    payload["edge_analysis"]["cheap_test"]["setup"] = (
+        "Run a study to validate whether the hypothesis is true."
+    )
+    payload["edge_analysis"]["cheap_test"]["confirm"] = (
+        "collision rate per hyperperiod is lower in the validation study"
+    )
+    payload["edge_analysis"]["cheap_test"]["falsify"] = (
+        "collision rate per hyperperiod is unchanged in the validation study"
+    )
+
+    ok, reasons = validate_hypothesis(payload)
+
+    assert ok is False
+    assert "edge_analysis cheap_test reads like a generic validation suggestion" in reasons
+
+
 def test_validate_hypothesis_allows_specific_single_word_primary_operator() -> None:
     payload = _build_edge_first_payload()
     payload["edge_analysis"]["primary_operator"] = "radiologist"
@@ -219,6 +237,56 @@ def test_usefulness_gate_rejects_misaligned_cheap_test_metric() -> None:
 
     assert result["passes"] is False
     assert result["cheap_test_ok"] is False
+    assert "usefulness:missing_cheap_test" in result["reasons"]
+
+
+def test_usefulness_gate_rejects_generic_validation_cheap_test() -> None:
+    payload = _build_edge_first_payload()
+    payload["edge_analysis"]["cheap_test"]["setup"] = (
+        "Run a study to validate whether the hypothesis is true."
+    )
+    payload["edge_analysis"]["cheap_test"]["confirm"] = (
+        "collision rate per hyperperiod is lower in the validation study"
+    )
+    payload["edge_analysis"]["cheap_test"]["falsify"] = (
+        "collision rate per hyperperiod is unchanged in the validation study"
+    )
+    claim_provenance = summarize_evidence_map_provenance(payload)
+
+    result = main._evaluate_usefulness_proof_gate(
+        payload,
+        prediction_quality=None,
+        claim_provenance=claim_provenance,
+    )
+
+    assert result["passes"] is False
+    assert result["cheap_test_ok"] is False
+    assert result["cheap_test_operator_move_ok"] is False
+    assert result["cheap_test_generic_validation"] is True
+    assert "edge_analysis.cheap_test" in result["repair_fields"]
+    assert "usefulness:missing_cheap_test" in result["reasons"]
+
+
+def test_usefulness_gate_rejects_cheap_test_that_restates_main_test() -> None:
+    payload = _build_edge_first_payload()
+    payload["edge_analysis"]["cheap_test"]["setup"] = payload["test"]["data"]
+    payload["edge_analysis"]["cheap_test"]["confirm"] = (
+        "collision rate per hyperperiod is lower under filtered scheduling"
+    )
+    payload["edge_analysis"]["cheap_test"]["falsify"] = (
+        "collision rate per hyperperiod is unchanged under filtered scheduling"
+    )
+    claim_provenance = summarize_evidence_map_provenance(payload)
+
+    result = main._evaluate_usefulness_proof_gate(
+        payload,
+        prediction_quality=None,
+        claim_provenance=claim_provenance,
+    )
+
+    assert result["passes"] is False
+    assert result["cheap_test_ok"] is False
+    assert result["cheap_test_restates_main_test"] is True
     assert "usefulness:missing_cheap_test" in result["reasons"]
 
 

@@ -98,6 +98,11 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Bad problem statements are generic or essay-like" in prompt
     assert "Good actionable levers name one concrete action" in prompt
     assert "Bad actionable levers are vague or advisory" in prompt
+    assert "`edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` must stay centered on that same primary claim, process, comparator, and metric." in prompt
+    assert "`edge_analysis.cheap_test.setup` must read like one real operator move on a narrow slice of the target-domain workflow." in prompt
+    assert "`edge_analysis.cheap_test` must not merely restate `test.data` or say to validate the hypothesis." in prompt
+    assert "Good cheap tests sound like real operator moves on the same metric." in prompt
+    assert "Bad cheap tests are generic validation suggestions or full restatements of the main test." in prompt
     assert "Good test metrics name one concrete literature-facing quantity" in prompt
     assert "Good confirm/falsify wording names the metric directly" in prompt
     assert "Good edge advantages name one concrete operator gain" in prompt
@@ -388,3 +393,40 @@ def test_build_repair_prompt_includes_phase4_core_target_guidance() -> None:
     assert "Narrow `mechanism` to the strongest direct target-domain evidence." in repair_prompt
     assert "Rewrite `evidence_map.mechanism_assertions` so at least one entry uses a direct target-domain snippet" in repair_prompt
     assert "Current core-target-evidence weakness:" in repair_prompt
+
+
+def test_missing_required_fields_requests_repair_for_usefulness_alignment_bottleneck() -> None:
+    payload = _valid_stage2_payload()
+    payload["edge_analysis"]["cheap_test"]["setup"] = (
+        "Run a study to validate whether the hypothesis is true."
+    )
+    payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+
+    missing = jump._missing_required_fields(payload)
+
+    assert "edge_analysis.cheap_test" in missing
+    assert "edge_analysis.edge_if_right" in missing
+
+
+def test_build_repair_prompt_targets_usefulness_alignment_bottleneck() -> None:
+    payload = _valid_stage2_payload()
+    payload["edge_analysis"]["cheap_test"]["setup"] = (
+        "Run a study to validate whether the hypothesis is true."
+    )
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        [
+            "edge_analysis.problem_statement",
+            "edge_analysis.actionable_lever",
+            "edge_analysis.cheap_test",
+            "edge_analysis.edge_if_right",
+        ],
+        original_data=payload,
+    )
+
+    assert "Phase 5 usefulness-alignment bottleneck" in repair_prompt
+    assert "keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable" in repair_prompt
+    assert "Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move" in repair_prompt
+    assert "The current cheap test sounds like generic validation rather than an operator move." in repair_prompt

@@ -22,6 +22,7 @@ from hypothesis_validation import (
     normalize_edge_analysis,
     normalize_evidence_map,
     normalize_mechanism_typing,
+    summarize_edge_usefulness_alignment,
     summarize_evidence_map_provenance,
     validate_hypothesis,
 )
@@ -5381,6 +5382,7 @@ def _evaluate_usefulness_proof_gate(
         else normalize_evidence_map(payload.get("evidence_map"))
     )
     edge_analysis = normalize_edge_analysis(payload)
+    edge_alignment = summarize_edge_usefulness_alignment(payload, payload)
 
     observable = _usefulness_first_present(
         prediction_payload.get("observable"),
@@ -5489,13 +5491,16 @@ def _evaluate_usefulness_proof_gate(
     claim_alignment_ok = bool(claim_anchor_terms) and best_claim_overlap >= 3
     mechanism_alignment_ok = not mechanism_terms or best_mechanism_overlap >= 2
     edge_problem_ok = bool(edge_problem) and (
-        _usefulness_overlap(edge_problem, observable_terms) >= 1
-        or _usefulness_overlap(edge_problem, claim_anchor_terms) >= 1
-        or _usefulness_overlap(edge_problem, mechanism_terms) >= 1
+        bool(edge_alignment.get("problem_aligned"))
+        and (
+            _usefulness_overlap(edge_problem, observable_terms) >= 1
+            or _usefulness_overlap(edge_problem, claim_anchor_terms) >= 1
+            or _usefulness_overlap(edge_problem, mechanism_terms) >= 1
+        )
     )
     actionable_lever_ok = bool(edge_lever) and not any(
         phrase in edge_lever.lower() for phrase in generic_edge_phrases
-    ) and (
+    ) and bool(edge_alignment.get("actionable_lever_aligned")) and (
         _usefulness_overlap(edge_lever, mechanism_terms) >= 1
         or _usefulness_overlap(edge_lever, claim_anchor_terms) >= 1
         or _usefulness_overlap(edge_lever, observable_terms) >= 1
@@ -5504,9 +5509,18 @@ def _evaluate_usefulness_proof_gate(
         _usefulness_overlap(cheap_metric, _usefulness_terms(test_payload.get("metric"))) >= 1
         or _usefulness_overlap(cheap_metric, observable_terms) >= 1
     )
+    cheap_test_operator_move_ok = bool(edge_alignment.get("cheap_test_operator_move"))
+    cheap_test_generic_validation = bool(
+        edge_alignment.get("cheap_test_generic_validation")
+    )
+    cheap_test_restates_main_test = bool(
+        edge_alignment.get("cheap_test_restates_main_test")
+    )
     cheap_test_ok = (
         all((cheap_setup, cheap_metric, cheap_confirm, cheap_falsify))
         and cheap_metric_aligned
+        and bool(edge_alignment.get("cheap_test_decision_aligned"))
+        and bool(edge_alignment.get("cheap_test_real_operator_move"))
         and (
             _usefulness_overlap(cheap_confirm, edge_problem_terms | observable_terms) >= 1
             or _usefulness_overlap(cheap_falsify, edge_problem_terms | observable_terms) >= 1
@@ -5518,7 +5532,7 @@ def _evaluate_usefulness_proof_gate(
             len(edge_advantage.split()) < 6
             and any(term in edge_advantage.lower() for term in generic_advantage_terms)
         )
-    )
+    ) and bool(edge_alignment.get("edge_advantage_aligned"))
     why_missed_ok = bool(why_missed) and not (
         _usefulness_contains_phrase(
             why_missed, USEFULNESS_GENERIC_UNDEREXPLOITED_PHRASES
@@ -5551,9 +5565,39 @@ def _evaluate_usefulness_proof_gate(
     )
     strongly_evidenced_edge = core_target_evidence_strength == "strong_direct"
     edge_layer_aligned = (
-        (not edge_problem_terms or _usefulness_overlap(edge_problem, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
-        and (not edge_lever_terms or _usefulness_overlap(edge_lever, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
-        and (not edge_metric_terms or _usefulness_overlap(cheap_metric, _usefulness_terms(test_payload.get("metric")) | observable_terms) >= 1)
+        bool(edge_alignment.get("problem_aligned"))
+        and bool(edge_alignment.get("actionable_lever_aligned"))
+        and bool(edge_alignment.get("edge_advantage_aligned"))
+        and (
+            not edge_problem_terms
+            or _usefulness_overlap(
+                edge_problem,
+                claim_anchor_terms | mechanism_terms | observable_terms,
+            )
+            >= 1
+        )
+        and (
+            not edge_lever_terms
+            or _usefulness_overlap(
+                edge_lever,
+                claim_anchor_terms | mechanism_terms | observable_terms,
+            )
+            >= 1
+        )
+        and (
+            not edge_metric_terms
+            or _usefulness_overlap(
+                cheap_metric,
+                _usefulness_terms(test_payload.get("metric")) | observable_terms,
+            )
+            >= 1
+        )
+    )
+    edge_operator_decision_ok = (
+        actionable_lever_ok
+        and cheap_test_ok
+        and edge_advantage_ok
+        and bool(edge_primary_operator)
     )
 
     reasons: list[str] = []
@@ -5592,7 +5636,11 @@ def _evaluate_usefulness_proof_gate(
         "edge_problem_ok": edge_problem_ok,
         "actionable_lever_ok": actionable_lever_ok,
         "cheap_test_ok": cheap_test_ok,
+        "cheap_test_operator_move_ok": cheap_test_operator_move_ok,
+        "cheap_test_generic_validation": cheap_test_generic_validation,
+        "cheap_test_restates_main_test": cheap_test_restates_main_test,
         "edge_advantage_ok": edge_advantage_ok,
+        "edge_operator_decision_ok": edge_operator_decision_ok,
         "why_missed_ok": why_missed_ok,
         "expected_asymmetry_ok": expected_asymmetry_ok,
         "underexploited_ok": underexploited_ok,
@@ -5600,6 +5648,7 @@ def _evaluate_usefulness_proof_gate(
         "core_target_evidence_strength": core_target_evidence_strength,
         "strongly_evidenced_edge": strongly_evidenced_edge,
         "edge_layer_aligned": edge_layer_aligned,
+        "repair_fields": list(edge_alignment.get("repair_fields") or []),
         "claim_anchor": claim_anchor,
         "best_claim_overlap": best_claim_overlap,
         "best_mechanism_overlap": best_mechanism_overlap,

@@ -286,6 +286,24 @@ EDGE_GENERIC_PHRASES = (
     "may be useful",
 )
 
+EDGE_CHEAP_TEST_GENERIC_VALIDATION_PHRASES = (
+    "validate the hypothesis",
+    "validate whether",
+    "test whether",
+    "see whether",
+    "check whether",
+    "gather more data",
+    "collect more data",
+    "additional research",
+    "further research",
+    "run a study",
+    "run an experiment",
+    "pilot study",
+    "analyze historical data",
+    "look for an effect",
+    "look for a signal",
+)
+
 EDGE_OVERCLAIM_MARKERS = (
     "nobody knows",
     "no one knows",
@@ -334,6 +352,20 @@ EDGE_ACTION_HINTS = (
     "deploy",
     "screen",
     "prioritize",
+)
+
+EDGE_OPERATOR_MOVE_HINTS = EDGE_ACTION_HINTS + (
+    "toggle",
+    "reroute",
+    "triage",
+    "audit",
+    "override",
+    "holdout",
+    "rollout",
+    "queue",
+    "subset",
+    "threshold",
+    "gate",
 )
 
 EDGE_ADVANTAGE_HINTS = (
@@ -1938,6 +1970,23 @@ def _edge_term_overlap(left: object, right: object) -> int:
     return len(_meaningful_terms(left) & _meaningful_terms(right))
 
 
+def _edge_alignment_terms(text: object) -> set[str]:
+    cleaned = _clean_optional_text(text) or ""
+    terms = set(_meaningful_terms(cleaned))
+    for token in _word_tokens(cleaned):
+        if "-" not in token and "/" not in token:
+            continue
+        for part in re.split(r"[-/]", token):
+            terms.update(_term_variants(part))
+    return {
+        term for term in terms if len(term) >= 4 and not term.isdigit()
+    }
+
+
+def _edge_overlap_with_terms(text: object, terms: set[str]) -> int:
+    return len(_edge_alignment_terms(text) & terms)
+
+
 def _edge_operator_is_specific(text: object) -> bool:
     cleaned = (_clean_optional_text(text) or "").lower()
     if not cleaned:
@@ -1947,10 +1996,179 @@ def _edge_operator_is_specific(text: object) -> bool:
     return any(char.isalpha() for char in cleaned)
 
 
+def summarize_edge_usefulness_alignment(
+    payload: object,
+    hypothesis_dict: dict | None = None,
+) -> dict:
+    """Summarize whether the edge layer stays tied to one concrete operator claim."""
+    normalized = normalize_edge_analysis(payload)
+    hypothesis = (
+        hypothesis_dict
+        if isinstance(hypothesis_dict, dict)
+        else (payload if isinstance(payload, dict) else {})
+    )
+
+    prediction_payload = normalize_prediction_payload(hypothesis.get("prediction"))
+    test_payload = hypothesis.get("test") if isinstance(hypothesis.get("test"), dict) else {}
+
+    mechanism_text = _clean_optional_text(hypothesis.get("mechanism")) or ""
+    observable = _clean_optional_text(prediction_payload.get("observable")) or ""
+    test_metric = _extract_test_metric_text(test_payload) or ""
+    test_data = _clean_optional_text(test_payload.get("data")) or ""
+    test_confirm = _clean_optional_text(
+        test_payload.get("confirm")
+        or test_payload.get("confirms")
+        or test_payload.get("confirmed_if")
+        or test_payload.get("supports")
+    ) or ""
+    test_falsify = _clean_optional_text(
+        prediction_payload.get("falsification_condition")
+        or test_payload.get("falsify")
+        or test_payload.get("falsifies")
+        or test_payload.get("falsified_if")
+        or test_payload.get("refutes")
+    ) or ""
+
+    problem_statement = normalized.get("problem_statement") or ""
+    actionable_lever = normalized.get("actionable_lever") or ""
+    cheap_test = normalized.get("cheap_test") or {}
+    cheap_setup = _clean_optional_text(cheap_test.get("setup")) or ""
+    cheap_metric = _clean_optional_text(cheap_test.get("metric")) or ""
+    cheap_confirm = _clean_optional_text(cheap_test.get("confirm")) or ""
+    cheap_falsify = _clean_optional_text(cheap_test.get("falsify")) or ""
+    edge_if_right = normalized.get("edge_if_right") or ""
+    primary_operator = normalized.get("primary_operator") or ""
+    deployment_scope = normalized.get("deployment_scope") or ""
+
+    observable_terms = _meaningful_terms(observable)
+    metric_terms = _meaningful_terms(test_metric)
+    mechanism_terms = _meaningful_terms(mechanism_text)
+    test_confirm_terms = _meaningful_terms(test_confirm)
+    test_falsify_terms = _meaningful_terms(test_falsify)
+    test_data_terms = _meaningful_terms(test_data)
+    problem_terms = _meaningful_terms(problem_statement)
+    lever_terms = _meaningful_terms(actionable_lever)
+    cheap_setup_terms = _meaningful_terms(cheap_setup)
+    operator_terms = _meaningful_terms(primary_operator) | _meaningful_terms(
+        deployment_scope
+    )
+    core_terms = (
+        observable_terms
+        | metric_terms
+        | mechanism_terms
+        | test_confirm_terms
+        | test_falsify_terms
+    )
+    edge_anchor_terms = core_terms | problem_terms | lever_terms | operator_terms
+
+    cheap_setup_lower = cheap_setup.lower()
+    cheap_test_complete = all((cheap_setup, cheap_metric, cheap_confirm, cheap_falsify))
+    cheap_metric_aligned = (
+        _edge_overlap_with_terms(cheap_metric, metric_terms | observable_terms) >= 1
+    )
+    cheap_confirm_metric_aligned = (
+        _edge_overlap_with_terms(cheap_confirm, metric_terms | observable_terms) >= 1
+    )
+    cheap_falsify_metric_aligned = (
+        _edge_overlap_with_terms(cheap_falsify, metric_terms | observable_terms) >= 1
+    )
+    cheap_test_decision_aligned = (
+        cheap_confirm_metric_aligned
+        and cheap_falsify_metric_aligned
+        and (
+            _edge_overlap_with_terms(cheap_confirm, edge_anchor_terms) >= 1
+            or _edge_overlap_with_terms(cheap_falsify, edge_anchor_terms) >= 1
+        )
+    )
+    cheap_test_generic_validation = bool(cheap_setup) and any(
+        phrase in cheap_setup_lower
+        for phrase in EDGE_CHEAP_TEST_GENERIC_VALIDATION_PHRASES
+    ) and _edge_overlap_with_terms(cheap_setup, lever_terms | operator_terms | core_terms) < 2
+    cheap_test_restates_main_test = (
+        bool(cheap_setup_terms)
+        and (
+            cheap_setup.strip().lower() == test_data.strip().lower()
+            or (
+                len(cheap_setup_terms & test_data_terms) >= 3
+                and _edge_overlap_with_terms(cheap_setup, lever_terms | operator_terms)
+                < 2
+            )
+        )
+    )
+    cheap_test_operator_move = bool(cheap_setup) and any(
+        hint in cheap_setup_lower for hint in EDGE_OPERATOR_MOVE_HINTS
+    ) and (
+        _edge_overlap_with_terms(cheap_setup, lever_terms | operator_terms) >= 1
+        or _edge_overlap_with_terms(cheap_setup, core_terms) >= 2
+    )
+    cheap_test_real_operator_move = (
+        cheap_test_complete
+        and cheap_metric_aligned
+        and cheap_test_decision_aligned
+        and cheap_test_operator_move
+        and not cheap_test_generic_validation
+        and not cheap_test_restates_main_test
+    )
+
+    problem_aligned = bool(problem_statement) and (
+        _edge_overlap_with_terms(problem_statement, core_terms) >= 1
+        or _edge_overlap_with_terms(problem_statement, lever_terms) >= 1
+    )
+    actionable_lever_aligned = bool(actionable_lever) and (
+        not _contains_edge_generic_phrase(actionable_lever)
+        and any(token in actionable_lever.lower() for token in EDGE_ACTION_HINTS)
+        and (
+            _edge_overlap_with_terms(actionable_lever, mechanism_terms) >= 1
+            or _edge_overlap_with_terms(actionable_lever, metric_terms | observable_terms)
+            >= 1
+            or _edge_overlap_with_terms(actionable_lever, problem_terms) >= 1
+        )
+    )
+    edge_advantage_aligned = bool(edge_if_right) and (
+        not _contains_edge_generic_phrase(edge_if_right)
+        and not _contains_edge_overclaim(edge_if_right)
+        and (
+            _edge_overlap_with_terms(edge_if_right, edge_anchor_terms) >= 1
+            or (
+                _edge_overlap_with_terms(edge_if_right, operator_terms) >= 1
+                and _edge_overlap_with_terms(edge_if_right, metric_terms | observable_terms)
+                >= 1
+            )
+        )
+    )
+
+    repair_fields: list[str] = []
+    if not problem_aligned:
+        repair_fields.append("edge_analysis.problem_statement")
+    if not actionable_lever_aligned:
+        repair_fields.append("edge_analysis.actionable_lever")
+    if not cheap_test_real_operator_move:
+        repair_fields.append("edge_analysis.cheap_test")
+    if not edge_advantage_aligned:
+        repair_fields.append("edge_analysis.edge_if_right")
+    if not _edge_operator_is_specific(primary_operator):
+        repair_fields.append("edge_analysis.primary_operator")
+
+    return {
+        "problem_aligned": problem_aligned,
+        "actionable_lever_aligned": actionable_lever_aligned,
+        "cheap_test_complete": cheap_test_complete,
+        "cheap_metric_aligned": cheap_metric_aligned,
+        "cheap_test_decision_aligned": cheap_test_decision_aligned,
+        "cheap_test_operator_move": cheap_test_operator_move,
+        "cheap_test_generic_validation": cheap_test_generic_validation,
+        "cheap_test_restates_main_test": cheap_test_restates_main_test,
+        "cheap_test_real_operator_move": cheap_test_real_operator_move,
+        "edge_advantage_aligned": edge_advantage_aligned,
+        "repair_fields": repair_fields,
+    }
+
+
 def _validate_edge_analysis(payload: object, hypothesis_dict: dict) -> list[str]:
     """Require one concrete edge layer tied to the grounded hypothesis."""
     normalized = normalize_edge_analysis(payload)
     reasons: list[str] = []
+    alignment = summarize_edge_usefulness_alignment(payload, hypothesis_dict)
 
     problem_statement = normalized.get("problem_statement") or ""
     actionable_lever = normalized.get("actionable_lever") or ""
@@ -2012,15 +2230,28 @@ def _validate_edge_analysis(payload: object, hypothesis_dict: dict) -> list[str]
             reasons.append("edge_analysis cheap_test is not plausibly cheap")
         if not _has_metric_text(cheap_metric):
             reasons.append("edge_analysis cheap_test metric is too vague")
-        elif (
-            _edge_term_overlap(cheap_metric, test_metric) == 0
-            and _edge_term_overlap(cheap_metric, observable) == 0
-        ):
+        elif not alignment.get("cheap_metric_aligned"):
             reasons.append(
                 "edge_analysis cheap_test does not match the main test metric"
             )
         if len(cheap_confirm) < 20 or len(cheap_falsify) < 20:
             reasons.append("edge_analysis cheap_test must state what confirms vs falsifies the edge")
+        elif not alignment.get("cheap_test_decision_aligned"):
+            reasons.append(
+                "edge_analysis cheap_test confirm/falsify must name the same operator metric"
+            )
+        if alignment.get("cheap_test_generic_validation"):
+            reasons.append(
+                "edge_analysis cheap_test reads like a generic validation suggestion"
+            )
+        elif alignment.get("cheap_test_restates_main_test"):
+            reasons.append(
+                "edge_analysis cheap_test restates the main test instead of a cheap operator move"
+            )
+        elif not alignment.get("cheap_test_operator_move"):
+            reasons.append(
+                "edge_analysis cheap_test must describe a concrete operator move"
+            )
 
     if not edge_if_right:
         reasons.append(
@@ -2035,6 +2266,10 @@ def _validate_edge_analysis(payload: object, hypothesis_dict: dict) -> list[str]
         elif _contains_edge_overclaim(edge_if_right):
             reasons.append(
                 "edge_analysis edge_if_right overclaims novelty or certainty"
+            )
+        elif not alignment.get("edge_advantage_aligned"):
+            reasons.append(
+                "edge_analysis edge_if_right does not align with the main target-domain claim"
             )
 
     if not _edge_operator_is_specific(primary_operator):

@@ -10,8 +10,10 @@ from tavily import TavilyClient
 from config import TAVILY_API_KEY
 from hypothesis_validation import (
     MECHANISM_TYPE_V1_VOCAB,
+    normalize_edge_analysis,
     normalize_evidence_map,
     normalize_mechanism_typing,
+    summarize_edge_usefulness_alignment,
     summarize_evidence_map_provenance,
 )
 from llm_client import get_llm_client
@@ -67,6 +69,7 @@ Requirements:
 - That primary claim must name one measurable target-domain operator or operator-driven outcome that can be checked in literature or experiments.
 - If the target material does not directly support a concrete target-domain claim at that level, return `no_connection`.
 - `connection`, `mechanism`, `prediction`, and `test` must all stay centered on that same primary claim. If they drift to different effects or outcomes, return `no_connection`.
+- `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` must stay centered on that same primary claim, process, comparator, and metric. Do not let the edge layer introduce a different operator problem or a second target outcome.
 - Explain one concrete shared mechanism, not a metaphor.
 - Provide variable_mapping with at least 3 mapped variables.
 - Order variable_mapping so the first 3 mappings are the strongest-supported critical mappings. If more mappings are included, put weaker or less direct ones after those first 3.
@@ -185,7 +188,10 @@ Requirements:
 - `edge_analysis.problem_statement` must name one specific target-domain problem, blind spot, hidden failure mode, or missed control point.
 - `edge_analysis.actionable_lever` must name one concrete action, heuristic, filter, design change, or search direction that follows from the mechanism.
 - `edge_analysis.cheap_test` must include setup, metric, confirm, falsify, and optional time_to_signal. It must be a fast realistic validation path, not a multi-month research program by default.
+- `edge_analysis.cheap_test.setup` must read like one real operator move on a narrow slice of the target-domain workflow. Reuse the same process, comparator, and metric from `mechanism`/`prediction`/`test`, but make the setup smaller, cheaper, and more decision-facing than the main test.
+- `edge_analysis.cheap_test` must not merely restate `test.data` or say to validate the hypothesis. A good cheap test sounds like replaying one queue, filtering one candidate set, toggling one threshold, auditing one failure bucket, or comparing one narrow before/after operator intervention.
 - `edge_analysis.edge_if_right` must state one concrete operator advantage if the test confirms the claim. Keep it contingent and scoped to the retrieved evidence.
+- `edge_analysis.edge_if_right` must name the operator decision unlocked by the cheap test, not just say the result would be useful.
 - `edge_analysis.primary_operator` must name the specific operator who would use the lever.
 - `edge_analysis.why_missed` must explain one concrete search, framing, workflow, metric, or discipline-boundary reason the target-domain problem or lever may be undernoticed.
 - `edge_analysis.expected_asymmetry` must explain why the lever is plausibly underused rather than already standard target-domain wisdom.
@@ -204,6 +210,13 @@ Requirements:
 - Bad actionable levers are vague or advisory. Examples:
   - `Investigate further.`
   - `Use this perspective to think differently about the system.`
+- Good cheap tests sound like real operator moves on the same metric. Examples:
+  - `Replay one week of dense scheduling logs with the validity filter turned on before slot assignment and compare collision rate per hyperperiod against the existing scheduler on the same workloads.`
+  - `Rerank one triage queue with the threshold gate enabled and compare false-positive rate against the current rule on the same cases.`
+- Bad cheap tests are generic validation suggestions or full restatements of the main test. Examples:
+  - `Run a study to validate whether the hypothesis is true.`
+  - `Collect more data and see if the effect appears.`
+  - `Use the main experiment described above.`
 - Good test metrics name one concrete literature-facing quantity. Examples:
   - `collision rate per hyperperiod`
   - `mean cascade size per initiating branch failure`
@@ -1362,11 +1375,22 @@ def _missing_required_fields(data: dict) -> list[str]:
     edge_analysis = (
         data.get("edge_analysis") if isinstance(data.get("edge_analysis"), dict) else {}
     )
+    edge_alignment = summarize_edge_usefulness_alignment(edge_analysis, data)
     if _problem_statement_needs_repair(edge_analysis.get("problem_statement")):
+        missing.append("edge_analysis.problem_statement")
+    elif not edge_alignment.get("problem_aligned"):
         missing.append("edge_analysis.problem_statement")
     if _actionable_lever_needs_repair(edge_analysis.get("actionable_lever")):
         missing.append("edge_analysis.actionable_lever")
+    elif not edge_alignment.get("actionable_lever_aligned"):
+        missing.append("edge_analysis.actionable_lever")
+    if "edge_analysis.cheap_test" not in missing and not edge_alignment.get(
+        "cheap_test_real_operator_move"
+    ):
+        missing.append("edge_analysis.cheap_test")
     if _edge_advantage_needs_repair(edge_analysis.get("edge_if_right")):
+        missing.append("edge_analysis.edge_if_right")
+    elif not edge_alignment.get("edge_advantage_aligned"):
         missing.append("edge_analysis.edge_if_right")
     if _underexploitedness_needs_repair(edge_analysis.get("why_missed")):
         missing.append("edge_analysis.why_missed")
@@ -1442,6 +1466,21 @@ def _repair_guidance_for_missing_fields(
 ) -> str:
     guidance: list[str] = []
     repair_context = _phase3_repair_context(original_data)
+    edge_alignment = summarize_edge_usefulness_alignment(
+        original_data or {},
+        original_data if isinstance(original_data, dict) else None,
+    )
+    normalized_edge = normalize_edge_analysis(original_data or {})
+    prediction = (
+        original_data.get("prediction")
+        if isinstance(original_data, dict) and isinstance(original_data.get("prediction"), dict)
+        else {}
+    )
+    test_payload = (
+        original_data.get("test")
+        if isinstance(original_data, dict) and isinstance(original_data.get("test"), dict)
+        else {}
+    )
     mechanism_anchor = (
         repair_context.get("mechanism_anchor")
         if isinstance(repair_context.get("mechanism_anchor"), dict)
@@ -1452,6 +1491,37 @@ def _repair_guidance_for_missing_fields(
         if isinstance(repair_context.get("core_target_anchor"), dict)
         else {}
     )
+    usefulness_bottleneck_fields = {
+        "edge_analysis.problem_statement",
+        "edge_analysis.actionable_lever",
+        "edge_analysis.cheap_test",
+        "edge_analysis.edge_if_right",
+        "edge_analysis.primary_operator",
+    }
+    if any(field in usefulness_bottleneck_fields for field in missing_fields):
+        guidance.append(
+            "- Phase 5 usefulness-alignment bottleneck: keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable unless they are empty. Rewrite the edge layer so it points to the exact same core claim, process, comparator, and metric already named elsewhere."
+        )
+        metric_anchor = str(test_payload.get("metric") or test_payload.get("metrics") or "").strip()
+        observable_anchor = str(prediction.get("observable") or "").strip()
+        lever_anchor = str(normalized_edge.get("actionable_lever") or "").strip()
+        operator_anchor = str(normalized_edge.get("primary_operator") or "").strip()
+        if metric_anchor:
+            guidance.append(
+                f"- Keep the edge layer tied to the current core metric: `{metric_anchor}`."
+            )
+        if observable_anchor:
+            guidance.append(
+                f"- Keep the edge layer tied to the current observable/claim anchor: `{observable_anchor}`."
+            )
+        if lever_anchor:
+            guidance.append(
+                f"- Keep the cheap test focused on the current lever unless it is rewritten for specificity: `{lever_anchor}`."
+            )
+        if operator_anchor:
+            guidance.append(
+                f"- Keep the edge framed as a decision for this operator: `{operator_anchor}`."
+            )
     if any(field == "mechanism" for field in missing_fields):
         guidance.append(
             "- Rewrite `mechanism` as one process-first sentence that opens with the exact target-domain process noun phrase, then names the operator, monitored/control variable, and resulting measurable change. Do not start with `when`, `as`, `if`, or a result summary."
@@ -1502,9 +1572,21 @@ def _repair_guidance_for_missing_fields(
         guidance.append(
             "- Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action, filter, intervention, or decision rule. Reject advisory phrasing like `investigate further`, `study this`, or `consider this`."
         )
+    if "edge_analysis.cheap_test" in missing_fields:
+        guidance.append(
+            "- Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move on a narrow slice of the workflow, not a generic validation suggestion and not a restatement of the main test. Reuse the same metric/comparator as `test.metric`, and make `confirm`/`falsify` name that same metric explicitly."
+        )
+        if edge_alignment.get("cheap_test_generic_validation"):
+            guidance.append(
+                "- The current cheap test sounds like generic validation rather than an operator move. Replace wording like `validate whether`, `run a study`, or `collect more data` with a concrete replay/filter/rerank/toggle/audit action."
+            )
+        if edge_alignment.get("cheap_test_restates_main_test"):
+            guidance.append(
+                "- The current cheap test is too close to `test.data`. Make it smaller and more operational so it informs one near-term operator decision before committing to the full test."
+            )
     if "edge_analysis.edge_if_right" in missing_fields:
         guidance.append(
-            "- Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain such as lower collision rate, earlier warning, lower cost, higher throughput, or reduced false positives. Reject generic usefulness language."
+            "- Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain such as lower collision rate, earlier warning, lower cost, higher throughput, or reduced false positives. Reject generic usefulness language and name the decision or workflow advantage unlocked if the cheap test confirms."
         )
     if "edge_analysis.why_missed" in missing_fields:
         guidance.append(
