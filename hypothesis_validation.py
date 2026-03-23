@@ -693,17 +693,24 @@ def _core_text_match(
 def _core_target_entry_rank(entry: object) -> tuple[float, ...]:
     payload = entry if isinstance(entry, dict) else {}
     strength = str(payload.get("strength") or "")
+    entry_type = str(payload.get("entry_type") or "")
     strength_rank = {
         "strong_direct": 3.0,
         "weak_direct": 2.0,
         "contextual_only": 1.0,
         "none": 0.0,
     }.get(strength, 0.0)
+    entry_type_rank = {
+        "mechanism_assertion": 2.0,
+        "variable_mapping": 1.0,
+        "top_level_target_evidence": 0.0,
+    }.get(entry_type, 0.0)
     score = payload.get("provenance_score") or {}
     return (
         strength_rank,
         1.0 if payload.get("direct_process_match") else 0.0,
         1.0 if payload.get("direct_metric_match") else 0.0,
+        entry_type_rank,
         1.0 if not payload.get("weak_source") else 0.0,
         1.0 if not payload.get("broad_page") else 0.0,
         1.0 if not payload.get("generic_signal") else 0.0,
@@ -1601,6 +1608,7 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
             ),
         )
         scored_entry = dict(entry)
+        scored_entry["entry_type"] = "variable_mapping"
         scored_entry["provenance_score"] = score
         scored_variable_mappings.append(scored_entry)
 
@@ -1701,6 +1709,7 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
             ),
         )
         scored_entry = dict(entry)
+        scored_entry["entry_type"] = "mechanism_assertion"
         scored_entry["provenance_score"] = score
         scored_mechanism_assertions.append(scored_entry)
 
@@ -1761,13 +1770,13 @@ def summarize_evidence_map_provenance(hypothesis_dict: dict | None) -> dict:
     core_target_assessment = _assess_core_target_evidence(
         payload,
         critical_mapping_entries=best_critical_mapping_entries,
-        mechanism_entries=supported_mechanism_assertions,
+        mechanism_entries=scored_mechanism_assertions,
     )
     if not issues:
         core_target_failure = _find_core_target_evidence_failure(
             payload,
             critical_mapping_entries=best_critical_mapping_entries,
-            mechanism_entries=supported_mechanism_assertions,
+            mechanism_entries=scored_mechanism_assertions,
         )
         if core_target_failure is not None:
             issues.append(core_target_failure["message"])

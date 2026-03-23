@@ -905,6 +905,24 @@ def _phase3_repair_context(data: dict | None) -> dict:
             }
         )
 
+    core_target_anchor = (
+        provenance.get("best_core_target_evidence")
+        if isinstance(provenance.get("best_core_target_evidence"), dict)
+        else {}
+    )
+    if core_target_anchor:
+        score = float(
+            (((core_target_anchor.get("provenance_score") or {}).get("overall")) or 0.0)
+        )
+        _add_candidate(
+            text=core_target_anchor.get("evidence_snippet"),
+            snippet=core_target_anchor.get("evidence_snippet"),
+            source_reference=core_target_anchor.get("source_reference"),
+            provenance_score=score,
+            source_priority=5,
+            require_process_level=True,
+        )
+
     for entry in provenance.get("scored_mechanism_assertions") or []:
         if not isinstance(entry, dict):
             continue
@@ -1022,6 +1040,15 @@ def _phase3_repair_context(data: dict | None) -> dict:
     return {
         "provenance": provenance,
         "mechanism_anchor": mechanism_anchor,
+        "core_target_anchor": core_target_anchor,
+        "core_target_evidence_strength": str(
+            provenance.get("core_target_evidence_strength") or ""
+        ).strip(),
+        "core_target_reasons": [
+            str(reason).strip()
+            for reason in (provenance.get("core_target_reasons") or [])
+            if str(reason).strip()
+        ],
         "critical_failures": critical_failures,
         "missing_critical_pairs": missing_critical_pairs,
         "mechanism_overlap": mechanism_overlap,
@@ -1370,6 +1397,9 @@ def _missing_required_fields(data: dict) -> list[str]:
         for code in (failure.get("reason_codes") or [])
         if str(code).strip()
     }
+    core_target_evidence_strength = str(
+        provenance.get("core_target_evidence_strength") or ""
+    ).strip()
     if len(evidence_map.get("variable_mappings", [])) < 3:
         missing.append("evidence_map.variable_mappings")
     elif (
@@ -1393,6 +1423,9 @@ def _missing_required_fields(data: dict) -> list[str]:
         provenance.get("required_mechanism_assertion_count") or 0
     ):
         missing.append("evidence_map.mechanism_assertions")
+    elif core_target_evidence_strength != "strong_direct":
+        missing.append("evidence_map.mechanism_assertions")
+        missing.append("mechanism")
     if _mechanism_anchor_needs_repair(repair_context):
         missing.append("mechanism")
     deduped_missing: list[str] = []
@@ -1414,6 +1447,11 @@ def _repair_guidance_for_missing_fields(
         if isinstance(repair_context.get("mechanism_anchor"), dict)
         else {}
     )
+    core_target_anchor = (
+        repair_context.get("core_target_anchor")
+        if isinstance(repair_context.get("core_target_anchor"), dict)
+        else {}
+    )
     if any(field == "mechanism" for field in missing_fields):
         guidance.append(
             "- Rewrite `mechanism` as one process-first sentence that opens with the exact target-domain process noun phrase, then names the operator, monitored/control variable, and resulting measurable change. Do not start with `when`, `as`, `if`, or a result summary."
@@ -1424,6 +1462,30 @@ def _repair_guidance_for_missing_fields(
                 "- Pull the opening noun phrase of `mechanism` directly from target-domain evidence wording. Best available anchor: "
                 f"`{anchor_text}`."
             )
+        core_strength = str(repair_context.get("core_target_evidence_strength") or "").strip()
+        core_reasons = [
+            str(reason).strip()
+            for reason in (repair_context.get("core_target_reasons") or [])
+            if str(reason).strip()
+        ]
+        direct_anchor = str(core_target_anchor.get("evidence_snippet") or "").strip()
+        direct_source = str(core_target_anchor.get("source_reference") or "").strip()
+        if core_strength and core_strength != "strong_direct":
+            guidance.append(
+                "- Narrow `mechanism` to the strongest direct target-domain evidence. Do not preserve broader process wording when the current support is only contextual, generic, or weak."
+            )
+            if direct_anchor:
+                guidance.append(
+                    "- Best available direct core target snippet: "
+                    f"`{direct_anchor}`"
+                    + (f" (source: `{direct_source}`)." if direct_source else ".")
+                )
+            if core_reasons:
+                guidance.append(
+                    "- Current core-target-evidence weakness: "
+                    + "; ".join(core_reasons[:3])
+                    + "."
+                )
     if any(field in {"test", "test.metric"} for field in missing_fields):
         guidance.append(
             "- Rewrite `test` so `metric` names one concrete literature-facing quantity, not placeholders like `performance`, `efficiency`, or `outcomes`. Make `confirm` and `falsify` explicitly refer to that same metric."
@@ -1493,6 +1555,32 @@ def _repair_guidance_for_missing_fields(
         guidance.append(
             "- For each repaired critical mapping, make the claim a narrow paraphrase of the snippet. If a mapping cannot be supported directly, weaken it or move/drop it instead of keeping it in the first 3."
         )
+    if "evidence_map.mechanism_assertions" in missing_fields:
+        guidance.append(
+            "- Rewrite `evidence_map.mechanism_assertions` so at least one entry uses a direct target-domain snippet that explicitly names the same process noun phrase as `mechanism` or the same canonical metric as `test.metric`."
+        )
+        guidance.append(
+            "- Do not let `mechanism_claim` carry stronger process wording than the `evidence_snippet` itself. Prefer direct process or metric support over broad contextual target evidence."
+        )
+        direct_anchor = str(core_target_anchor.get("evidence_snippet") or "").strip()
+        direct_source = str(core_target_anchor.get("source_reference") or "").strip()
+        if direct_anchor:
+            guidance.append(
+                "- Best current core target evidence to rewrite around: "
+                f"`{direct_anchor}`"
+                + (f" (source: `{direct_source}`)." if direct_source else ".")
+            )
+        core_reasons = [
+            str(reason).strip()
+            for reason in (repair_context.get("core_target_reasons") or [])
+            if str(reason).strip()
+        ]
+        if core_reasons:
+            guidance.append(
+                "- Current core-target-evidence weakness: "
+                + "; ".join(core_reasons[:3])
+                + "."
+            )
     if not guidance:
         return ""
     return "\nExtra repair rules:\n" + "\n".join(guidance)

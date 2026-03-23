@@ -64,8 +64,8 @@ def _build_edge_first_payload() -> dict:
             "mechanism_assertions": [
                 {
                     "mechanism_claim": (
-                        "Discrete offset assignment prevents schedule collisions by enforcing "
-                        "modular exclusion over the hyperperiod."
+                        "Feasible offset assignment satisfies collision-avoidance constraints "
+                        "across the hyperperiod to prevent simultaneous activations."
                     ),
                     "evidence_snippet": (
                         "Feasible schedules are constructed by assigning offsets that satisfy "
@@ -258,6 +258,20 @@ def test_usefulness_gate_rejects_known_or_obvious_candidate() -> None:
     assert result["underexploited_ok"] is False
     assert result["known_or_obvious"] is True
     assert "usefulness:known_or_obvious" in result["reasons"]
+
+
+def test_usefulness_gate_reports_strongly_evidenced_edge() -> None:
+    payload = _build_edge_first_payload()
+    claim_provenance = summarize_evidence_map_provenance(payload)
+
+    result = main._evaluate_usefulness_proof_gate(
+        payload,
+        prediction_quality=None,
+        claim_provenance=claim_provenance,
+    )
+
+    assert result["core_target_evidence_strength"] == "strong_direct"
+    assert result["strongly_evidenced_edge"] is True
 
 
 def test_format_transmission_is_problem_first() -> None:

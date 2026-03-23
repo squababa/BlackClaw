@@ -5544,6 +5544,12 @@ def _evaluate_usefulness_proof_gate(
     underexploited_ok = not known_or_obvious and (
         why_missed_ok or expected_asymmetry_ok
     )
+    core_target_evidence_strength = (
+        str(claim_provenance.get("core_target_evidence_strength") or "").strip()
+        if isinstance(claim_provenance, dict)
+        else ""
+    )
+    strongly_evidenced_edge = core_target_evidence_strength == "strong_direct"
     edge_layer_aligned = (
         (not edge_problem_terms or _usefulness_overlap(edge_problem, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
         and (not edge_lever_terms or _usefulness_overlap(edge_lever, claim_anchor_terms | mechanism_terms | observable_terms) >= 1)
@@ -5591,6 +5597,8 @@ def _evaluate_usefulness_proof_gate(
         "expected_asymmetry_ok": expected_asymmetry_ok,
         "underexploited_ok": underexploited_ok,
         "known_or_obvious": known_or_obvious,
+        "core_target_evidence_strength": core_target_evidence_strength,
+        "strongly_evidenced_edge": strongly_evidenced_edge,
         "edge_layer_aligned": edge_layer_aligned,
         "claim_anchor": claim_anchor,
         "best_claim_overlap": best_claim_overlap,

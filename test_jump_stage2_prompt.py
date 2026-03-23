@@ -104,6 +104,10 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "`edge_analysis.why_missed` must explain one concrete search, framing, workflow, metric, or discipline-boundary reason" in prompt
     assert "`edge_analysis.expected_asymmetry` must explain why the lever is plausibly underused rather than already standard target-domain wisdom." in prompt
     assert "For the first 3 critical mappings, the evidence_snippet must be specific enough to stand on its own" in prompt
+    assert "Treat the evidence_snippet itself as the core proof." in prompt
+    assert "Prefer direct core target evidence over broad contextual target evidence." in prompt
+    assert "Good direct core target evidence explicitly names the same process or metric used in `mechanism` or `test.metric`." in prompt
+    assert "Bad direct core target evidence is only adjacent context or broad framing." in prompt
     assert "If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, or the first 3 critical evidence snippets are only generic placeholders" in prompt
     assert "keep variable_mapping to exactly those 3" in prompt
     assert "Open `mechanism` with the exact target-domain process noun phrase used in the strongest supporting evidence snippet" in prompt
@@ -233,3 +237,154 @@ def test_missing_required_fields_allows_mechanism_anchor_overlap_across_term_var
     missing = jump._missing_required_fields(payload)
 
     assert "mechanism" not in missing
+
+
+def test_missing_required_fields_requests_repair_for_weak_core_target_evidence() -> None:
+    payload = _valid_stage2_payload()
+    payload["variable_mapping"] = {
+        "beat parity": "scheduler parity flag",
+        "pattern period": "schedule epoch length",
+        "throw index": "release index register",
+    }
+    payload["evidence_map"]["variable_mappings"] = [
+        {
+            "source_variable": "beat parity",
+            "target_variable": "scheduler parity flag",
+            "claim": "Alternating schedule beats are tracked with a scheduler parity flag.",
+            "evidence_snippet": (
+                "Alternating schedule beats are tracked with a scheduler parity flag "
+                "across the repeating execution frame."
+            ),
+            "source_reference": "Alternating release parity in periodic schedulers",
+        },
+        {
+            "source_variable": "pattern period",
+            "target_variable": "schedule epoch length",
+            "claim": "Periodic schedulers repeat over a fixed execution epoch length.",
+            "evidence_snippet": (
+                "Periodic schedulers repeat over a fixed execution epoch length "
+                "for each recurring release pattern."
+            ),
+            "source_reference": "Fixed execution epochs in recurring schedules",
+        },
+        {
+            "source_variable": "throw index",
+            "target_variable": "release index register",
+            "claim": "Release ordering is recorded with an index register for each cycle.",
+            "evidence_snippet": (
+                "Release ordering is recorded with an index register for each cycle "
+                "before the schedule repeats."
+            ),
+            "source_reference": "Release index registers in periodic schedulers",
+        },
+    ]
+    payload["mechanism"] = (
+        "interval-by-interval activation conflict detection compares queued releases "
+        "against a programmable collision cutoff, triggering schedule suppression."
+    )
+    payload["prediction"]["observable"] = (
+        "schedule suppression count per hyperperiod under dense periodic task allocation"
+    )
+    payload["test"]["metric"] = "schedule suppression count per hyperperiod"
+    payload["test"]["confirm"] = (
+        "schedule suppression count per hyperperiod is lower under filtered assignment "
+        "than under sequential assignment at the same utilization"
+    )
+    payload["test"]["falsify"] = (
+        "schedule suppression count per hyperperiod does not improve under filtered "
+        "assignment at the same utilization"
+    )
+    payload["evidence_map"]["mechanism_assertions"][0] = {
+        "mechanism_claim": (
+            "interval-by-interval activation conflict detection compares queued releases "
+            "against a programmable collision cutoff before suppressing conflicting schedules."
+        ),
+        "evidence_snippet": (
+            "The article discusses why scheduling tradeoffs matter in periodic systems "
+            "and how planners evaluate feasible schedules."
+        ),
+        "source_reference": "Scheduling Overview Guide",
+    }
+
+    missing = jump._missing_required_fields(payload)
+
+    assert "evidence_map.mechanism_assertions" in missing
+
+
+def test_build_repair_prompt_includes_phase4_core_target_guidance() -> None:
+    payload = _valid_stage2_payload()
+    payload["variable_mapping"] = {
+        "beat parity": "scheduler parity flag",
+        "pattern period": "schedule epoch length",
+        "throw index": "release index register",
+    }
+    payload["evidence_map"]["variable_mappings"] = [
+        {
+            "source_variable": "beat parity",
+            "target_variable": "scheduler parity flag",
+            "claim": "Alternating schedule beats are tracked with a scheduler parity flag.",
+            "evidence_snippet": (
+                "Alternating schedule beats are tracked with a scheduler parity flag "
+                "across the repeating execution frame."
+            ),
+            "source_reference": "Alternating release parity in periodic schedulers",
+        },
+        {
+            "source_variable": "pattern period",
+            "target_variable": "schedule epoch length",
+            "claim": "Periodic schedulers repeat over a fixed execution epoch length.",
+            "evidence_snippet": (
+                "Periodic schedulers repeat over a fixed execution epoch length "
+                "for each recurring release pattern."
+            ),
+            "source_reference": "Fixed execution epochs in recurring schedules",
+        },
+        {
+            "source_variable": "throw index",
+            "target_variable": "release index register",
+            "claim": "Release ordering is recorded with an index register for each cycle.",
+            "evidence_snippet": (
+                "Release ordering is recorded with an index register for each cycle "
+                "before the schedule repeats."
+            ),
+            "source_reference": "Release index registers in periodic schedulers",
+        },
+    ]
+    payload["mechanism"] = (
+        "interval-by-interval activation conflict detection compares queued releases "
+        "against a programmable collision cutoff, triggering schedule suppression."
+    )
+    payload["prediction"]["observable"] = (
+        "schedule suppression count per hyperperiod under dense periodic task allocation"
+    )
+    payload["test"]["metric"] = "schedule suppression count per hyperperiod"
+    payload["test"]["confirm"] = (
+        "schedule suppression count per hyperperiod is lower under filtered assignment "
+        "than under sequential assignment at the same utilization"
+    )
+    payload["test"]["falsify"] = (
+        "schedule suppression count per hyperperiod does not improve under filtered "
+        "assignment at the same utilization"
+    )
+    payload["evidence_map"]["mechanism_assertions"][0] = {
+        "mechanism_claim": (
+            "interval-by-interval activation conflict detection compares queued releases "
+            "against a programmable collision cutoff before suppressing conflicting schedules."
+        ),
+        "evidence_snippet": (
+            "The article discusses why scheduling tradeoffs matter in periodic systems "
+            "and how planners evaluate feasible schedules."
+        ),
+        "source_reference": "Scheduling Overview Guide",
+    }
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["mechanism", "evidence_map.mechanism_assertions"],
+        original_data=payload,
+    )
+
+    assert "Narrow `mechanism` to the strongest direct target-domain evidence." in repair_prompt
+    assert "Rewrite `evidence_map.mechanism_assertions` so at least one entry uses a direct target-domain snippet" in repair_prompt
+    assert "Current core-target-evidence weakness:" in repair_prompt
