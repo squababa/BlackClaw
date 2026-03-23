@@ -3437,7 +3437,6 @@ if __name__ == "__main__":
         or _early_report_args.prediction is not None
         or _early_report_args.strong_rejections
         or _early_report_args.strong_rejection is not None
-        or _early_report_args.replay_strong_rejection is not None
         or _early_report_args.review_recent
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
@@ -3453,6 +3452,8 @@ if __name__ == "__main__":
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
     )
+    # Strong-rejection replay depends on late-stage helpers defined later in this
+    # module, so let the final main() entry point handle it after module load.
     if (
         not _early_report_action_requested
         and not _early_report_args.export
@@ -3572,14 +3573,6 @@ if __name__ == "__main__":
         if (
             _early_report_args.strong_rejection is not None
             and not _print_strong_rejection_detail(_early_report_args.strong_rejection)
-        ):
-            sys.exit(1)
-        if (
-            _early_report_args.replay_strong_rejection is not None
-            and not _replay_strong_rejection(
-                _early_report_args.replay_strong_rejection,
-                _resolve_diagnostic_threshold(_early_report_args.threshold),
-            )
         ):
             sys.exit(1)
         if (

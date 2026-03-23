@@ -1,4 +1,6 @@
+from pathlib import Path
 import sqlite3
+import sys
 
 import pytest
 
@@ -490,6 +492,111 @@ def test_replay_strong_rejection_reuses_stored_payload_and_reports_outcome(
     assert "- usefulness:missing_cheap_test" in output
     assert "usefulness\tfail" in output
     assert "evidence_credibility\tnot_run" in output
+
+
+def test_replay_cli_waits_for_late_stage_evaluator_before_running(
+    temp_db, monkeypatch, capsys
+) -> None:
+    rejection_id = _save_legacy_strong_rejection(temp_db)
+    main_path = Path(main.__file__)
+    source = main_path.read_text(encoding="utf-8")
+    final_entrypoint = '\nif __name__ == "__main__":\n    main()\n'
+    assert final_entrypoint in source
+    module_source = source.replace(
+        final_entrypoint,
+        '\nif __name__ == "__main__":\n    pass\n',
+        1,
+    )
+    module_globals = {
+        "__name__": "__main__",
+        "__file__": str(main_path),
+    }
+    captured: dict[str, object] = {}
+
+    def fake_evaluate_connection_candidate(
+        *,
+        score_label: str,
+        source_domain: str,
+        target_domain: str,
+        patterns_payload: list[dict],
+        connection: dict,
+        threshold: float,
+        dedup_enabled: bool = True,
+    ) -> dict:
+        captured["score_label"] = score_label
+        captured["source_domain"] = source_domain
+        captured["target_domain"] = target_domain
+        captured["patterns_payload"] = patterns_payload
+        captured["connection"] = connection
+        captured["threshold"] = threshold
+        captured["dedup_enabled"] = dedup_enabled
+        return {
+            "total_score": 0.971,
+            "passes_threshold": True,
+            "validation_ok": True,
+            "claim_provenance": {
+                "passes": True,
+                "issues": [],
+            },
+            "usefulness_ok": False,
+            "usefulness_proof": {
+                "passes": False,
+                "reasons": ["usefulness:missing_cheap_test"],
+            },
+            "evidence_credibility_ok": True,
+            "evidence_credibility": None,
+            "adversarial_ok": True,
+            "adversarial_rubric": None,
+            "invariance_ok": True,
+            "invariance_result": None,
+            "provenance_ok": False,
+            "distance_ok": True,
+            "white_detected": False,
+            "salvage_attempted": True,
+            "salvage_applied": True,
+            "salvage_fields": ["mechanism"],
+            "should_transmit": False,
+            "stage_failures": [
+                "usefulness:missing_cheap_test",
+                "provenance:incomplete",
+            ],
+            "validation_reasons": [],
+        }
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--replay-strong-rejection",
+            str(rejection_id),
+            "--threshold",
+            "0.64",
+        ],
+    )
+
+    exec(compile(module_source, str(main_path), "exec"), module_globals)
+
+    module_globals["_evaluate_connection_candidate"] = (
+        fake_evaluate_connection_candidate
+    )
+    module_globals["main"]()
+
+    output = capsys.readouterr().out
+    assert captured["score_label"] == f"StrongRejection Replay #{rejection_id}"
+    assert captured["source_domain"] == "systems.test"
+    assert captured["target_domain"] == "latency.test"
+    assert captured["threshold"] == 0.64
+    assert captured["dedup_enabled"] is True
+    assert captured["patterns_payload"] == [
+        {
+            "seed_url": "https://seed.test/article",
+            "seed_excerpt": "Queue pressure accumulates during overload windows.",
+        }
+    ]
+    assert "[StrongRejectionReplay] Replaying" in output
+    assert "[StrongRejectionReplay] Verdict: salvage then fail later" in output
+    assert "read_only\tyes" in output
 
 
 def test_resolve_lineage_links_child_transmission_to_prior_transmission_cluster(
