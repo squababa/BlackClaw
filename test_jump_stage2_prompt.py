@@ -1,6 +1,7 @@
 import json
 
 import jump
+from hypothesis_validation import validate_hypothesis
 
 
 def _valid_stage2_payload() -> dict:
@@ -124,12 +125,14 @@ def test_phase6_salvage_prompt_stays_selective() -> None:
 
     assert "high-value near-miss" in prompt
     assert "one narrow rescue pass" in prompt
+    assert "Prefer the smallest valid rewrite" in prompt
     assert "rewrite it to open with one exact target-domain process noun phrase" in prompt
     assert (
         "rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, "
         "`edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together"
         in prompt
     )
+    assert "reuse the same observable, metric, comparator, and operator-decision language" in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
@@ -441,5 +444,130 @@ def test_build_repair_prompt_targets_usefulness_alignment_bottleneck() -> None:
 
     assert "Phase 5 usefulness-alignment bottleneck" in repair_prompt
     assert "keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable" in repair_prompt
+    assert "Reuse the existing confirm-side comparator language instead of paraphrasing it" in repair_prompt
+    assert "Reuse the existing falsify-side decision language" in repair_prompt
+    assert "Keep `edge_analysis.cheap_test.metric` identical to `test.metric`" in repair_prompt
     assert "Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move" in repair_prompt
     assert "The current cheap test sounds like generic validation rather than an operator move." in repair_prompt
+
+
+def test_build_repair_prompt_marks_mechanism_only_rescue_as_narrow() -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "when a threshold is crossed the scheduler changes state and collisions fall."
+    )
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["mechanism"],
+        original_data=payload,
+    )
+
+    assert "This is a mechanism-only rescue pass." in repair_prompt
+    assert "Prefer the smallest wording change that restores direct process anchoring" in repair_prompt
+
+
+def test_salvage_high_value_candidate_accepts_partial_mechanism_repair_for_replay_style_rescue(
+    monkeypatch,
+) -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "when a threshold is crossed the scheduler changes state and collisions fall."
+    )
+    payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+
+    monkeypatch.setattr(
+        jump,
+        "_repair_missing_fields",
+        lambda *_args, **_kwargs: {
+            "mechanism": (
+                "Feasible offset assignment compares occupied hyperperiod "
+                "slots and triggers collision-free task assignment before "
+                "simultaneous activation conflicts can occur."
+            )
+        },
+    )
+
+    repaired = jump.salvage_high_value_candidate(
+        payload,
+        ["mechanism"],
+        failure_reasons=["mechanism must name a specific process"],
+    )
+
+    assert repaired is not None
+    assert repaired["mechanism"].startswith("Feasible offset assignment compares")
+    assert repaired["test"] == payload["test"]
+    assert repaired["prediction"] == payload["prediction"]
+    assert repaired["edge_analysis"]["edge_if_right"] == "This could be useful."
+
+
+def test_salvage_high_value_candidate_preserves_strict_validation_after_narrow_mechanism_rewrite(
+    monkeypatch,
+) -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "when a threshold is crossed the scheduler changes state and collisions fall."
+    )
+    payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+
+    monkeypatch.setattr(
+        jump,
+        "_repair_missing_fields",
+        lambda *_args, **_kwargs: {
+            "mechanism": (
+                "Feasible offset assignment compares occupied hyperperiod "
+                "slots and triggers collision-free task assignment before "
+                "simultaneous activation conflicts can occur."
+            )
+        },
+    )
+
+    repaired = jump.salvage_high_value_candidate(
+        payload,
+        ["mechanism"],
+        failure_reasons=["mechanism must name a specific process"],
+    )
+
+    assert repaired is not None
+    passed, reasons = validate_hypothesis(repaired)
+
+    assert passed is False
+    assert "mechanism must name a specific process" not in reasons
+    assert "edge_analysis edge_if_right is too generic" in reasons
+
+
+def test_salvage_high_value_candidate_keeps_nonmechanism_fields_stable_during_mechanism_only_rescue(
+    monkeypatch,
+) -> None:
+    payload = _valid_stage2_payload()
+    payload["mechanism"] = (
+        "when a threshold is crossed the scheduler changes state and collisions fall."
+    )
+    rewritten_payload = _valid_stage2_payload()
+    rewritten_payload["mechanism"] = (
+        "Feasible offset assignment compares occupied hyperperiod slots and "
+        "triggers collision-free task assignment before simultaneous "
+        "activation conflicts can occur."
+    )
+    rewritten_payload["prediction"]["observable"] = "different observable"
+    rewritten_payload["test"]["metric"] = "different metric"
+    rewritten_payload["edge_analysis"]["actionable_lever"] = "Investigate further."
+
+    monkeypatch.setattr(
+        jump,
+        "_repair_missing_fields",
+        lambda *_args, **_kwargs: rewritten_payload,
+    )
+
+    repaired = jump.salvage_high_value_candidate(
+        payload,
+        ["mechanism"],
+        failure_reasons=["mechanism must name a specific process"],
+    )
+
+    assert repaired is not None
+    assert repaired["mechanism"] == rewritten_payload["mechanism"]
+    assert repaired["prediction"] == payload["prediction"]
+    assert repaired["test"] == payload["test"]
+    assert repaired["edge_analysis"] == payload["edge_analysis"]

@@ -432,6 +432,23 @@ def test_phase6_salvage_plan_infers_edge_repairs_from_validation_reasons() -> No
         "edge_analysis.cheap_test",
         "edge_analysis.edge_if_right",
     ]
+    assert plan["repair_stages"] == [
+        {
+            "name": "mechanism_first",
+            "repair_fields": ["mechanism"],
+            "reasons": ["mechanism must name a specific process"],
+        },
+        {
+            "name": "edge_layer",
+            "repair_fields": [
+                "edge_analysis.problem_statement",
+                "edge_analysis.actionable_lever",
+                "edge_analysis.cheap_test",
+                "edge_analysis.edge_if_right",
+            ],
+            "reasons": ["edge_analysis edge_if_right is too generic"],
+        },
+    ]
 
 
 def test_evaluate_connection_candidate_applies_phase6_salvage_once(monkeypatch) -> None:
@@ -627,14 +644,275 @@ def test_evaluate_connection_candidate_salvages_mechanism_and_edge_validation_fa
 
     assert candidate["salvage_attempted"] is True
     assert candidate["salvage_applied"] is True
-    assert captured["missing_fields"] == [
+    assert candidate["salvage_fields"] == [
         "mechanism",
         "edge_analysis.problem_statement",
         "edge_analysis.actionable_lever",
         "edge_analysis.cheap_test",
         "edge_analysis.edge_if_right",
     ]
-    assert captured["failure_reasons"] == [
-        "mechanism must name a specific process",
-        "edge_analysis edge_if_right is too generic",
+    assert captured["missing_fields"] == ["mechanism"]
+    assert captured["failure_reasons"] == ["mechanism must name a specific process"]
+
+
+def test_evaluate_connection_candidate_repairs_usefulness_alignment_with_edge_anchors(
+    monkeypatch,
+) -> None:
+    payload = _build_edge_first_payload()
+    payload["edge_analysis"]["problem_statement"] = (
+        "Operators may miss useful schedule ideas in dense workloads."
+    )
+    payload["edge_analysis"]["actionable_lever"] = (
+        "Investigate whether a better scheduling heuristic exists."
+    )
+    payload["edge_analysis"]["cheap_test"]["setup"] = (
+        "Run a study to validate whether the hypothesis is true."
+    )
+    payload["edge_analysis"]["cheap_test"]["metric"] = "schedule performance"
+    payload["edge_analysis"]["cheap_test"]["confirm"] = "results improve"
+    payload["edge_analysis"]["cheap_test"]["falsify"] = "the effect is absent"
+    payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+    repaired = _build_edge_first_payload()
+    repaired["edge_analysis"]["problem_statement"] = (
+        "Dense periodic schedulers may miss lower collision rate per hyperperiod opportunities "
+        "when sequential offset assignment overlooks siteswap-filtered candidates at the same utilization."
+    )
+    repaired["edge_analysis"]["actionable_lever"] = (
+        "Replay dense periodic workloads with siteswap-filtered candidate generation before sequential slot placement."
+    )
+    repaired["edge_analysis"]["cheap_test"]["setup"] = (
+        "Replay one queue of dense periodic workloads with siteswap-filtered candidate generation before sequential slot placement."
+    )
+    repaired["edge_analysis"]["cheap_test"]["metric"] = repaired["test"]["metric"]
+    repaired["edge_analysis"]["cheap_test"]["confirm"] = repaired["test"]["confirm"]
+    repaired["edge_analysis"]["cheap_test"]["falsify"] = repaired["prediction"][
+        "falsification_condition"
     ]
+    repaired["edge_analysis"]["edge_if_right"] = (
+        "Real-time scheduling engineers can choose siteswap-filtered candidate generation when the replay shows lower collision rate per hyperperiod at the same utilization."
+    )
+
+    monkeypatch.setattr(
+        main,
+        "score_connection",
+        lambda *_args, **_kwargs: {
+            "total": 0.931,
+            "depth": 0.84,
+            "distance": 0.81,
+            "novelty": 0.62,
+            "prediction_quality": {"passes": True, "score": 1.0},
+        },
+    )
+    monkeypatch.setattr(main, "validate_hypothesis", lambda _payload: (True, []))
+    monkeypatch.setattr(
+        main,
+        "summarize_evidence_map_provenance",
+        lambda connection: {
+            "passes": True,
+            "issues": [],
+            "evidence_map": connection.get("evidence_map"),
+            "supported_critical_mapping_count": 3,
+            "critical_mapping_count": 3,
+            "supported_mechanism_assertion_count": 1,
+            "required_mechanism_assertion_count": 1,
+            "core_target_evidence_strength": "strong_direct",
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_extract_seed_provenance",
+        lambda _patterns: ("https://example.com/seed", "seed excerpt"),
+    )
+    monkeypatch.setattr(
+        main,
+        "salvage_high_value_candidate",
+        lambda _connection, missing_fields, failure_reasons=None: repaired
+        if missing_fields
+        == [
+            "edge_analysis.problem_statement",
+            "edge_analysis.actionable_lever",
+            "edge_analysis.cheap_test",
+            "edge_analysis.edge_if_right",
+        ]
+        else None,
+    )
+
+    def fake_usefulness_gate(**kwargs):
+        connection = kwargs["connection"]
+        cheap_test = connection["edge_analysis"]["cheap_test"]
+        if cheap_test["setup"] == "Run a study to validate whether the hypothesis is true.":
+            return {
+                "passes": False,
+                "reasons": [
+                    "usefulness:missing_cheap_test",
+                    "usefulness:weak_claim_evidence_alignment",
+                ],
+                "repair_fields": ["edge_analysis.cheap_test"],
+            }
+        aligned = (
+            cheap_test["metric"] == connection["test"]["metric"]
+            and cheap_test["confirm"] == connection["test"]["confirm"]
+            and cheap_test["falsify"]
+            == connection["prediction"]["falsification_condition"]
+            and "collision rate per hyperperiod"
+            in connection["edge_analysis"]["problem_statement"]
+        )
+        return {
+            "passes": aligned,
+            "reasons": [] if aligned else ["usefulness:weak_claim_evidence_alignment"],
+            "repair_fields": [],
+        }
+
+    monkeypatch.setattr(main, "_evaluate_usefulness_proof_gate", fake_usefulness_gate)
+    monkeypatch.setattr(
+        main,
+        "_evaluate_transmit_evidence_gate",
+        lambda **_kwargs: {"passes": True, "reasons": []},
+    )
+    monkeypatch.setattr(
+        main,
+        "run_adversarial_rubric",
+        lambda *_args, **_kwargs: (True, {"kill_reasons": []}),
+    )
+    monkeypatch.setattr(
+        main,
+        "run_invariance_check",
+        lambda *_args, **_kwargs: (True, {"invariance_score": 1.0}),
+    )
+    monkeypatch.setattr(
+        main,
+        "rewrite_transmission",
+        lambda **_kwargs: {"boring": True, "rewritten": None},
+    )
+
+    candidate = main._evaluate_connection_candidate(
+        score_label="Phase6 Usefulness Rescue",
+        source_domain="Juggling",
+        target_domain="Time-triggered scheduling",
+        patterns_payload=[],
+        connection=payload,
+        threshold=0.64,
+        dedup_enabled=False,
+    )
+
+    assert candidate["salvage_attempted"] is True
+    assert candidate["salvage_applied"] is True
+    assert candidate["usefulness_ok"] is True
+    assert candidate["validation_ok"] is True
+    assert candidate["salvage_fields"] == [
+        "edge_analysis.problem_statement",
+        "edge_analysis.actionable_lever",
+        "edge_analysis.cheap_test",
+        "edge_analysis.edge_if_right",
+    ]
+    assert (
+        candidate["prepared_connection"]["edge_analysis"]["cheap_test"]["metric"]
+        == candidate["prepared_connection"]["test"]["metric"]
+    )
+    assert (
+        candidate["prepared_connection"]["edge_analysis"]["cheap_test"]["confirm"]
+        == candidate["prepared_connection"]["test"]["confirm"]
+    )
+
+
+def test_evaluate_connection_candidate_keeps_strict_validation_after_salvage(
+    monkeypatch,
+) -> None:
+    payload = _build_edge_first_payload()
+    payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+    repaired = _build_edge_first_payload()
+    repaired["mechanism"] = (
+        "In the target domain, a threshold is crossed and the system changes state."
+    )
+
+    validate_calls = {"count": 0}
+
+    def fake_validate(_payload: dict) -> tuple[bool, list[str]]:
+        validate_calls["count"] += 1
+        if validate_calls["count"] == 1:
+            return False, ["edge_analysis edge_if_right is too generic"]
+        return False, ["mechanism must name a specific process"]
+
+    monkeypatch.setattr(
+        main,
+        "score_connection",
+        lambda *_args, **_kwargs: {
+            "total": 0.924,
+            "depth": 0.84,
+            "distance": 0.81,
+            "novelty": 0.62,
+            "prediction_quality": {"passes": True, "score": 1.0},
+        },
+    )
+    monkeypatch.setattr(main, "validate_hypothesis", fake_validate)
+    monkeypatch.setattr(
+        main,
+        "summarize_evidence_map_provenance",
+        lambda connection: {
+            "passes": True,
+            "issues": [],
+            "evidence_map": connection.get("evidence_map"),
+            "supported_critical_mapping_count": 3,
+            "critical_mapping_count": 3,
+            "supported_mechanism_assertion_count": 1,
+            "required_mechanism_assertion_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_extract_seed_provenance",
+        lambda _patterns: ("https://example.com/seed", "seed excerpt"),
+    )
+    monkeypatch.setattr(
+        main,
+        "salvage_high_value_candidate",
+        lambda _connection, missing_fields, failure_reasons=None: repaired
+        if missing_fields
+        == [
+            "edge_analysis.problem_statement",
+            "edge_analysis.actionable_lever",
+            "edge_analysis.cheap_test",
+            "edge_analysis.edge_if_right",
+        ]
+        else None,
+    )
+    monkeypatch.setattr(
+        main,
+        "_evaluate_usefulness_proof_gate",
+        lambda **_kwargs: {"passes": True, "reasons": [], "repair_fields": []},
+    )
+    monkeypatch.setattr(
+        main,
+        "_evaluate_transmit_evidence_gate",
+        lambda **_kwargs: {"passes": True, "reasons": []},
+    )
+    monkeypatch.setattr(
+        main,
+        "run_adversarial_rubric",
+        lambda *_args, **_kwargs: (True, {"kill_reasons": []}),
+    )
+    monkeypatch.setattr(
+        main,
+        "run_invariance_check",
+        lambda *_args, **_kwargs: (True, {"invariance_score": 1.0}),
+    )
+    monkeypatch.setattr(
+        main,
+        "rewrite_transmission",
+        lambda **_kwargs: {"boring": True, "rewritten": None},
+    )
+
+    candidate = main._evaluate_connection_candidate(
+        score_label="Phase6 Strict Validation",
+        source_domain="Juggling",
+        target_domain="Time-triggered scheduling",
+        patterns_payload=[],
+        connection=payload,
+        threshold=0.64,
+        dedup_enabled=False,
+    )
+
+    assert candidate["salvage_attempted"] is True
+    assert candidate["salvage_applied"] is False
+    assert candidate["validation_ok"] is False
+    assert candidate["validation_reasons"] == ["edge_analysis edge_if_right is too generic"]

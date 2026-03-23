@@ -148,6 +148,180 @@ PHASE6_VALIDATION_REASON_TO_FIELDS = {
         "edge_analysis.cheap_test",
     ],
 }
+REPLAY_LEGACY_EDGE_REASON_TO_FIELDS = {
+    "edge_analysis problem_statement must name a specific target-domain problem": [
+        "edge_analysis.problem_statement",
+    ],
+    "edge_analysis actionable_lever must name a concrete action": [
+        "edge_analysis.actionable_lever",
+    ],
+    "edge_analysis cheap_test must include setup, metric, confirm, and falsify": [
+        "edge_analysis.cheap_test",
+    ],
+    "edge_analysis edge_if_right must name a concrete operator advantage": [
+        "edge_analysis.edge_if_right",
+    ],
+    "edge_analysis primary_operator must name a specific operator": [
+        "edge_analysis.primary_operator",
+    ],
+    "usefulness:missing_edge_problem": [
+        "edge_analysis.problem_statement",
+    ],
+    "usefulness:missing_actionable_lever": [
+        "edge_analysis.actionable_lever",
+    ],
+    "usefulness:missing_cheap_test": [
+        "edge_analysis.cheap_test",
+    ],
+    "usefulness:missing_edge_advantage": [
+        "edge_analysis.edge_if_right",
+        "edge_analysis.primary_operator",
+    ],
+}
+PHASE6_EDGE_LAYER_FIELDS = (
+    "edge_analysis.problem_statement",
+    "edge_analysis.actionable_lever",
+    "edge_analysis.cheap_test",
+    "edge_analysis.edge_if_right",
+)
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    """Keep the first occurrence of each non-empty value."""
+    deduped: list[str] = []
+    for value in values:
+        cleaned = str(value).strip()
+        if cleaned and cleaned not in deduped:
+            deduped.append(cleaned)
+    return deduped
+
+
+def _build_phase6_salvage_stages(
+    repair_fields: list[str],
+    reasons: list[str],
+) -> list[dict]:
+    """Prefer narrow mechanism rescue before broader edge-layer rewrites."""
+    deduped_fields = _dedupe_preserving_order(repair_fields)
+    deduped_reasons = _dedupe_preserving_order(reasons)
+    mechanism_fields = [field for field in deduped_fields if field == "mechanism"]
+    edge_fields = [
+        field for field in deduped_fields if field in PHASE6_EDGE_LAYER_FIELDS
+    ]
+    other_fields = [
+        field
+        for field in deduped_fields
+        if field not in mechanism_fields and field not in edge_fields
+    ]
+    mechanism_reasons = [
+        reason for reason in deduped_reasons if "mechanism" in reason.lower()
+    ]
+    edge_reasons = [
+        reason for reason in deduped_reasons if reason not in mechanism_reasons
+    ]
+
+    if mechanism_fields and edge_fields and not other_fields:
+        stages = [
+            {
+                "name": "mechanism_first",
+                "repair_fields": mechanism_fields,
+                "reasons": mechanism_reasons or deduped_reasons,
+            },
+            {
+                "name": "edge_layer",
+                "repair_fields": edge_fields,
+                "reasons": edge_reasons or deduped_reasons,
+            },
+        ]
+        return [stage for stage in stages if stage.get("repair_fields")]
+
+    return [
+        {
+            "name": "targeted",
+            "repair_fields": deduped_fields,
+            "reasons": deduped_reasons,
+        }
+    ]
+
+
+def _evaluate_phase6_salvage_candidate_state(
+    connection: dict,
+    prediction_quality: dict,
+) -> dict:
+    """Re-run strict late-stage gates for one salvage rewrite candidate."""
+    candidate = dict(connection) if isinstance(connection, dict) else {}
+    mechanism_typing = normalize_mechanism_typing(candidate)
+    candidate["mechanism_typing"] = mechanism_typing
+    candidate["mechanism_type"] = mechanism_typing.get("mechanism_type")
+    candidate["mechanism_type_confidence"] = mechanism_typing.get(
+        "mechanism_type_confidence"
+    )
+    candidate["secondary_mechanism_types"] = mechanism_typing.get(
+        "secondary_mechanism_types", []
+    )
+    candidate["evidence_map"] = normalize_evidence_map(candidate.get("evidence_map"))
+
+    claim_provenance = summarize_evidence_map_provenance(candidate)
+    claim_provenance_ok = bool(claim_provenance.get("passes"))
+    validation_ok, validation_reasons = validate_hypothesis(candidate)
+    prediction_quality_ok = bool(prediction_quality.get("passes"))
+    if not prediction_quality_ok:
+        quality_reasons = (
+            prediction_quality.get("blocking_reasons")
+            or prediction_quality.get("issues")
+            or ["prediction quality below enforcement threshold"]
+        )
+        validation_reasons.extend(
+            reason
+            for reason in quality_reasons
+            if isinstance(reason, str) and reason not in validation_reasons
+        )
+        validation_ok = False
+
+    usefulness_ok = True
+    usefulness_proof = None
+    if validation_ok and claim_provenance_ok:
+        usefulness_proof = _evaluate_usefulness_proof_gate(
+            connection=candidate,
+            prediction_quality=prediction_quality,
+            claim_provenance=claim_provenance,
+        )
+        usefulness_ok = bool(usefulness_proof.get("passes"))
+        if not usefulness_ok:
+            validation_reasons.extend(
+                reason
+                for reason in (usefulness_proof.get("reasons") or [])
+                if isinstance(reason, str) and reason not in validation_reasons
+            )
+
+    return {
+        "connection": candidate,
+        "mechanism_typing": mechanism_typing,
+        "claim_provenance": claim_provenance,
+        "claim_provenance_ok": claim_provenance_ok,
+        "validation_ok": validation_ok,
+        "validation_reasons": validation_reasons,
+        "prediction_quality_ok": prediction_quality_ok,
+        "usefulness_ok": usefulness_ok,
+        "usefulness_proof": usefulness_proof,
+    }
+
+
+def _phase6_salvage_state_is_stageable(state: dict) -> bool:
+    """Only continue from rewrites that preserve provenance and remaining repairability."""
+    if not bool(state.get("claim_provenance_ok")):
+        return False
+    reasons = [
+        str(reason).strip()
+        for reason in (state.get("validation_reasons") or [])
+        if str(reason).strip()
+    ]
+    if "mechanism must name a specific process" in reasons:
+        return False
+    allowed_reasons = (
+        PHASE6_REPAIRABLE_VALIDATION_REASONS
+        | PHASE6_REPAIRABLE_USEFULNESS_REASONS
+    )
+    return all(reason in allowed_reasons for reason in reasons)
 
 
 def _print_credibility_weighting_summary(score_label: str, scores: dict):
@@ -391,6 +565,12 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
+    )
+    parser.add_argument(
+        "--replay-strong-rejection",
         type=int,
         default=None,
         metavar="ID",
@@ -2039,6 +2219,587 @@ def _print_strong_rejection_detail(rejection_id: int) -> bool:
     return True
 
 
+def _strong_rejection_reason_list(value: object) -> list[str]:
+    """Normalize a reason payload into a clean, de-duplicated list."""
+    raw_values = value if isinstance(value, list) else []
+    reasons: list[str] = []
+    for raw_reason in raw_values:
+        reason = str(raw_reason or "").strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return reasons
+
+
+def _load_strong_rejection_replay_context(rejection_id: int) -> dict | None:
+    """Load one stored strong rejection plus the minimal replay context."""
+    row = get_strong_rejection(rejection_id)
+    if row is None:
+        return None
+
+    connection_payload = (
+        row.get("connection_payload")
+        if isinstance(row.get("connection_payload"), dict)
+        else None
+    )
+    if connection_payload is None:
+        return {
+            "row": row,
+            "error": "stored connection payload is unavailable",
+        }
+
+    exploration_context: dict[str, object] = {}
+    exploration_id = row.get("exploration_id")
+    if exploration_id is not None:
+        conn = _connect()
+        exploration_row = conn.execute(
+            """SELECT
+                patterns_found,
+                jump_target_domain,
+                seed_url,
+                seed_excerpt,
+                target_url,
+                target_excerpt
+            FROM explorations
+            WHERE id = ?
+            LIMIT 1""",
+            (exploration_id,),
+        ).fetchone()
+        conn.close()
+        if exploration_row is not None:
+            try:
+                parsed_patterns = json.loads(exploration_row["patterns_found"] or "[]")
+            except Exception:
+                parsed_patterns = []
+            if not isinstance(parsed_patterns, list):
+                parsed_patterns = []
+            exploration_context = {
+                "patterns_payload": [
+                    item for item in parsed_patterns if isinstance(item, dict)
+                ],
+                "target_domain": _clean_inline_text(
+                    exploration_row["jump_target_domain"]
+                ),
+                "seed_url": _clean_inline_text(exploration_row["seed_url"]),
+                "seed_excerpt": _clean_inline_text(exploration_row["seed_excerpt"]),
+                "target_url": _clean_inline_text(exploration_row["target_url"]),
+                "target_excerpt": _clean_inline_text(exploration_row["target_excerpt"]),
+            }
+
+    connection = dict(connection_payload)
+    if not isinstance(connection.get("evidence_map"), dict) and isinstance(
+        row.get("evidence_map"), dict
+    ):
+        connection["evidence_map"] = row.get("evidence_map")
+    if not isinstance(connection.get("mechanism_typing"), dict) and isinstance(
+        row.get("mechanism_typing"), dict
+    ):
+        connection["mechanism_typing"] = row.get("mechanism_typing")
+    if not _clean_inline_text(connection.get("mechanism_type")):
+        mechanism_type = _clean_inline_text(row.get("mechanism_type"))
+        if mechanism_type is not None:
+            connection["mechanism_type"] = mechanism_type
+    for field in ("target_url", "target_excerpt"):
+        if not _clean_inline_text(connection.get(field)):
+            fallback = _clean_inline_text(exploration_context.get(field))
+            if fallback is not None:
+                connection[field] = fallback
+
+    patterns_payload = list(exploration_context.get("patterns_payload") or [])
+    if not patterns_payload:
+        seed_url = _clean_inline_text(connection.get("seed_url")) or _clean_inline_text(
+            exploration_context.get("seed_url")
+        )
+        seed_excerpt = _clean_inline_text(
+            connection.get("seed_excerpt")
+        ) or _clean_inline_text(exploration_context.get("seed_excerpt"))
+        if seed_url is not None or seed_excerpt is not None:
+            patterns_payload = [
+                {
+                    "seed_url": seed_url,
+                    "seed_excerpt": seed_excerpt,
+                }
+            ]
+
+    target_domain = _clean_inline_text(row.get("target_domain")) or _clean_inline_text(
+        exploration_context.get("target_domain")
+    )
+    if target_domain is None:
+        return {
+            "row": row,
+            "error": "stored target domain is unavailable",
+        }
+
+    return {
+        "row": row,
+        "connection": connection,
+        "patterns_payload": patterns_payload,
+        "source_domain": row.get("seed_domain"),
+        "target_domain": target_domain,
+    }
+
+
+def _strong_rejection_replay_context(row: dict) -> dict:
+    """Build replay-only metadata without mutating the stored row."""
+    original_reasons = _strong_rejection_reason_list(row.get("rejection_reasons"))
+    if not original_reasons and _clean_inline_text(row.get("salvage_reason")):
+        original_reasons = [str(row.get("salvage_reason")).strip()]
+
+    return {
+        "mode": "strong_rejection_replay",
+        "stored_original_total_score": row.get("total_score"),
+        "original_rejection_reasons": original_reasons,
+    }
+
+
+def _replay_reason_mentions_edge_schema(reason: object) -> bool:
+    """Detect whether a stored rejection already targeted the modern edge layer."""
+    text = (_clean_strong_rejection_reason_text(reason) or "").lower()
+    if not text:
+        return False
+    return text.startswith("edge_analysis ") or text.startswith("usefulness:missing_")
+
+
+def _replay_legacy_edge_profile(
+    connection: dict,
+    *,
+    original_reasons: list[str] | None = None,
+) -> dict:
+    """Infer whether a replay payload predates the newer edge-analysis schema."""
+    payload = connection if isinstance(connection, dict) else {}
+    nested_edge = payload.get("edge_analysis")
+    if isinstance(nested_edge, dict):
+        return {
+            "is_legacy_payload": False,
+            "missing_fields": [],
+        }
+    if any(_replay_reason_mentions_edge_schema(reason) for reason in (original_reasons or [])):
+        return {
+            "is_legacy_payload": False,
+            "missing_fields": [],
+        }
+
+    normalized_edge = normalize_edge_analysis(payload)
+    cheap_test = (
+        normalized_edge.get("cheap_test")
+        if isinstance(normalized_edge.get("cheap_test"), dict)
+        else {}
+    )
+    missing_fields: list[str] = []
+    if not _clean_inline_text(normalized_edge.get("problem_statement")):
+        missing_fields.append("edge_analysis.problem_statement")
+    if not _clean_inline_text(normalized_edge.get("actionable_lever")):
+        missing_fields.append("edge_analysis.actionable_lever")
+    if not all(
+        _clean_inline_text(cheap_test.get(key))
+        for key in ("setup", "metric", "confirm", "falsify")
+    ):
+        missing_fields.append("edge_analysis.cheap_test")
+    if not _clean_inline_text(normalized_edge.get("edge_if_right")):
+        missing_fields.append("edge_analysis.edge_if_right")
+    if not _clean_inline_text(normalized_edge.get("primary_operator")):
+        missing_fields.append("edge_analysis.primary_operator")
+
+    return {
+        "is_legacy_payload": len(missing_fields) == 5,
+        "missing_fields": missing_fields if len(missing_fields) == 5 else [],
+    }
+
+
+def _replay_legacy_schema_reasons(
+    reasons: list[str],
+    *,
+    legacy_profile: dict | None = None,
+) -> list[str]:
+    """Collect replay-only schema-era failures caused by missing newer edge fields."""
+    profile = legacy_profile if isinstance(legacy_profile, dict) else {}
+    missing_fields = {
+        str(field).strip()
+        for field in (profile.get("missing_fields") or [])
+        if str(field).strip()
+    }
+    if not missing_fields:
+        return []
+
+    legacy_reasons: list[str] = []
+    for raw_reason in reasons or []:
+        reason = str(raw_reason).strip()
+        if not reason:
+            continue
+        mapped_fields = REPLAY_LEGACY_EDGE_REASON_TO_FIELDS.get(reason, [])
+        if mapped_fields and all(field in missing_fields for field in mapped_fields):
+            legacy_reasons.append(reason)
+    return legacy_reasons
+
+
+def _replay_stage_failures_display(
+    stage_failures: list[str],
+    *,
+    legacy_reasons: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split replay failures into effective vs schema-era display lists."""
+    legacy_set = set(legacy_reasons)
+    effective: list[str] = []
+    schema_era: list[str] = []
+    for raw_failure in stage_failures or []:
+        failure = str(raw_failure).strip()
+        if not failure:
+            continue
+        cleaned = _clean_strong_rejection_reason_text(failure) or failure
+        if cleaned in legacy_set:
+            schema_era.append(failure)
+        else:
+            effective.append(failure)
+    return effective, schema_era
+
+
+def _build_strong_rejection_replay_diagnostics(
+    *,
+    replay_context: dict | None,
+    stage_failures: list[str],
+    legacy_profile: dict | None,
+    legacy_reasons: list[str],
+    salvage_attempted: bool,
+    salvage_applied: bool,
+    total_score: float | None,
+    threshold: float,
+) -> dict | None:
+    """Summarize replay-only failure families without changing live evaluation."""
+    context = replay_context if isinstance(replay_context, dict) else {}
+    if context.get("mode") != "strong_rejection_replay":
+        return None
+
+    original_display = _strong_rejection_reason_list(
+        context.get("original_rejection_reasons")
+    )
+    original_clean = [
+        _clean_strong_rejection_reason_text(reason) or str(reason).strip()
+        for reason in original_display
+        if str(reason).strip()
+    ]
+    current_display, legacy_display = _replay_stage_failures_display(
+        stage_failures,
+        legacy_reasons=legacy_reasons,
+    )
+    current_clean = [
+        _clean_strong_rejection_reason_text(reason) or str(reason).strip()
+        for reason in current_display
+        if str(reason).strip()
+    ]
+
+    original_bottleneck_reasons: list[str] = []
+    for reason in original_clean:
+        if reason and reason in current_clean and reason not in original_bottleneck_reasons:
+            original_bottleneck_reasons.append(reason)
+
+    new_current_pipeline_failures: list[str] = []
+    for reason in current_clean:
+        if reason and reason not in original_clean and reason not in new_current_pipeline_failures:
+            new_current_pipeline_failures.append(reason)
+
+    stored_original_total = context.get("stored_original_total_score")
+    floor = max(float(threshold), PHASE6_SALVAGE_SCORE_FLOOR)
+    current_total = float(total_score) if total_score is not None else None
+    stored_total = (
+        float(stored_original_total)
+        if isinstance(stored_original_total, (int, float))
+        else None
+    )
+    salvage_used_original_score = bool(
+        stored_total is not None
+        and current_total is not None
+        and current_total < floor <= stored_total
+    )
+
+    return {
+        "original_rejection_reasons": original_display,
+        "current_rejection_reasons": current_display,
+        "legacy_schema_failures": legacy_display,
+        "legacy_payload_missing_newer_fields": bool(
+            isinstance(legacy_profile, dict)
+            and legacy_profile.get("is_legacy_payload")
+        ),
+        "legacy_missing_fields": list((legacy_profile or {}).get("missing_fields") or []),
+        "original_bottleneck_reasons": original_bottleneck_reasons,
+        "original_bottleneck_still_present": bool(original_bottleneck_reasons),
+        "new_current_pipeline_failures": new_current_pipeline_failures,
+        "salvage_attempted_but_no_valid_rewrite": bool(
+            salvage_attempted and not salvage_applied
+        ),
+        "salvage_used_original_score": salvage_used_original_score,
+    }
+
+
+def _strong_rejection_replay_verdict(candidate: dict) -> str:
+    """Classify replay output into the requested operator-facing verdicts."""
+    if candidate.get("should_transmit"):
+        return "would now transmit"
+    if candidate.get("salvage_attempted") and not candidate.get("salvage_applied"):
+        return "salvage attempted but rewrite failed"
+
+    claim_provenance = (
+        candidate.get("claim_provenance")
+        if isinstance(candidate.get("claim_provenance"), dict)
+        else {}
+    )
+    if (
+        candidate.get("salvage_applied")
+        and candidate.get("validation_ok")
+        and bool(claim_provenance.get("passes"))
+    ):
+        return "salvage then fail later"
+    return "still fail"
+
+
+def _replay_gate_outcomes(candidate: dict) -> list[tuple[str, str]]:
+    """Render major gate outcomes without marking skipped stages as passes."""
+    claim_provenance = (
+        candidate.get("claim_provenance")
+        if isinstance(candidate.get("claim_provenance"), dict)
+        else {}
+    )
+    threshold_ok = bool(candidate.get("passes_threshold"))
+    validation_ok = bool(candidate.get("validation_ok"))
+    claim_provenance_ok = bool(claim_provenance.get("passes"))
+    usefulness_payload = candidate.get("usefulness_proof")
+    evidence_payload = candidate.get("evidence_credibility")
+    adversarial_payload = candidate.get("adversarial_rubric")
+    invariance_payload = candidate.get("invariance_result")
+
+    def _status(value: bool | None) -> str:
+        if value is None:
+            return "not_run"
+        return "pass" if value else "fail"
+
+    usefulness_status = (
+        bool(candidate.get("usefulness_ok"))
+        if isinstance(usefulness_payload, dict)
+        else None
+    )
+    evidence_status = (
+        bool(candidate.get("evidence_credibility_ok"))
+        if isinstance(evidence_payload, dict)
+        else None
+    )
+    adversarial_status = (
+        bool(candidate.get("adversarial_ok"))
+        if isinstance(adversarial_payload, dict)
+        else None
+    )
+    invariance_status = (
+        bool(candidate.get("invariance_ok"))
+        if isinstance(invariance_payload, dict)
+        else None
+    )
+
+    return [
+        ("threshold", _status(threshold_ok)),
+        ("validation", _status(validation_ok if threshold_ok else None)),
+        ("claim_provenance", _status(claim_provenance_ok)),
+        (
+            "usefulness",
+            _status(
+                usefulness_status
+                if threshold_ok and validation_ok and claim_provenance_ok
+                else None
+            ),
+        ),
+        (
+            "evidence_credibility",
+            _status(
+                evidence_status
+                if threshold_ok
+                and validation_ok
+                and claim_provenance_ok
+                and usefulness_status is True
+                else None
+            ),
+        ),
+        (
+            "adversarial",
+            _status(
+                adversarial_status
+                if threshold_ok
+                and validation_ok
+                and claim_provenance_ok
+                and usefulness_status is True
+                and evidence_status is True
+                else None
+            ),
+        ),
+        (
+            "invariance",
+            _status(
+                invariance_status
+                if threshold_ok
+                and validation_ok
+                and claim_provenance_ok
+                and usefulness_status is True
+                and evidence_status is True
+                and adversarial_status is True
+                else None
+            ),
+        ),
+        ("provenance_complete", _status(bool(candidate.get("provenance_ok")))),
+        ("distance", _status(bool(candidate.get("distance_ok")))),
+        ("white_novelty", _status(not bool(candidate.get("white_detected")))),
+    ]
+
+
+def _print_reason_block(header: str, reasons: list[str]):
+    """Print a stable reason block."""
+    print(header)
+    if not reasons:
+        print("none")
+        return
+    for reason in reasons:
+        print(f"- {reason}")
+
+
+def _replay_strong_rejection(rejection_id: int, threshold: float) -> bool:
+    """Replay one stored strong rejection through the current late-stage path."""
+    context = _load_strong_rejection_replay_context(rejection_id)
+    if context is None:
+        print(f"  [!] Strong rejection #{rejection_id} not found.")
+        return False
+    if context.get("error") is not None:
+        print(
+            f"  [!] Strong rejection #{rejection_id} cannot be replayed: "
+            f"{context.get('error')}."
+        )
+        return False
+
+    row = context["row"]
+    source_domain = _clean_inline_text(context.get("source_domain")) or "Unknown"
+    target_domain = _clean_inline_text(context.get("target_domain")) or "Unknown"
+
+    print(
+        f"[StrongRejectionReplay] Replaying #{rejection_id} read-only "
+        f"against threshold {float(threshold):.3f}"
+    )
+    print(f"[StrongRejectionReplay] Domains: {source_domain} → {target_domain}")
+    replay_context = _strong_rejection_replay_context(row)
+
+    candidate = _evaluate_connection_candidate(
+        score_label=f"StrongRejection Replay #{rejection_id}",
+        source_domain=source_domain,
+        target_domain=target_domain,
+        patterns_payload=context.get("patterns_payload") or [],
+        connection=context["connection"],
+        threshold=float(threshold),
+        replay_context=replay_context,
+    )
+
+    replay_diagnostics = (
+        candidate.get("replay_diagnostics")
+        if isinstance(candidate.get("replay_diagnostics"), dict)
+        else {}
+    )
+    original_reasons = replay_diagnostics.get("original_rejection_reasons") or list(
+        replay_context.get("original_rejection_reasons") or []
+    )
+    new_reasons = replay_diagnostics.get("current_rejection_reasons") or _strong_rejection_reason_list(
+        candidate.get("stage_failures") or candidate.get("validation_reasons") or []
+    )
+    legacy_reasons = replay_diagnostics.get("legacy_schema_failures") or []
+    original_total = row.get("total_score")
+    new_total = candidate.get("total_score")
+    salvage_fields = [
+        str(field).strip()
+        for field in (candidate.get("salvage_fields") or [])
+        if str(field).strip()
+    ]
+
+    print(
+        "[StrongRejectionReplay] Verdict: "
+        f"{_strong_rejection_replay_verdict(candidate)}"
+    )
+    print("field\tvalue")
+    print("read_only\tyes")
+    print(f"original_rejection_stage\t{row.get('rejection_stage') or '—'}")
+    print(
+        f"original_total_score\t{float(original_total):.3f}"
+        if original_total is not None
+        else "original_total_score\t—"
+    )
+    print(
+        f"new_total_score\t{float(new_total):.3f}"
+        if new_total is not None
+        else "new_total_score\t—"
+    )
+    print(
+        "salvage_attempted\t"
+        f"{'yes' if candidate.get('salvage_attempted') else 'no'}"
+    )
+    print(
+        "salvage_applied\t"
+        f"{'yes' if candidate.get('salvage_applied') else 'no'}"
+    )
+    print(
+        "salvage_fields\t"
+        f"{', '.join(salvage_fields) if salvage_fields else '—'}"
+    )
+    print(
+        "should_transmit\t"
+        f"{'yes' if candidate.get('should_transmit') else 'no'}"
+    )
+
+    _print_reason_block(
+        "[StrongRejectionReplay] Original rejection reasons",
+        original_reasons,
+    )
+    _print_reason_block(
+        "[StrongRejectionReplay] New rejection reasons",
+        new_reasons,
+    )
+    if legacy_reasons:
+        _print_reason_block(
+            "[StrongRejectionReplay] Legacy schema-era reasons",
+            legacy_reasons,
+        )
+
+    print("[StrongRejectionReplay] Diagnostics")
+    print("diagnostic\tvalue")
+    print(
+        "original_bottleneck_still_present\t"
+        f"{'yes' if replay_diagnostics.get('original_bottleneck_still_present') else 'no'}"
+    )
+    print(
+        "salvage_attempted_but_no_valid_rewrite\t"
+        f"{'yes' if replay_diagnostics.get('salvage_attempted_but_no_valid_rewrite') else 'no'}"
+    )
+    print(
+        "legacy_payload_missing_newer_fields\t"
+        f"{'yes' if replay_diagnostics.get('legacy_payload_missing_newer_fields') else 'no'}"
+    )
+    print(
+        "new_current_pipeline_failure\t"
+        f"{'yes' if replay_diagnostics.get('new_current_pipeline_failures') else 'no'}"
+    )
+    if replay_diagnostics.get("salvage_used_original_score"):
+        print("salvage_eligibility_score_source\tstored_original_total_score")
+    if replay_diagnostics.get("legacy_missing_fields"):
+        print(
+            "legacy_missing_fields\t"
+            f"{', '.join(replay_diagnostics.get('legacy_missing_fields') or [])}"
+        )
+    if replay_diagnostics.get("original_bottleneck_reasons"):
+        print(
+            "original_bottleneck_reasons\t"
+            f"{', '.join(replay_diagnostics.get('original_bottleneck_reasons') or [])}"
+        )
+    if replay_diagnostics.get("new_current_pipeline_failures"):
+        print(
+            "new_current_pipeline_failures\t"
+            f"{', '.join(replay_diagnostics.get('new_current_pipeline_failures') or [])}"
+        )
+
+    print("[StrongRejectionReplay] Gate outcomes")
+    print("gate\toutcome")
+    for gate_name, outcome in _replay_gate_outcomes(candidate):
+        print(f"{gate_name}\t{outcome}")
+    return True
+
+
 def _lineage_change_summary_text(payload: dict | None) -> str:
     """Render a compact lineage-change summary from stored JSON."""
     if not isinstance(payload, dict) or not payload:
@@ -2875,6 +3636,7 @@ if __name__ == "__main__":
         [
             _early_report_args.strong_rejections,
             _early_report_args.strong_rejection is not None,
+            _early_report_args.replay_strong_rejection is not None,
             _early_report_args.mark_salvaged is not None,
             _early_report_args.dismiss_strong_rejection is not None,
         ]
@@ -2957,7 +3719,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
+            "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --replay-strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
         )
         sys.exit(1)
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
@@ -3053,6 +3815,10 @@ if __name__ == "__main__":
         ("--mark-failed", _early_report_args.mark_failed),
         ("--mark-unknown", _early_report_args.mark_unknown),
         ("--strong-rejection", _early_report_args.strong_rejection),
+        (
+            "--replay-strong-rejection",
+            _early_report_args.replay_strong_rejection,
+        ),
         ("--grade-transmission", _early_report_args.grade_transmission),
         ("--mark-salvaged", _early_report_args.mark_salvaged),
         (
@@ -3102,6 +3868,8 @@ if __name__ == "__main__":
         or _early_report_args.audit_reasoning
         or _early_report_args.eval_stats
     )
+    # Strong-rejection replay depends on late-stage helpers defined later in this
+    # module, so let the final main() entry point handle it after module load.
     if (
         not _early_report_action_requested
         and not _early_report_args.export
@@ -3715,6 +4483,13 @@ def parse_args():
         default=None,
         metavar="ID",
         help="Show full details for a stored strong rejection id and exit",
+    )
+    parser.add_argument(
+        "--replay-strong-rejection",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Reload a stored strong rejection payload, rerun the current late-stage evaluation read-only, and exit",
     )
     parser.add_argument(
         "--strong-rejection-lineage",
@@ -5699,17 +6474,26 @@ def _plan_phase6_salvage(
     usefulness_proof: dict | None,
     claim_provenance_ok: bool,
     prediction_quality_ok: bool,
+    alternate_total_scores: list[float] | None = None,
+    ignored_reasons: list[str] | None = None,
 ) -> dict:
     """Plan one selective Phase 6 salvage pass for high-value near-misses."""
+    ignored_reason_set = {
+        str(reason).strip()
+        for reason in (ignored_reasons or [])
+        if str(reason).strip()
+    }
     normalized_validation = [
         str(reason).strip()
         for reason in (validation_reasons or [])
         if str(reason).strip()
+        and str(reason).strip() not in ignored_reason_set
     ]
     usefulness_reasons = [
         str(reason).strip()
         for reason in ((usefulness_proof or {}).get("reasons") or [])
         if str(reason).strip()
+        and str(reason).strip() not in ignored_reason_set
     ]
     combined_reasons: list[str] = []
     for reason in normalized_validation + usefulness_reasons:
@@ -5750,17 +6534,31 @@ def _plan_phase6_salvage(
         PHASE6_REPAIRABLE_VALIDATION_REASONS
         | PHASE6_REPAIRABLE_USEFULNESS_REASONS
     )
+    score_candidates = [float(total_score)]
+    for raw_score in alternate_total_scores or []:
+        if isinstance(raw_score, (int, float)):
+            score_candidates.append(float(raw_score))
+    eligibility_score = max(score_candidates) if score_candidates else float(total_score)
     eligible = bool(repair_fields) and all(
         reason in allowed_reasons for reason in combined_reasons
     )
     eligible = eligible and len(combined_reasons) <= PHASE6_MAX_REPAIRABLE_REASONS
-    eligible = eligible and total_score >= max(threshold, PHASE6_SALVAGE_SCORE_FLOOR)
+    eligible = eligible and eligibility_score >= max(
+        threshold,
+        PHASE6_SALVAGE_SCORE_FLOOR,
+    )
     eligible = eligible and claim_provenance_ok and prediction_quality_ok
+
+    repair_fields = _dedupe_preserving_order(repair_fields)
+    combined_reasons = _dedupe_preserving_order(combined_reasons)
 
     return {
         "eligible": eligible,
         "repair_fields": repair_fields,
+        "repair_stages": _build_phase6_salvage_stages(repair_fields, combined_reasons),
         "reasons": combined_reasons,
+        "ignored_reasons": sorted(ignored_reason_set),
+        "eligibility_score": eligibility_score,
     }
 
 
@@ -6022,9 +6820,24 @@ def _evaluate_connection_candidate(
     connection: dict,
     threshold: float,
     dedup_enabled: bool = True,
+    replay_context: dict | None = None,
 ) -> dict:
     """Run scoring and all gating logic for one candidate connection."""
     connection = dict(connection) if isinstance(connection, dict) else {}
+    replay_mode = (
+        isinstance(replay_context, dict)
+        and replay_context.get("mode") == "strong_rejection_replay"
+    )
+    replay_legacy_profile = (
+        _replay_legacy_edge_profile(
+            connection,
+            original_reasons=list(
+                replay_context.get("original_rejection_reasons") or []
+            ),
+        )
+        if replay_mode
+        else {"is_legacy_payload": False, "missing_fields": []}
+    )
     mechanism_typing = normalize_mechanism_typing(connection)
     connection["mechanism_typing"] = mechanism_typing
     connection["mechanism_type"] = mechanism_typing.get("mechanism_type")
@@ -6124,6 +6937,14 @@ def _evaluate_connection_candidate(
                 print(f"  [Usefulness] - {reason}")
 
     if passes_threshold and claim_provenance_ok:
+        replay_legacy_schema_failures = (
+            _replay_legacy_schema_reasons(
+                validation_reasons,
+                legacy_profile=replay_legacy_profile,
+            )
+            if replay_mode
+            else []
+        )
         salvage_plan = _plan_phase6_salvage(
             total_score=float(scores.get("total") or 0.0),
             threshold=threshold,
@@ -6131,61 +6952,118 @@ def _evaluate_connection_candidate(
             usefulness_proof=usefulness_proof,
             claim_provenance_ok=claim_provenance_ok,
             prediction_quality_ok=prediction_quality_ok,
+            alternate_total_scores=[
+                replay_context.get("stored_original_total_score")
+            ]
+            if replay_mode
+            else None,
+            ignored_reasons=replay_legacy_schema_failures,
         )
         if salvage_plan.get("eligible"):
             salvage_attempted = True
             salvage_fields = list(salvage_plan.get("repair_fields") or [])
             salvage_reasons = list(salvage_plan.get("reasons") or [])
+            salvage_stages = list(salvage_plan.get("repair_stages") or [])
+            salvage_stage_attempts: list[dict] = []
             print(
                 "  [Salvage] Attempting targeted rescue for high-value near-miss "
                 f"({', '.join(salvage_fields)})"
             )
             salvage_started = time.monotonic()
-            salvaged_connection = salvage_high_value_candidate(
-                connection,
-                salvage_fields,
-                failure_reasons=salvage_reasons,
-            )
-            _record_late_stage_timing(late_stage_timing, "salvage", salvage_started)
-            if salvaged_connection is None:
-                print("  [Salvage] No valid targeted rewrite produced")
-            else:
+            working_connection = dict(connection)
+            best_salvage_state = None
+            for index, stage in enumerate(salvage_stages, start=1):
+                stage_fields = list(stage.get("repair_fields") or [])
+                stage_reasons = list(stage.get("reasons") or salvage_reasons)
+                stage_name = str(stage.get("name") or f"stage_{index}").strip()
+                print(
+                    "  [Salvage] Stage "
+                    f"{index}/{len(salvage_stages)} "
+                    f"({stage_name}): {', '.join(stage_fields)}"
+                )
+                salvaged_connection = salvage_high_value_candidate(
+                    working_connection,
+                    stage_fields,
+                    failure_reasons=stage_reasons,
+                )
+                if salvaged_connection is None:
+                    salvage_stage_attempts.append(
+                        {
+                            "stage": stage_name,
+                            "repair_fields": stage_fields,
+                            "trigger_reasons": stage_reasons,
+                            "applied": False,
+                            "rewrite_failed": True,
+                        }
+                    )
+                    print("  [Salvage] No valid targeted rewrite produced")
+                    break
+
+                stage_state = _evaluate_phase6_salvage_candidate_state(
+                    salvaged_connection,
+                    prediction_quality,
+                )
+                stage_blockers = list(stage_state.get("validation_reasons") or [])
+                stage_stageable = _phase6_salvage_state_is_stageable(stage_state)
+                salvage_stage_attempts.append(
+                    {
+                        "stage": stage_name,
+                        "repair_fields": stage_fields,
+                        "trigger_reasons": stage_reasons,
+                        "applied": stage_stageable,
+                        "rewrite_failed": not stage_stageable,
+                        "blocking_reasons": stage_blockers,
+                    }
+                )
+
+                if not stage_stageable:
+                    if not stage_state.get("claim_provenance_ok"):
+                        print("  [Salvage] Rewritten candidate lost provenance support")
+                        for issue in (stage_state["claim_provenance"].get("issues") or [])[:4]:
+                            print(f"  [Salvage] - {issue}")
+                    else:
+                        print("  [Salvage] Validation still blocked after rewrite")
+                        for reason in stage_blockers:
+                            print(f"  [Salvage] - {reason}")
+                    break
+
+                best_salvage_state = stage_state
                 salvage_applied = True
-                connection = dict(salvaged_connection)
-                mechanism_typing = normalize_mechanism_typing(connection)
-                connection["mechanism_typing"] = mechanism_typing
-                connection["mechanism_type"] = mechanism_typing.get("mechanism_type")
-                connection["mechanism_type_confidence"] = mechanism_typing.get(
-                    "mechanism_type_confidence"
-                )
-                connection["secondary_mechanism_types"] = mechanism_typing.get(
-                    "secondary_mechanism_types", []
-                )
-                connection["evidence_map"] = normalize_evidence_map(
-                    connection.get("evidence_map")
-                )
+                working_connection = dict(stage_state["connection"])
+                if (
+                    stage_state.get("validation_ok")
+                    and stage_state.get("claim_provenance_ok")
+                    and stage_state.get("usefulness_ok")
+                ):
+                    break
+                if index < len(salvage_stages):
+                    print("  [Salvage] Narrow rewrite landed; checking remaining bottlenecks")
+                    for reason in stage_blockers:
+                        print(f"  [Salvage] - {reason}")
+            _record_late_stage_timing(late_stage_timing, "salvage", salvage_started)
+            if best_salvage_state is None:
+                print("  [Salvage] No valid targeted rewrite produced")
+                if validation_log is not None:
+                    validation_log["phase6_salvage"] = {
+                        "attempted": True,
+                        "applied": False,
+                        "repair_fields": salvage_fields,
+                        "trigger_reasons": salvage_reasons,
+                        "rewrite_failed": True,
+                        "stages": salvage_stage_attempts,
+                    }
+            else:
+                connection = dict(best_salvage_state["connection"])
+                mechanism_typing = best_salvage_state["mechanism_typing"]
                 rewritten_description = connection.get("connection", "")
-                claim_provenance = summarize_evidence_map_provenance(connection)
-                claim_provenance_ok = bool(claim_provenance.get("passes"))
-                validation_started = time.monotonic()
-                validation_ok, validation_reasons = validate_hypothesis(connection)
-                if not prediction_quality_ok:
-                    quality_reasons = (
-                        prediction_quality.get("blocking_reasons")
-                        or prediction_quality.get("issues")
-                        or ["prediction quality below enforcement threshold"]
-                    )
-                    validation_reasons.extend(
-                        reason
-                        for reason in quality_reasons
-                        if isinstance(reason, str) and reason not in validation_reasons
-                    )
-                    validation_ok = False
-                _record_late_stage_timing(
-                    late_stage_timing, "validation", validation_started
-                )
+                claim_provenance = best_salvage_state["claim_provenance"]
+                claim_provenance_ok = bool(best_salvage_state["claim_provenance_ok"])
+                validation_ok = bool(best_salvage_state["validation_ok"])
+                validation_reasons = list(best_salvage_state["validation_reasons"] or [])
+                usefulness_ok = bool(best_salvage_state["usefulness_ok"])
+                usefulness_proof = best_salvage_state["usefulness_proof"]
                 validation_log = {
-                    "passed": validation_ok,
+                    "passed": validation_ok and usefulness_ok and claim_provenance_ok,
                     "rejection_reasons": validation_reasons if not validation_ok else [],
                     "prediction_quality": prediction_quality,
                     "claim_provenance": claim_provenance,
@@ -6195,30 +7073,20 @@ def _evaluate_connection_candidate(
                         "applied": True,
                         "repair_fields": salvage_fields,
                         "trigger_reasons": salvage_reasons,
+                        "stages": salvage_stage_attempts,
                     },
                 }
-                usefulness_ok = True
-                usefulness_proof = None
-                if validation_ok and claim_provenance_ok:
-                    usefulness_proof = _evaluate_usefulness_proof_gate(
-                        connection=connection,
-                        prediction_quality=prediction_quality,
-                        claim_provenance=claim_provenance,
-                    )
-                    usefulness_ok = bool(usefulness_proof.get("passes"))
+                if usefulness_proof is not None:
                     validation_log["usefulness_proof"] = usefulness_proof
-                    if not usefulness_ok:
-                        for reason in usefulness_proof.get("reasons") or []:
-                            if reason and reason not in validation_reasons:
-                                validation_reasons.append(reason)
-                        validation_log["passed"] = False
-                        validation_log["rejection_reasons"] = validation_reasons
-                        print("  [Salvage] Usefulness still blocked after rewrite")
-                        for reason in usefulness_proof.get("reasons") or []:
-                            print(f"  [Salvage] - {reason}")
-                elif not validation_ok:
+                if not validation_ok:
                     print("  [Salvage] Validation still blocked after rewrite")
                     for reason in validation_reasons:
+                        print(f"  [Salvage] - {reason}")
+                elif not usefulness_ok:
+                    validation_log["passed"] = False
+                    validation_log["rejection_reasons"] = validation_reasons
+                    print("  [Salvage] Usefulness still blocked after rewrite")
+                    for reason in (usefulness_proof or {}).get("reasons") or []:
                         print(f"  [Salvage] - {reason}")
                 elif not claim_provenance_ok:
                     print("  [Salvage] Rewritten candidate lost provenance support")
@@ -6230,6 +7098,8 @@ def _evaluate_connection_candidate(
                 "applied": False,
                 "repair_fields": [],
                 "trigger_reasons": [],
+                "rewrite_failed": False,
+                "ignored_reasons": list(salvage_plan.get("ignored_reasons") or []),
             }
 
     if passes_threshold and validation_ok and claim_provenance_ok and usefulness_ok:
@@ -6481,6 +7351,25 @@ def _evaluate_connection_candidate(
     if white_detected:
         stage_failures.append("novelty:white_detected")
 
+    replay_legacy_reasons = (
+        _replay_legacy_schema_reasons(
+            validation_reasons,
+            legacy_profile=replay_legacy_profile,
+        )
+        if replay_mode
+        else []
+    )
+    replay_diagnostics = _build_strong_rejection_replay_diagnostics(
+        replay_context=replay_context,
+        stage_failures=stage_failures,
+        legacy_profile=replay_legacy_profile,
+        legacy_reasons=replay_legacy_reasons,
+        salvage_attempted=salvage_attempted,
+        salvage_applied=salvage_applied,
+        total_score=scores.get("total"),
+        threshold=threshold,
+    )
+
     finalized_late_stage_timing = _finalize_late_stage_timing(late_stage_timing)
 
     return {
@@ -6524,6 +7413,7 @@ def _evaluate_connection_candidate(
         "scholarly_prior_art_summary": scholarly_prior_art_summary,
         "prepared_connection": prepared_connection,
         "stage_failures": stage_failures,
+        "replay_diagnostics": replay_diagnostics,
         "late_stage_timing": finalized_late_stage_timing,
         "actual_target": target_domain,
     }
@@ -7216,6 +8106,7 @@ def main():
         [
             args.strong_rejections,
             args.strong_rejection is not None,
+            args.replay_strong_rejection is not None,
             args.strong_rejection_lineage is not None,
             args.backfill_lineage_scars,
             args.populate_scar_summaries,
@@ -7265,7 +8156,7 @@ def main():
         sys.exit(1)
     if strong_rejection_action_count > 1:
         print(
-            "  [!] Use only one of --strong-rejections, --strong-rejection, --strong-rejection-lineage, --backfill-lineage-scars, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
+            "  [!] Use only one of --strong-rejections, --strong-rejection, --replay-strong-rejection, --strong-rejection-lineage, --backfill-lineage-scars, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
         )
         sys.exit(1)
     if feedback_action_count > 0 and (
@@ -7368,6 +8259,7 @@ def main():
         ("--mark-failed", args.mark_failed),
         ("--mark-unknown", args.mark_unknown),
         ("--strong-rejection", args.strong_rejection),
+        ("--replay-strong-rejection", args.replay_strong_rejection),
         ("--strong-rejection-lineage", args.strong_rejection_lineage),
         ("--mark-salvaged", args.mark_salvaged),
         ("--dismiss-strong-rejection", args.dismiss_strong_rejection),
@@ -7508,6 +8400,11 @@ def main():
 
     if args.strong_rejection is not None:
         if not _print_strong_rejection_detail(args.strong_rejection):
+            sys.exit(1)
+        return
+
+    if args.replay_strong_rejection is not None:
+        if not _replay_strong_rejection(args.replay_strong_rejection, args.threshold):
             sys.exit(1)
         return
 
