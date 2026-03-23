@@ -11,6 +11,7 @@ from tavily import TavilyClient
 from config import TAVILY_API_KEY
 from hypothesis_validation import (
     MECHANISM_TYPE_V1_VOCAB,
+    PROCESS_CONNECTORS,
     normalize_edge_analysis,
     normalize_evidence_map,
     normalize_mechanism_typing,
@@ -127,6 +128,7 @@ Requirements:
 - The mechanism sentence must name a specific target-domain process that is directly evidenced in the retrieved target material or mechanism assertions.
 - The first clause of `mechanism` must open with the named target-domain process noun phrase itself, not with a consequence sentence, threshold/result summary, or broad pattern description.
 - Open `mechanism` with the exact target-domain process noun phrase used in the strongest supporting evidence snippet, or a very close paraphrase of that wording.
+- Do not bridge into the process with wording like `operates by`, `works by`, `functions by`, or `acts by` when the process noun phrase itself is already available in the target evidence.
 - Do not rename the target-domain process into a broader abstract label. If the evidence says `offset assignment`, `mode switching`, `atrial event detection`, or `token bucket refill saturation`, start from that wording.
 - The first clause should read like: `[specific target-domain process] [acts on/monitors/routes/tests] [control or monitored quantity]`, then state the discrete or measurable change that process causes.
 - Name the operative process itself, not an abstract pattern behind it. Do not stop at generic labels like threshold crossing, feedback loop, accumulation, switching, or competition without the target-domain process that performs that action.
@@ -338,6 +340,7 @@ Phase 6 rules:
 - This candidate already scored well enough to deserve one narrow rescue pass. Do not broaden the claim, add new unsupported mechanisms, or relax evidence discipline.
 - Prefer the smallest valid rewrite that clears the listed blockers. A narrow honest repair is better than a broad rewrite that drifts or fails validation.
 - If `mechanism` is listed, rewrite it to open with one exact target-domain process noun phrase pulled from the strongest direct target-domain evidence.
+- If `mechanism` is listed, do not open with broad bridges like `operates by`, `works by`, `functions by`, or analogy-heavy framing when a concrete process noun phrase is available.
 - If only `mechanism` is listed, keep the edge layer and test language unchanged. Fix the anchor, not the whole story.
 - If only `mechanism` is listed, you may return a JSON object containing only the repaired `mechanism` field.
 - If any edge-analysis fields are listed, rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together so they stay on the same claim, process, comparator, and metric already grounded by `mechanism` / `prediction` / `test`.
@@ -376,6 +379,87 @@ RESULT_FIRST_MECHANISM_OPENERS = (
     "both systems ",
     "this system ",
     "these systems ",
+)
+
+MECHANISM_BRIDGE_OPENERS = (
+    "operates by",
+    "works by",
+    "functions by",
+    "acts by",
+    "does so by",
+)
+
+PROCESS_PHRASE_VERBS = (
+    "allows",
+    "allow",
+    "causes",
+    "cause",
+    "compares",
+    "compare",
+    "confines",
+    "confine",
+    "constrains",
+    "constrain",
+    "controls",
+    "control",
+    "converts",
+    "convert",
+    "couples",
+    "couple",
+    "counts",
+    "count",
+    "detects",
+    "detect",
+    "determines",
+    "determine",
+    "dictates",
+    "dictate",
+    "drives",
+    "drive",
+    "enables",
+    "enable",
+    "generates",
+    "generate",
+    "gates",
+    "gate",
+    "governs",
+    "govern",
+    "induces",
+    "induce",
+    "is",
+    "are",
+    "limits",
+    "limit",
+    "mediates",
+    "mediate",
+    "modulates",
+    "modulate",
+    "mediates",
+    "mediate",
+    "monitors",
+    "monitor",
+    "occurs",
+    "occur",
+    "prevents",
+    "prevent",
+    "produces",
+    "produce",
+    "regulates",
+    "regulate",
+    "requires",
+    "require",
+    "routes",
+    "route",
+    "shifts",
+    "shift",
+    "suppresses",
+    "suppress",
+    "transfers",
+    "transfer",
+    "tests",
+    "test",
+    "triggers",
+    "trigger",
 )
 
 GENERIC_TEST_METRIC_FILLERS = (
@@ -831,30 +915,41 @@ def _repair_term_set(text: object) -> set[str]:
 
 
 MECHANISM_ANCHOR_PROCESS_TERMS = {
+    "analysis",
     "accumulat",
     "accumulation",
     "assign",
     "assignment",
     "avoidance",
+    "channel",
+    "channels",
     "collision",
     "compar",
     "compare",
     "compares",
+    "consolidation",
     "count",
     "counts",
     "cutoff",
+    "dependency",
+    "dependencies",
     "detect",
     "detection",
     "enforc",
     "enforce",
     "enforces",
+    "excitability",
+    "failure",
+    "failures",
     "filter",
     "filtering",
     "gating",
     "hyperperiod",
     "inhibit",
     "inhibition",
+    "memory",
     "monitor",
+    "plasticity",
     "prevent",
     "prevents",
     "rate",
@@ -865,11 +960,102 @@ MECHANISM_ANCHOR_PROCESS_TERMS = {
     "sampling",
     "saturation",
     "slot",
+    "subsystem",
+    "subsystems",
+    "synaptic",
     "switch",
     "switching",
     "threshold",
     "trigger",
     "triggers",
+}
+
+PROCESS_PHRASE_LEAD_INS = (
+    "one kind of ",
+    "a kind of ",
+    "one form of ",
+    "a form of ",
+    "the process of ",
+    "a process of ",
+    "process of ",
+)
+
+MECHANISM_REPORTING_PREFIX_PATTERNS = (
+    r"^(?:[A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+)?\s+\d{4}[a-z]?\s+)"
+    r"(?:directly\s+)?(?:demonstrates|shows|finds|reports|establishes|identifies|describes|documents|indicates)\s+that\s+",
+    r"^(?:the|this)\s+(?:paper|study|article|report|pdf|work)\s+"
+    r"(?:directly\s+)?(?:demonstrates|shows|finds|reports|establishes|identifies|describes|documents|indicates)\s+that\s+",
+    r"^(?:retrieved|target)\s+(?:evidence|literature|paper|study|pdf|report)\s+"
+    r"(?:directly\s+)?(?:demonstrates|shows|finds|reports|establishes|identifies|describes|documents|indicates)\s+that\s+",
+)
+
+PROCESS_PHRASE_BREAK_WORDS = (
+    "which",
+    "that",
+    "when",
+    "where",
+    "while",
+    "must",
+    "may",
+    "can",
+)
+
+GERUND_TO_FINITE_CONNECTORS = {
+    "allowing": "allows",
+    "amplifying": "amplifies",
+    "causing": "causes",
+    "comparing": "compares",
+    "confining": "confines",
+    "controlling": "controls",
+    "converting": "converts",
+    "counting": "counts",
+    "detecting": "detects",
+    "determining": "determines",
+    "driving": "drives",
+    "enabling": "enables",
+    "generating": "generates",
+    "governing": "governs",
+    "inducing": "induces",
+    "inhibiting": "inhibits",
+    "limiting": "limits",
+    "mediating": "mediates",
+    "modulating": "modulates",
+    "producing": "produces",
+    "propagating": "propagates",
+    "regulating": "regulates",
+    "requiring": "requires",
+    "suppressing": "suppresses",
+    "transferring": "transfers",
+    "triggering": "triggers",
+}
+
+BARE_TO_FINITE_CONNECTORS = {
+    "allow": "allows",
+    "amplify": "amplifies",
+    "cause": "causes",
+    "compare": "compares",
+    "constrain": "constrains",
+    "control": "controls",
+    "convert": "converts",
+    "count": "counts",
+    "detect": "detects",
+    "determine": "determines",
+    "drive": "drives",
+    "enable": "enables",
+    "generate": "generates",
+    "govern": "governs",
+    "induce": "induces",
+    "inhibit": "inhibits",
+    "limit": "limits",
+    "mediate": "mediates",
+    "modulate": "modulates",
+    "produce": "produces",
+    "propagate": "propagates",
+    "regulate": "regulates",
+    "require": "requires",
+    "suppress": "suppresses",
+    "transfer": "transfers",
+    "trigger": "triggers",
 }
 
 
@@ -1098,6 +1284,292 @@ def _phase3_repair_context(data: dict | None) -> dict:
     }
 
 
+def _mechanism_word_tokens(text: object) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(text or "").lower())
+        if token
+    }
+
+
+def _has_mechanism_connector(text: object) -> bool:
+    return any(token in PROCESS_CONNECTORS for token in _mechanism_word_tokens(text))
+
+
+def _strip_mechanism_reporting_prefix(text: object) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" \t\r\n\"'`")
+    if not cleaned:
+        return ""
+    rewritten = cleaned
+    while True:
+        updated = rewritten
+        for pattern in MECHANISM_REPORTING_PREFIX_PATTERNS:
+            candidate = re.sub(pattern, "", updated, count=1, flags=re.IGNORECASE).strip()
+            if candidate != updated:
+                updated = candidate
+                break
+        if updated == rewritten:
+            return rewritten
+        rewritten = updated
+
+
+def _extract_process_phrase(text: object) -> str:
+    cleaned = _strip_mechanism_reporting_prefix(text)
+    if not cleaned:
+        return ""
+
+    lower = cleaned.lower()
+    for prefix in PROCESS_PHRASE_LEAD_INS:
+        if lower.startswith(prefix):
+            cleaned = cleaned[len(prefix):].lstrip()
+            lower = cleaned.lower()
+            break
+
+    end = len(cleaned)
+    for verb in PROCESS_PHRASE_VERBS:
+        match = re.search(rf"\b{re.escape(verb)}\b", lower)
+        if match is not None and len(cleaned[: match.start()].split()) >= 2:
+            end = min(end, match.start())
+    for opener in MECHANISM_BRIDGE_OPENERS:
+        match = re.search(rf"\b{re.escape(opener)}\b", lower)
+        if match is not None:
+            end = min(end, match.start())
+    for word in PROCESS_PHRASE_BREAK_WORDS:
+        match = re.search(rf"\b{re.escape(word)}\b", lower)
+        if match is not None:
+            end = min(end, match.start())
+
+    phrase = cleaned[:end].strip(" ,.;:-")
+    phrase = re.sub(r"^(?:the|a|an)\s+", "", phrase, flags=re.IGNORECASE)
+    if len(phrase.split()) < 2 or len(phrase.split()) > 12:
+        return ""
+    if len(_repair_term_set(phrase)) < 2:
+        return ""
+    return phrase
+
+
+def _normalize_mechanism_clause(text: object) -> str:
+    clause = re.sub(r"\s+", " ", str(text or "")).strip(" ,.;:-")
+    if not clause:
+        return ""
+
+    match = re.match(r"^(?P<verb>[A-Za-z][A-Za-z\-]*)(?P<rest>\b.*)$", clause)
+    if match is None:
+        return clause
+
+    verb = match.group("verb")
+    rest = match.group("rest")
+    lowered = verb.lower()
+    if lowered in GERUND_TO_FINITE_CONNECTORS:
+        clause = GERUND_TO_FINITE_CONNECTORS[lowered] + rest
+    elif lowered in BARE_TO_FINITE_CONNECTORS:
+        clause = BARE_TO_FINITE_CONNECTORS[lowered] + rest
+    elif not _has_mechanism_connector(clause):
+        clause = f"via {clause}"
+    return clause
+
+
+def _mechanism_precision_candidate_rank(candidate: dict) -> tuple[int, int, int, int, int]:
+    phrase = str(candidate.get("phrase") or "")
+    phrase_terms = _repair_term_set(phrase)
+    return (
+        1 if int(candidate.get("relevance_score") or 0) > 0 else 0,
+        int(candidate.get("source_priority") or 0),
+        int(candidate.get("phrase_process_hits") or 0),
+        int(candidate.get("process_score") or 0),
+        len(phrase_terms),
+    )
+
+
+def _best_mechanism_process_anchor(data: dict, repair_context: dict) -> dict | None:
+    candidates: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    evidence_map = normalize_evidence_map(data.get("evidence_map"))
+    context_terms = _repair_term_set(data.get("target_domain"))
+    context_terms.update(_repair_term_set(data.get("mechanism")))
+    prediction = data.get("prediction") if isinstance(data.get("prediction"), dict) else {}
+    test_payload = data.get("test") if isinstance(data.get("test"), dict) else {}
+    context_terms.update(_repair_term_set(prediction.get("observable")))
+    context_terms.update(_repair_term_set(test_payload.get("metric")))
+    context_terms.update(_repair_term_set(test_payload.get("confirm")))
+
+    def _add_candidate(text: object, source_priority: int) -> None:
+        cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not cleaned:
+            return
+        phrase = _extract_process_phrase(cleaned)
+        if not phrase:
+            return
+        key = (phrase.lower(), cleaned.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        phrase_process_hits = len(_repair_term_set(phrase) & MECHANISM_ANCHOR_PROCESS_TERMS)
+        if phrase_process_hits == 0:
+            return
+        process_score = max(_process_anchor_score(cleaned), _process_anchor_score(phrase))
+        if process_score <= 0 and len(_repair_term_set(phrase)) < 3:
+            return
+        relevance_score = len(_repair_term_set(phrase) & context_terms)
+        candidates.append(
+            {
+                "text": cleaned,
+                "phrase": phrase,
+                "phrase_process_hits": phrase_process_hits,
+                "process_score": process_score,
+                "relevance_score": relevance_score,
+                "source_priority": source_priority,
+            }
+        )
+
+    mechanism_anchor = (
+        repair_context.get("mechanism_anchor")
+        if isinstance(repair_context.get("mechanism_anchor"), dict)
+        else {}
+    )
+    core_target_anchor = (
+        repair_context.get("core_target_anchor")
+        if isinstance(repair_context.get("core_target_anchor"), dict)
+        else {}
+    )
+    for entry in evidence_map.get("mechanism_assertions", [])[:3]:
+        if not isinstance(entry, dict):
+            continue
+        _add_candidate(entry.get("mechanism_claim"), 8)
+        _add_candidate(entry.get("evidence_snippet"), 5)
+
+    _add_candidate(data.get("mechanism"), 6)
+
+    for entry in evidence_map.get("variable_mappings", [])[:3]:
+        if not isinstance(entry, dict):
+            continue
+        _add_candidate(entry.get("claim"), 7)
+        _add_candidate(entry.get("evidence_snippet"), 4)
+
+    _add_candidate(core_target_anchor.get("claim"), 4)
+    _add_candidate(core_target_anchor.get("evidence_snippet"), 3)
+    _add_candidate(mechanism_anchor.get("text"), 2)
+    _add_candidate(mechanism_anchor.get("snippet"), 1)
+
+    _add_candidate(prediction.get("observable"), 1)
+    _add_candidate(test_payload.get("metric"), 1)
+    _add_candidate(test_payload.get("confirm"), 1)
+    _add_candidate(data.get("target_domain"), 0)
+
+    return max(candidates, key=_mechanism_precision_candidate_rank, default=None)
+
+
+def _extract_bridge_clause(mechanism: object) -> str:
+    text = re.sub(r"\s+", " ", str(mechanism or "")).strip()
+    if not text:
+        return ""
+    match = re.search(
+        r"\b(?:operates by|works by|functions by|acts by|does so by)\b\s*(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return ""
+    return _normalize_mechanism_clause(match.group(1))
+
+
+def _extract_connector_clause(mechanism: object) -> str:
+    text = re.sub(r"\s+", " ", str(mechanism or "")).strip()
+    if not text:
+        return ""
+    connector_pattern = "|".join(sorted((re.escape(token) for token in PROCESS_CONNECTORS), key=len, reverse=True))
+    match = re.search(rf"\b(?:{connector_pattern})\b.*$", text, flags=re.IGNORECASE)
+    if match is None:
+        return ""
+    return _normalize_mechanism_clause(match.group(0))
+
+
+def _rewrite_anchor_sentence_with_phrase(anchor_phrase: str, anchor_text: object) -> str:
+    cleaned = _strip_mechanism_reporting_prefix(anchor_text).strip(" \t\r\n.;")
+    if not cleaned:
+        return ""
+    extracted_phrase = _extract_process_phrase(cleaned)
+    if not extracted_phrase:
+        return ""
+    remainder = cleaned[len(extracted_phrase):].strip(" ,.;:-")
+    normalized_remainder = _normalize_mechanism_clause(remainder)
+    if not normalized_remainder or not _has_mechanism_connector(normalized_remainder):
+        return ""
+    return f"{anchor_phrase} {normalized_remainder}".strip()
+
+
+def _mechanism_needs_precision_rewrite(mechanism: object) -> bool:
+    text = str(mechanism or "").strip().lower()
+    if not text:
+        return False
+    if any(phrase in text for phrase in MECHANISM_BRIDGE_OPENERS):
+        return True
+    if text.startswith(RESULT_FIRST_MECHANISM_OPENERS):
+        return True
+    if _strip_mechanism_reporting_prefix(mechanism).lower() != text:
+        return True
+    return (
+        text.startswith("the retrieved evidence")
+        or text.startswith("retrieved evidence")
+        or text.startswith("literature ")
+        or text.startswith("studies ")
+    )
+
+
+def _apply_mechanism_naming_precision(data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+
+    mechanism = str(data.get("mechanism") or "").strip()
+    if not mechanism or not _mechanism_needs_precision_rewrite(mechanism):
+        return data
+
+    repair_context = _phase3_repair_context(data)
+    anchor = _best_mechanism_process_anchor(data, repair_context)
+    if not isinstance(anchor, dict):
+        return data
+
+    anchor_phrase = str(anchor.get("phrase") or "").strip()
+    anchor_text = str(anchor.get("text") or "").strip()
+    if not anchor_phrase:
+        return data
+
+    rewritten_options = [
+        f"{anchor_phrase} {_extract_bridge_clause(mechanism)}".strip(),
+        f"{anchor_phrase} {_extract_connector_clause(mechanism)}".strip(),
+        _rewrite_anchor_sentence_with_phrase(anchor_phrase, anchor_text),
+    ]
+    mechanism_anchor = (
+        repair_context.get("mechanism_anchor")
+        if isinstance(repair_context.get("mechanism_anchor"), dict)
+        else {}
+    )
+    rewritten_options.append(
+        _rewrite_anchor_sentence_with_phrase(
+            anchor_phrase,
+            mechanism_anchor.get("snippet") or mechanism_anchor.get("text"),
+        )
+    )
+
+    for rewritten in rewritten_options:
+        cleaned = re.sub(r"\s+", " ", str(rewritten or "")).strip(" \t\r\n.;")
+        if not cleaned:
+            continue
+        if not cleaned.lower().startswith(anchor_phrase.lower()):
+            continue
+        if len(cleaned.split()) < 8:
+            continue
+        if not _has_mechanism_connector(cleaned):
+            continue
+        if cleaned == mechanism:
+            continue
+        out = dict(data)
+        out["mechanism"] = cleaned
+        return out
+
+    return data
+
+
 def _missing_required_fields(data: dict) -> list[str]:
     def _is_non_empty(value: object) -> bool:
         if isinstance(value, str):
@@ -1183,6 +1655,8 @@ def _missing_required_fields(data: dict) -> list[str]:
             return True
         lower = text.lower()
         if _contains_any_phrase(lower, GENERIC_MECHANISM_FILLERS):
+            return True
+        if _contains_any_phrase(lower, MECHANISM_BRIDGE_OPENERS):
             return True
         if lower.startswith(RESULT_FIRST_MECHANISM_OPENERS):
             return True
@@ -1976,6 +2450,7 @@ def salvage_high_value_candidate(
     )
     if not isinstance(repaired_candidate, dict):
         return None
+    repaired_candidate = _apply_mechanism_naming_precision(repaired_candidate)
     repaired_candidate = _apply_normalized_mechanism_typing(repaired_candidate)
     if _requested_salvage_fields_still_missing(repaired_candidate, missing_fields):
         return None
@@ -2042,6 +2517,7 @@ def _stage_two_hypothesize(
     if data.get("no_connection", True):
         return None
 
+    data = _apply_mechanism_naming_precision(data)
     data = _apply_normalized_mechanism_typing(data)
     missing_fields = _missing_required_fields(data)
     if missing_fields:
@@ -2053,6 +2529,7 @@ def _stage_two_hypothesize(
         )
         if repaired is None or repaired.get("no_connection", True):
             return None
+        repaired = _apply_mechanism_naming_precision(repaired)
         repaired = _apply_normalized_mechanism_typing(repaired)
         if _missing_required_fields(repaired):
             return None
