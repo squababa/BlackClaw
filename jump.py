@@ -4,6 +4,7 @@ Two-stage process:
 1) Detect a real structural signal in another domain.
 2) Hypothesize a mechanism-level mapping from that signal.
 """
+import copy
 import json
 import re
 from tavily import TavilyClient
@@ -338,6 +339,7 @@ Phase 6 rules:
 - Prefer the smallest valid rewrite that clears the listed blockers. A narrow honest repair is better than a broad rewrite that drifts or fails validation.
 - If `mechanism` is listed, rewrite it to open with one exact target-domain process noun phrase pulled from the strongest direct target-domain evidence.
 - If only `mechanism` is listed, keep the edge layer and test language unchanged. Fix the anchor, not the whole story.
+- If only `mechanism` is listed, you may return a JSON object containing only the repaired `mechanism` field.
 - If any edge-analysis fields are listed, rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together so they stay on the same claim, process, comparator, and metric already grounded by `mechanism` / `prediction` / `test`.
 - When rewriting the edge layer, reuse the same observable, metric, comparator, and operator-decision language already present in `prediction` / `test`. Reduce drift by reusing those exact anchor phrases instead of loose paraphrases.
 - `edge_analysis.cheap_test` must describe one real operator move on a narrow slice of workflow, not a generic validation suggestion and not a restatement of the full test.
@@ -1489,6 +1491,11 @@ def _repair_guidance_for_missing_fields(
         original_data if isinstance(original_data, dict) else None,
     )
     normalized_edge = normalize_edge_analysis(original_data or {})
+    evidence_map = normalize_evidence_map(
+        original_data.get("evidence_map")
+        if isinstance(original_data, dict)
+        else None
+    )
     prediction = (
         original_data.get("prediction")
         if isinstance(original_data, dict) and isinstance(original_data.get("prediction"), dict)
@@ -1516,6 +1523,20 @@ def _repair_guidance_for_missing_fields(
         "edge_analysis.edge_if_right",
         "edge_analysis.primary_operator",
     }
+    current_mechanism = (
+        str(original_data.get("mechanism") or "").strip()
+        if isinstance(original_data, dict)
+        else ""
+    )
+    metric_anchor = str(test_payload.get("metric") or test_payload.get("metrics") or "").strip()
+    observable_anchor = str(prediction.get("observable") or "").strip()
+    mechanism_claim_anchor = ""
+    for entry in evidence_map.get("mechanism_assertions", []):
+        if not isinstance(entry, dict):
+            continue
+        mechanism_claim_anchor = str(entry.get("mechanism_claim") or "").strip()
+        if mechanism_claim_anchor:
+            break
     confirm_anchor = str(test_payload.get("confirm") or "").strip()
     falsify_anchor = str(
         prediction.get("falsification_condition")
@@ -1526,8 +1547,6 @@ def _repair_guidance_for_missing_fields(
         guidance.append(
             "- Phase 5 usefulness-alignment bottleneck: keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable unless they are empty. Rewrite the edge layer so it points to the exact same core claim, process, comparator, and metric already named elsewhere."
         )
-        metric_anchor = str(test_payload.get("metric") or test_payload.get("metrics") or "").strip()
-        observable_anchor = str(prediction.get("observable") or "").strip()
         lever_anchor = str(normalized_edge.get("actionable_lever") or "").strip()
         operator_anchor = str(normalized_edge.get("primary_operator") or "").strip()
         if metric_anchor:
@@ -1568,11 +1587,39 @@ def _repair_guidance_for_missing_fields(
             guidance.append(
                 "- Prefer the smallest wording change that restores direct process anchoring and passes schema/validation."
             )
+            guidance.append(
+                "- If the rest of the payload is already sound, return only `{\"mechanism\": ...}` instead of regenerating the full candidate."
+            )
+        if current_mechanism:
+            guidance.append(
+                f"- Keep the current mechanism assertion as intact as possible and replace only the unsupported opening/process wording: `{current_mechanism}`."
+            )
         anchor_text = str(mechanism_anchor.get("text") or "").strip()
         if anchor_text:
             guidance.append(
                 "- Pull the opening noun phrase of `mechanism` directly from target-domain evidence wording. Best available anchor: "
                 f"`{anchor_text}`."
+            )
+        if mechanism_claim_anchor:
+            guidance.append(
+                "- Reuse the strongest current `evidence_map.mechanism_assertions` wording instead of inventing a broader process label: "
+                f"`{mechanism_claim_anchor}`."
+            )
+        if observable_anchor:
+            guidance.append(
+                f"- Keep the repaired mechanism tied to the current prediction observable: `{observable_anchor}`."
+            )
+        if metric_anchor:
+            guidance.append(
+                f"- Keep the repaired mechanism tied to the current test metric: `{metric_anchor}`."
+            )
+        if confirm_anchor:
+            guidance.append(
+                f"- Preserve the current confirm-side comparator wording when you name the measurable consequence: `{confirm_anchor}`."
+            )
+        if falsify_anchor:
+            guidance.append(
+                f"- Preserve the current falsify-side decision wording so the rescue stays on the same operator check: `{falsify_anchor}`."
             )
         core_strength = str(repair_context.get("core_target_evidence_strength") or "").strip()
         core_reasons = [
@@ -1737,6 +1784,69 @@ def _build_repair_prompt(
     )
 
 
+def _get_nested_repair_value(payload: object, field_path: str) -> tuple[bool, object]:
+    current = payload
+    for part in str(field_path or "").split("."):
+        if not part:
+            return False, None
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current.get(part)
+    return True, current
+
+
+def _set_nested_repair_value(payload: dict, field_path: str, value: object) -> None:
+    current = payload
+    parts = [part for part in str(field_path or "").split(".") if part]
+    if not parts:
+        return
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[parts[-1]] = copy.deepcopy(value)
+
+
+def _merge_targeted_salvage_fields(
+    original_data: dict,
+    repaired: dict,
+    missing_fields: list[str],
+) -> dict:
+    merged = copy.deepcopy(original_data)
+    applied_any = False
+    seen_fields: set[str] = set()
+    for field_path in missing_fields:
+        clean_field = str(field_path).strip()
+        if not clean_field or clean_field in seen_fields:
+            continue
+        seen_fields.add(clean_field)
+        found, value = _get_nested_repair_value(repaired, clean_field)
+        if not found:
+            continue
+        _set_nested_repair_value(merged, clean_field, value)
+        applied_any = True
+    return merged if applied_any else copy.deepcopy(repaired)
+
+
+def _requested_salvage_fields_still_missing(
+    candidate: dict,
+    missing_fields: list[str],
+) -> list[str]:
+    remaining_missing = {
+        str(field).strip()
+        for field in _missing_required_fields(candidate)
+        if str(field).strip()
+    }
+    unresolved: list[str] = []
+    for field in missing_fields:
+        clean_field = str(field).strip()
+        if clean_field and clean_field in remaining_missing and clean_field not in unresolved:
+            unresolved.append(clean_field)
+    return unresolved
+
+
 def _repair_missing_fields(
     full_prompt: str,
     original_json: str,
@@ -1804,11 +1914,20 @@ def salvage_high_value_candidate(
     )
     if repaired is None or repaired.get("no_connection", False):
         return None
-    repaired = _apply_normalized_mechanism_typing(repaired)
-    if _missing_required_fields(repaired):
+    repaired_candidate = _merge_targeted_salvage_fields(
+        original_data,
+        repaired,
+        missing_fields,
+    )
+    if not isinstance(repaired_candidate, dict):
         return None
-    repaired["evidence_map"] = normalize_evidence_map(repaired.get("evidence_map"))
-    return repaired
+    repaired_candidate = _apply_normalized_mechanism_typing(repaired_candidate)
+    if _requested_salvage_fields_still_missing(repaired_candidate, missing_fields):
+        return None
+    repaired_candidate["evidence_map"] = normalize_evidence_map(
+        repaired_candidate.get("evidence_map")
+    )
+    return repaired_candidate
 
 
 def _stage_one_detect(
