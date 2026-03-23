@@ -117,6 +117,11 @@ PHASE6_SALVAGE_SCORE_FLOOR = 0.88
 PHASE6_MAX_REPAIRABLE_REASONS = 4
 PHASE6_REPAIRABLE_VALIDATION_REASONS = {
     "mechanism must name a specific process",
+    "edge_analysis problem_statement is too generic",
+    "edge_analysis actionable_lever is too generic",
+    "edge_analysis edge_if_right is too generic",
+    "edge_analysis cheap_test reads like a generic validation suggestion",
+    "edge_analysis cheap_test restates the main test instead of a cheap operator move",
 }
 PHASE6_REPAIRABLE_USEFULNESS_REASONS = {
     "usefulness:weak_claim_evidence_alignment",
@@ -125,6 +130,23 @@ PHASE6_REPAIRABLE_USEFULNESS_REASONS = {
     "usefulness:missing_edge_problem",
     "usefulness:missing_actionable_lever",
     "usefulness:missing_edge_advantage",
+}
+PHASE6_VALIDATION_REASON_TO_FIELDS = {
+    "edge_analysis problem_statement is too generic": [
+        "edge_analysis.problem_statement",
+    ],
+    "edge_analysis actionable_lever is too generic": [
+        "edge_analysis.actionable_lever",
+    ],
+    "edge_analysis edge_if_right is too generic": [
+        "edge_analysis.edge_if_right",
+    ],
+    "edge_analysis cheap_test reads like a generic validation suggestion": [
+        "edge_analysis.cheap_test",
+    ],
+    "edge_analysis cheap_test restates the main test instead of a cheap operator move": [
+        "edge_analysis.cheap_test",
+    ],
 }
 
 
@@ -5698,10 +5720,17 @@ def _plan_phase6_salvage(
     if "mechanism must name a specific process" in combined_reasons:
         repair_fields.append("mechanism")
 
+    validation_edge_fields: list[str] = []
+    for reason in normalized_validation:
+        for field in PHASE6_VALIDATION_REASON_TO_FIELDS.get(reason, []):
+            if field not in validation_edge_fields:
+                validation_edge_fields.append(field)
+
     usefulness_blocked = any(
         reason in PHASE6_REPAIRABLE_USEFULNESS_REASONS for reason in combined_reasons
     )
-    if usefulness_blocked:
+    edge_layer_needs_joint_rewrite = usefulness_blocked or bool(validation_edge_fields)
+    if edge_layer_needs_joint_rewrite:
         for field in (
             "edge_analysis.problem_statement",
             "edge_analysis.actionable_lever",
@@ -5712,6 +5741,9 @@ def _plan_phase6_salvage(
                 repair_fields.append(field)
         for field in (usefulness_proof or {}).get("repair_fields") or []:
             if field.startswith("edge_analysis.") and field not in repair_fields:
+                repair_fields.append(field)
+        for field in validation_edge_fields:
+            if field not in repair_fields:
                 repair_fields.append(field)
 
     allowed_reasons = (
