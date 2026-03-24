@@ -441,31 +441,6 @@ def _print_credibility_weighting_summary(score_label: str, scores: dict):
     print(f"  [{score_label}] Credibility: " + " | ".join(parts))
 
 
-def _print_structural_false_positive_summary(score_label: str, scores: dict):
-    """Render structural false-positive penalties when the early filter activates."""
-    if not isinstance(scores, dict):
-        return
-
-    penalty = float(scores.get("structural_false_positive_penalty") or 0.0)
-    if penalty <= 0.0005:
-        return
-
-    structural_score = scores.get("structural_false_positive_score")
-    score_text = (
-        f"{float(structural_score):.3f}"
-        if isinstance(structural_score, (int, float))
-        else "n/a"
-    )
-    print(
-        f"  [{score_label}] Structural filter: -{penalty:.3f} "
-        f"(score: {score_text})"
-    )
-    for reason in (scores.get("structural_false_positive_reasons") or [])[:4]:
-        cleaned = str(reason).strip()
-        if cleaned:
-            print(f"  [{score_label}] Structural - {cleaned}")
-
-
 def _record_late_stage_timing(
     timing_payload: dict,
     stage_key: str,
@@ -7400,7 +7375,6 @@ def _evaluate_connection_candidate(
     _record_late_stage_timing(late_stage_timing, "score", score_started)
     print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
     _print_credibility_weighting_summary(score_label, scores)
-    _print_structural_false_positive_summary(score_label, scores)
     prediction_quality = (
         scores.get("prediction_quality")
         if isinstance(scores.get("prediction_quality"), dict)
@@ -7457,14 +7431,6 @@ def _evaluate_connection_candidate(
             "prediction_quality": prediction_quality,
             "claim_provenance": claim_provenance,
             "mechanism_typing": mechanism_typing,
-            "structural_filter": {
-                "score": scores.get("structural_false_positive_score"),
-                "penalty": scores.get("structural_false_positive_penalty"),
-                "reasons": list(scores.get("structural_false_positive_reasons") or []),
-                "reason_codes": list(
-                    scores.get("structural_false_positive_reason_codes") or []
-                ),
-            },
         }
         if not validation_ok:
             print("  [Validation] Rejected hypothesis - skipping transmission")
@@ -7915,10 +7881,6 @@ def _evaluate_connection_candidate(
     stage_failures: list[str] = []
     if not passes_threshold:
         stage_failures.append(f"below_threshold:{scores['total']:.3f}")
-    for reason in scores.get("structural_false_positive_reasons") or []:
-        cleaned = str(reason).strip()
-        if cleaned:
-            stage_failures.append(f"structural:{cleaned}")
     if not validation_ok:
         stage_failures.extend(
             f"validation:{reason}" for reason in validation_reasons if reason
