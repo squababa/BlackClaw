@@ -205,6 +205,78 @@ def test_build_jump_search_query_prefers_mutation_rate_phrase_anchor() -> None:
     assert "scheduled" not in query
 
 
+def test_build_jump_search_query_prefers_compact_llm_query_when_valid(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump,
+        "_generate_json_with_retry",
+        lambda *_args, **_kwargs: json.dumps(
+            {"query": "deficit detector routing quota balancing"}
+        ),
+    )
+
+    query = jump._build_jump_search_query(
+        {
+            "search_query": "deficiency threshold triggered directed recruitment feedback",
+            "pattern_name": "Deficiency-triggered balancing",
+            "abstract_structure": (
+                "deficit detection compares underfilled channels and routes supply "
+                "toward the most depleted pool"
+            ),
+            "measurable_signal": "stockout rate and channel imbalance",
+            "control_lever": "tune the deficit detector and routing quota",
+            "transfer_rationale": (
+                "applies where underfilled channels are replenished by a "
+                "detector-guided routing rule"
+            ),
+        },
+        "Hiring",
+        "Operations",
+    )
+
+    assert query == "deficit detector routing quota balancing"
+
+
+def test_build_jump_search_query_falls_back_when_llm_query_contains_source_domain(
+    monkeypatch,
+) -> None:
+    pattern = {
+        "search_query": "deficiency threshold triggered directed recruitment feedback",
+        "pattern_name": "Deficiency-triggered balancing",
+        "abstract_structure": (
+            "deficit detection compares underfilled channels and routes supply "
+            "toward the most depleted pool"
+        ),
+        "measurable_signal": "stockout rate and channel imbalance",
+        "control_lever": "tune the deficit detector and routing quota",
+        "transfer_rationale": (
+            "applies where underfilled channels are replenished by a "
+            "detector-guided routing rule"
+        ),
+    }
+    expected = jump._build_jump_search_query_heuristic(
+        pattern,
+        "Hiring",
+        "Operations",
+    )
+    monkeypatch.setattr(
+        jump,
+        "_generate_json_with_retry",
+        lambda *_args, **_kwargs: json.dumps(
+            {"query": "hiring detector routing quota"}
+        ),
+    )
+
+    query = jump._build_jump_search_query(
+        pattern,
+        "Hiring",
+        "Operations",
+    )
+
+    assert query == expected
+
+
 def test_dive_filters_weak_patterns_and_records_only_weak_diagnostics(
     monkeypatch,
 ) -> None:

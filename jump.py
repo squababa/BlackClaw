@@ -335,6 +335,30 @@ JSON_RETRY_PROMPT = (
     "no markdown, no explanation, no trailing commas, no comments. Here is what I need:"
 )
 
+JUMP_QUERY_PROMPT = """Write one compact technical web search query for cross-domain jump retrieval.
+
+Return JSON only:
+{{"query": "short technical search query"}}
+
+SOURCE DOMAIN TO AVOID: {source_domain}
+SOURCE CATEGORY TO AVOID: {source_category}
+PATTERN NAME: {pattern_name}
+ABSTRACT STRUCTURE: {abstract_structure}
+MEASURABLE SIGNAL: {measurable_signal}
+CONTROL LEVER: {control_lever}
+TRANSFER RATIONALE: {transfer_rationale}
+HEURISTIC ANCHOR QUERY: {heuristic_query}
+
+Rules:
+- Return exactly one short query string in the `query` field.
+- The query must read like a real technical search, not a sentence, explanation, or list.
+- Keep it compact: 4 to 10 words.
+- Preserve the mechanism or process anchor.
+- Avoid the source domain and source category names.
+- Avoid vague generic wording and token soup.
+- Do not include quotes, bullets, URLs, or extra punctuation.
+"""
+
 MISSING_FIELDS_REPAIR_PROMPT = (
     "Your output is missing fields: {missing_fields}. Return ONLY corrected JSON with those fields filled. "
     "Do not change the source_domain or target_domain. Do not add a depth field."
@@ -817,7 +841,7 @@ def _extract_jump_query_phrases(text: str, blocked_tokens: set[str]) -> list[str
     return phrases
 
 
-def _build_jump_search_query(
+def _build_jump_search_query_heuristic(
     pattern: dict,
     source_domain: str,
     source_category: str,
@@ -909,6 +933,147 @@ def _build_jump_search_query(
             break
 
     return " ".join(selected[:6]) or raw_query
+
+
+def _is_acceptable_llm_jump_query(
+    query: str,
+    pattern: dict,
+    source_domain: str,
+    source_category: str,
+    heuristic_query: str,
+) -> bool:
+    candidate = str(query or "").strip()
+    if not candidate or "\n" in candidate or "\r" in candidate:
+        return False
+
+    candidate = re.sub(r"\s+", " ", candidate)
+    if len(candidate) > 96:
+        return False
+    if "http://" in candidate.lower() or "https://" in candidate.lower():
+        return False
+    if any(char in candidate for char in ('{', '}', '[', ']', ':', ';', '"', "`", "|")):
+        return False
+    if re.search(r"[.!?,()]", candidate):
+        return False
+
+    blocked_tokens = set(_tokenize_query_terms(source_domain))
+    blocked_tokens.update(_tokenize_query_terms(source_category))
+
+    candidate_tokens = _tokenize_query_terms(candidate)
+    if len(candidate_tokens) < 3 or len(candidate_tokens) > 10:
+        return False
+    if any(token in blocked_tokens for token in candidate_tokens):
+        return False
+
+    strong_tokens = [
+        token
+        for token in candidate_tokens
+        if token not in GENERIC_QUERY_TOKENS and token not in WEAK_QUERY_TOKENS
+    ]
+    if len(strong_tokens) < 3:
+        return False
+    if not any(_is_specific_jump_query_token(token) for token in strong_tokens):
+        return False
+
+    anchor_texts = [
+        str(pattern.get("control_lever", "") or ""),
+        str(pattern.get("abstract_structure", "") or ""),
+        str(pattern.get("measurable_signal", "") or ""),
+        str(pattern.get("pattern_name", "") or ""),
+        str(pattern.get("transfer_rationale", "") or ""),
+        heuristic_query,
+    ]
+    anchor_tokens: set[str] = set()
+    anchor_phrases: list[str] = []
+    for text in anchor_texts:
+        anchor_phrases.extend(_extract_jump_query_phrases(text, blocked_tokens))
+        for token in _tokenize_query_terms(text):
+            if (
+                token in blocked_tokens
+                or token in GENERIC_QUERY_TOKENS
+                or token in WEAK_QUERY_TOKENS
+                or len(token) <= 2
+            ):
+                continue
+            if _is_specific_jump_query_token(token):
+                anchor_tokens.add(token)
+
+    if not anchor_tokens and not anchor_phrases:
+        return False
+
+    candidate_token_set = set(candidate_tokens)
+    if candidate_token_set.intersection(anchor_tokens):
+        return True
+
+    lowered_candidate = candidate.lower()
+    return any(phrase in lowered_candidate for phrase in anchor_phrases)
+
+
+def _generate_llm_jump_search_query(
+    pattern: dict,
+    source_domain: str,
+    source_category: str,
+    heuristic_query: str,
+) -> str | None:
+    prompt = JUMP_QUERY_PROMPT.format(
+        source_domain=str(source_domain or "").strip() or "Unknown",
+        source_category=str(source_category or "").strip() or "Unknown",
+        pattern_name=str(pattern.get("pattern_name", "") or "").strip() or "Unknown",
+        abstract_structure=str(pattern.get("abstract_structure", "") or "").strip() or "Unknown",
+        measurable_signal=str(pattern.get("measurable_signal", "") or "").strip() or "Unknown",
+        control_lever=str(pattern.get("control_lever", "") or "").strip() or "Unknown",
+        transfer_rationale=str(pattern.get("transfer_rationale", "") or "").strip() or "Unknown",
+        heuristic_query=heuristic_query,
+    )
+    extracted_json = _generate_json_with_retry(
+        prompt,
+        "jump_query_builder",
+        256,
+    )
+    if extracted_json is None:
+        return None
+
+    try:
+        payload = json.loads(extracted_json)
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    query = str(payload.get("query", "") or "").strip()
+    if not _is_acceptable_llm_jump_query(
+        query,
+        pattern,
+        source_domain,
+        source_category,
+        heuristic_query,
+    ):
+        return None
+    return re.sub(r"\s+", " ", query)
+
+
+def _build_jump_search_query(
+    pattern: dict,
+    source_domain: str,
+    source_category: str,
+) -> str:
+    raw_query = str(pattern.get("search_query", "") or "").strip()
+    if not raw_query:
+        return ""
+
+    heuristic_query = _build_jump_search_query_heuristic(
+        pattern,
+        source_domain,
+        source_category,
+    )
+    llm_query = _generate_llm_jump_search_query(
+        pattern,
+        source_domain,
+        source_category,
+        heuristic_query,
+    )
+    return llm_query or heuristic_query
 
 
 def _extract_json_substring(text: str) -> str | None:
