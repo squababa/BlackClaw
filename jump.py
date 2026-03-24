@@ -2754,12 +2754,37 @@ def _repair_guidance_for_missing_fields(
             "- For each repaired critical mapping, make the claim a narrow paraphrase of the snippet. If a mapping cannot be supported directly, weaken it or move/drop it instead of keeping it in the first 3."
         )
     if "evidence_map.mechanism_assertions" in missing_fields:
+        if missing_field_set == {"evidence_map.mechanism_assertions"}:
+            guidance.append(
+                "- This is a mechanism-assertion completion pass. Keep `mechanism`, `prediction`, `test`, and the first 3 `evidence_map.variable_mappings` entries stable unless a referenced anchor is empty."
+            )
+            guidance.append(
+                "- If only this field is missing, prefer returning only `{\"evidence_map\": {\"mechanism_assertions\": [...]}}` instead of rewriting the full candidate."
+            )
+        guidance.append(
+            "- Produce at least one specific `evidence_map.mechanism_assertions` entry using already grounded target-domain evidence from the current payload. Do not invent a new mechanism, broaden the target claim, or swap in a different process."
+        )
         guidance.append(
             "- Rewrite `evidence_map.mechanism_assertions` so at least one entry uses a direct target-domain snippet that explicitly names the same process noun phrase as `mechanism` or the same canonical metric as `test.metric`."
         )
         guidance.append(
             "- Do not let `mechanism_claim` carry stronger process wording than the `evidence_snippet` itself. Prefer direct process or metric support over broad contextual target evidence."
         )
+        guidance.append(
+            "- Prefer filling one missing mechanism-assertion entry from the strongest current target-domain snippet already in the payload. Reuse exact or near-exact target-domain wording where available instead of rewriting the whole evidence map."
+        )
+        if current_mechanism:
+            guidance.append(
+                f"- Keep the repaired mechanism assertion tied to the current `mechanism`: `{current_mechanism}`."
+            )
+        if observable_anchor:
+            guidance.append(
+                f"- Keep the repaired mechanism assertion tied to the current target claim in `prediction.observable`: `{observable_anchor}`."
+            )
+        elif metric_anchor:
+            guidance.append(
+                f"- Keep the repaired mechanism assertion tied to the current target claim anchor in `test.metric`: `{metric_anchor}`."
+            )
         direct_anchor = str(core_target_anchor.get("evidence_snippet") or "").strip()
         direct_source = str(core_target_anchor.get("source_reference") or "").strip()
         if direct_anchor:
@@ -2767,6 +2792,9 @@ def _repair_guidance_for_missing_fields(
                 "- Best current core target evidence to rewrite around: "
                 f"`{direct_anchor}`"
                 + (f" (source: `{direct_source}`)." if direct_source else ".")
+            )
+            guidance.append(
+                "- Use that strongest current target snippet as the default `evidence_snippet` anchor for at least one repaired mechanism assertion entry unless another existing snippet in the payload is even more direct."
             )
         core_reasons = [
             str(reason).strip()

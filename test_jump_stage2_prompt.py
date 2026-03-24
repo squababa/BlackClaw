@@ -676,6 +676,28 @@ def test_build_repair_prompt_marks_mechanism_only_rescue_as_narrow() -> None:
     assert "Reuse existing process wording from `mechanism` / `evidence_map.mechanism_assertions` wherever it is already specific and evidence-grounded" in repair_prompt
 
 
+def test_build_repair_prompt_marks_mechanism_assertion_completion_as_narrow() -> None:
+    payload = _valid_stage2_payload()
+    payload["prediction"]["observable"] = (
+        "collision rate per hyperperiod under filtered offset assignment"
+    )
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["evidence_map.mechanism_assertions"],
+        original_data=payload,
+    )
+
+    assert "This is a mechanism-assertion completion pass." in repair_prompt
+    assert "prefer returning only `{\"evidence_map\": {\"mechanism_assertions\": [...]}}`" in repair_prompt
+    assert "Produce at least one specific `evidence_map.mechanism_assertions` entry using already grounded target-domain evidence" in repair_prompt
+    assert "Prefer filling one missing mechanism-assertion entry from the strongest current target-domain snippet already in the payload." in repair_prompt
+    assert "Keep the repaired mechanism assertion tied to the current `mechanism`" in repair_prompt
+    assert "Keep the repaired mechanism assertion tied to the current target claim in `prediction.observable`" in repair_prompt
+    assert "Use that strongest current target snippet as the default `evidence_snippet` anchor" in repair_prompt
+
+
 def test_salvage_high_value_candidate_accepts_partial_mechanism_repair_for_replay_style_rescue(
     monkeypatch,
 ) -> None:
