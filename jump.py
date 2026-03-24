@@ -1686,11 +1686,18 @@ def _normalize_mechanism_clause(text: object) -> str:
     return clause
 
 
-def _mechanism_precision_candidate_rank(candidate: dict) -> tuple[int, int, int, int, int]:
+def _mechanism_precision_candidate_rank(candidate: dict) -> tuple[int, int, int, int, int, int, int, int, int]:
     phrase = str(candidate.get("phrase") or "")
     phrase_terms = _repair_term_set(phrase)
     return (
         1 if int(candidate.get("relevance_score") or 0) > 0 else 0,
+        1 if candidate.get("mechanism_source") else 0,
+        1
+        if int(candidate.get("measurable_hits") or 0) > 0
+        and int(candidate.get("control_hits") or 0) > 0
+        else 0,
+        int(candidate.get("measurable_hits") or 0),
+        int(candidate.get("control_hits") or 0),
         int(candidate.get("source_priority") or 0),
         int(candidate.get("phrase_process_hits") or 0),
         int(candidate.get("process_score") or 0),
@@ -1709,8 +1716,22 @@ def _best_mechanism_process_anchor(data: dict, repair_context: dict) -> dict | N
     context_terms.update(_repair_term_set(prediction.get("observable")))
     context_terms.update(_repair_term_set(test_payload.get("metric")))
     context_terms.update(_repair_term_set(test_payload.get("confirm")))
+    measurable_terms = _repair_term_set(prediction.get("observable"))
+    measurable_terms.update(_repair_term_set(test_payload.get("metric")))
+    control_terms = _repair_term_set(test_payload.get("confirm"))
+    control_terms.update(_repair_term_set(test_payload.get("falsify")))
+    for entry in evidence_map.get("variable_mappings", [])[:3]:
+        if not isinstance(entry, dict):
+            continue
+        control_terms.update(_repair_term_set(entry.get("target_variable")))
+    control_terms.difference_update(measurable_terms)
 
-    def _add_candidate(text: object, source_priority: int) -> None:
+    def _add_candidate(
+        text: object,
+        source_priority: int,
+        *,
+        mechanism_source: bool = False,
+    ) -> None:
         cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
         if not cleaned:
             return
@@ -1727,11 +1748,15 @@ def _best_mechanism_process_anchor(data: dict, repair_context: dict) -> dict | N
         process_score = max(_process_anchor_score(cleaned), _process_anchor_score(phrase))
         if process_score <= 0 and len(_repair_term_set(phrase)) < 3:
             return
+        candidate_terms = _repair_term_set(cleaned)
         relevance_score = len(_repair_term_set(phrase) & context_terms)
         candidates.append(
             {
                 "text": cleaned,
                 "phrase": phrase,
+                "mechanism_source": mechanism_source,
+                "measurable_hits": len(candidate_terms & measurable_terms),
+                "control_hits": len(candidate_terms & control_terms),
                 "phrase_process_hits": phrase_process_hits,
                 "process_score": process_score,
                 "relevance_score": relevance_score,
@@ -1752,8 +1777,8 @@ def _best_mechanism_process_anchor(data: dict, repair_context: dict) -> dict | N
     for entry in evidence_map.get("mechanism_assertions", [])[:3]:
         if not isinstance(entry, dict):
             continue
-        _add_candidate(entry.get("mechanism_claim"), 8)
-        _add_candidate(entry.get("evidence_snippet"), 5)
+        _add_candidate(entry.get("mechanism_claim"), 8, mechanism_source=True)
+        _add_candidate(entry.get("evidence_snippet"), 5, mechanism_source=True)
 
     _add_candidate(data.get("mechanism"), 6)
 
@@ -1768,9 +1793,6 @@ def _best_mechanism_process_anchor(data: dict, repair_context: dict) -> dict | N
     _add_candidate(mechanism_anchor.get("text"), 2)
     _add_candidate(mechanism_anchor.get("snippet"), 1)
 
-    _add_candidate(prediction.get("observable"), 1)
-    _add_candidate(test_payload.get("metric"), 1)
-    _add_candidate(test_payload.get("confirm"), 1)
     _add_candidate(data.get("target_domain"), 0)
 
     return max(candidates, key=_mechanism_precision_candidate_rank, default=None)
@@ -1819,6 +1841,8 @@ def _mechanism_needs_precision_rewrite(mechanism: object) -> bool:
     text = str(mechanism or "").strip().lower()
     if not text:
         return False
+    if not _has_mechanism_connector(mechanism):
+        return True
     if any(phrase in text for phrase in MECHANISM_BRIDGE_OPENERS):
         return True
     if text.startswith(RESULT_FIRST_MECHANISM_OPENERS):
