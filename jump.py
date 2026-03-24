@@ -195,13 +195,17 @@ Requirements:
 - The prediction must include a measurable observable, a time horizon, a falsification condition, and why the prediction is useful.
 - Provide `edge_analysis` as a grounded operator layer tied to the exact same primary target-domain claim as `connection`, `mechanism`, `prediction`, and `test`.
 - `edge_analysis.problem_statement` must name one specific target-domain problem, blind spot, hidden failure mode, or missed control point.
-- `edge_analysis.actionable_lever` must name one concrete action, heuristic, filter, design change, or search direction that follows from the mechanism.
+- `edge_analysis.problem_statement` must describe one hidden or underexploited operational problem, not a broad summary of the field.
+- Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode on the same observable or metric already used in `prediction` / `test`.
+- `edge_analysis.actionable_lever` must name one concrete operator action, heuristic, filter, design change, or search direction that follows from the mechanism.
+- `edge_analysis.actionable_lever` must reuse the current mechanism, metric, or operator context. Do not write advisory phrasing like `consider`, `explore`, `may help`, `investigate`, or other non-operational wording.
 - `edge_analysis.cheap_test` must include setup, metric, confirm, falsify, and optional time_to_signal. It must be a fast realistic validation path, not a multi-month research program by default.
 - `edge_analysis.cheap_test.setup` must read like one real operator move on a narrow slice of the target-domain workflow. Name one real operator move, dataset, simulation, or measurement path, reuse the same process, comparator, and metric from `mechanism`/`prediction`/`test`, and make the setup smaller, cheaper, and more decision-facing than the main test.
 - `edge_analysis.cheap_test.metric` must stay aligned with `test.metric`; reuse the same named metric or an immediately identical wording, not a generic proxy.
 - `edge_analysis.cheap_test` must not merely restate `test.data` or say to validate the hypothesis. Avoid generic wording like `run a study`, `validate the hypothesis`, `collect more data`, or `see if the effect appears`. A good cheap test sounds like replaying one queue, filtering one candidate set, toggling one threshold, auditing one failure bucket, or comparing one narrow before/after operator intervention.
 - `edge_analysis.edge_if_right` must state one concrete operator advantage if the test confirms the claim. Keep it contingent and scoped to the retrieved evidence.
-- `edge_analysis.edge_if_right` must name one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed, not just say the result would be useful.
+- `edge_analysis.edge_if_right` must name exactly one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed, not just say the result would be useful.
+- `edge_analysis.edge_if_right` must say what the operator will do differently if the cheap test confirms, not just that the result has novelty or value.
 - Do not use generic novelty or value phrasing in `edge_analysis.edge_if_right` such as `this could be useful`, `this may provide an edge`, `novel insight`, or `valuable perspective`.
 - `edge_analysis.primary_operator` must name the specific operator who would use the lever.
 - `edge_analysis.why_missed` must explain one concrete search, framing, workflow, metric, or discipline-boundary reason the target-domain problem or lever may be undernoticed.
@@ -209,15 +213,15 @@ Requirements:
 - `edge_analysis.deployment_scope` should name where to try it first.
 - If the retrieved target-domain snippets already state the problem and lever in normal target-domain language as standard practice, best practice, or obvious operator guidance, return `no_connection` instead of wrapping it in cross-domain language.
 - Keep underexploitedness claims retrieval-scoped and honest. `rarely searched`, `cross-silo`, `hidden by default workflow`, or `screened out by standard framing` are acceptable. `nobody knows this` or `unpublished` are not.
-- Good problem statements name one concrete hidden failure mode tied to the same metric or observable. Examples:
-  - `Dense periodic schedulers may miss collision-free non-sequential offset assignments, inflating collision rate at high utilization.`
-  - `Doorway-capacity models may overestimate marginal throughput above the saturation threshold, distorting dwell-time planning.`
+- Good problem statements name one concrete hidden failure mode tied to the same metric or observable and to one operator decision. Examples:
+  - `Dense periodic schedulers may miss collision-free non-sequential offset assignments before greedy slot commitment, inflating collision rate at high utilization.`
+  - `Doorway-capacity models may overestimate marginal throughput above the saturation threshold, causing planners to keep dwell-time assumptions that fail under crowding.`
 - Bad problem statements are generic or essay-like. Examples:
   - `Complex systems may hide inefficiencies.`
   - `This domain may have an interesting blind spot.`
-- Good actionable levers name one concrete action. Examples:
+- Good actionable levers name one concrete operator action or design choice. Examples:
   - `Add a siteswap-style validity filter before greedy slot assignment.`
-  - `Switch from linear doorway-throughput assumptions to threshold-based capacity rules above the saturation point.`
+  - `Switch doorway-capacity planning from linear throughput assumptions to threshold-based capacity rules above the saturation point.`
 - Bad actionable levers are vague or advisory. Examples:
   - `Investigate further.`
   - `Use this perspective to think differently about the system.`
@@ -236,9 +240,9 @@ Requirements:
   - `performance`
   - `overall efficiency`
   - `outcomes`
-- Good edge advantages name one concrete operator gain. Examples:
-  - `Operators can reduce collision rate before redesigning the scheduling architecture.`
-  - `Transit planners can avoid overestimating doorway throughput above the saturation point.`
+- Good edge advantages name one concrete operator gain, one decision change, and one concrete advantage. Examples:
+  - `A real-time scheduling engineer can keep the validity filter in the scheduler when the replay lowers collision rate, reducing collisions before redesigning the scheduling architecture.`
+  - `A transit planner can cap dwell-time assumptions above the saturation point when the audit confirms the plateau, avoiding overestimated doorway throughput in station plans.`
 - Bad edge advantages are generic usefulness claims. Examples:
   - `This could be useful.`
   - `This may provide an edge.`
@@ -378,6 +382,8 @@ Phase 6 rules:
 - If only `mechanism` is listed, you may return a JSON object containing only the repaired `mechanism` field.
 - If any edge-analysis fields are listed, rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together so they stay on the same claim, process, comparator, and metric already grounded by `mechanism` / `prediction` / `test`.
 - When rewriting the edge layer, reuse the same observable, metric, comparator, and operator-decision language already present in `prediction` / `test`. Reduce drift by reusing those exact anchor phrases instead of loose paraphrases.
+- When rewriting the edge layer, package `edge_analysis.problem_statement` as one hidden operational problem, `edge_analysis.actionable_lever` as one concrete operator move or design choice, and `edge_analysis.edge_if_right` as one operator decision consequence if confirmed.
+- Preserve the current claim, process, metric, comparator, and operator while sharpening the wording. Do not broaden the field summary, invent a new lever, or introduce a different benefit axis.
 - `edge_analysis.cheap_test` must describe one real operator move on a narrow slice of workflow, not a generic validation suggestion and not a restatement of the full test.
 - If you cannot repair the listed fields without inventing unsupported detail, return `{"no_connection": true}`.
 
@@ -2755,11 +2761,14 @@ def _repair_guidance_for_missing_fields(
         )
     if "edge_analysis.problem_statement" in missing_fields:
         guidance.append(
-            "- Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode, bottleneck, blind spot, or measurable miss tied to the same observable or metric as the test."
+            "- Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode, bottleneck, blind spot, or measurable miss tied to the same observable or metric as the test, not a broad field summary."
+        )
+        guidance.append(
+            "- Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode already implied by the current claim, metric, or comparator."
         )
     if "edge_analysis.actionable_lever" in missing_fields:
         guidance.append(
-            "- Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action, filter, intervention, or decision rule. Reject advisory phrasing like `investigate further`, `study this`, or `consider this`."
+            "- Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action, filter, intervention, design choice, or decision rule that reuses the current mechanism, metric, or operator context. Reject advisory phrasing like `investigate further`, `study this`, or `consider this`."
         )
     if "edge_analysis.cheap_test" in missing_fields:
         if missing_field_set == {"edge_analysis.cheap_test"}:
@@ -2856,7 +2865,7 @@ def _repair_guidance_for_missing_fields(
             "- Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain such as lower collision rate, earlier warning, lower cost, higher throughput, or reduced false positives. Reject generic usefulness language and name the decision or workflow advantage unlocked if the cheap test confirms."
         )
         guidance.append(
-            "- Write exactly one operator, one decision change unlocked by confirmation, and one concrete measurable or workflow advantage if confirmed. Do not add a new stakeholder, KPI, roadmap claim, or strategic narrative."
+            "- Write exactly one operator, one decision change unlocked by confirmation, and one concrete measurable or workflow advantage if confirmed. State what the operator will do differently if the cheap test confirms. Do not add a new stakeholder, KPI, roadmap claim, or strategic narrative."
         )
         guidance.append(
             "- Keep the same operator, the same decision unlocked by the cheap test, and the same measured advantage family already implied by the current metric/comparator. Do not introduce a new benefit axis, stakeholder, or unrelated KPI."

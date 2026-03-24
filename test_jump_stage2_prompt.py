@@ -97,8 +97,12 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     prompt = jump.HYPOTHESIZE_PROMPT
 
     assert "Good problem statements name one concrete hidden failure mode" in prompt
+    assert "`edge_analysis.problem_statement` must describe one hidden or underexploited operational problem, not a broad summary of the field." in prompt
+    assert "Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode on the same observable or metric already used in `prediction` / `test`." in prompt
     assert "Bad problem statements are generic or essay-like" in prompt
-    assert "Good actionable levers name one concrete action" in prompt
+    assert "Good actionable levers name one concrete operator action or design choice" in prompt
+    assert "`edge_analysis.actionable_lever` must reuse the current mechanism, metric, or operator context." in prompt
+    assert "Do not write advisory phrasing like `consider`, `explore`, `may help`, `investigate`, or other non-operational wording." in prompt
     assert "Bad actionable levers are vague or advisory" in prompt
     assert "`edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` must stay centered on that same primary claim, process, comparator, and metric." in prompt
     assert "The first-pass Stage 2 output should already satisfy required-field checks without relying on repair." in prompt
@@ -124,7 +128,8 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Do not use generic similarity wording in `mechanism` such as `mirrors`, `is analogous to`, `resembles`, `similar to`, or `shares dynamics with`." in prompt
     assert "Do not bridge into the process with wording like `operates by`, `works by`, `functions by`, or `acts by`" in prompt
     assert "Do not rename the target-domain process into a broader abstract label" in prompt
-    assert "`edge_analysis.edge_if_right` must name one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed" in prompt
+    assert "`edge_analysis.edge_if_right` must name exactly one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed" in prompt
+    assert "`edge_analysis.edge_if_right` must say what the operator will do differently if the cheap test confirms" in prompt
     assert "Do not use generic novelty or value phrasing in `edge_analysis.edge_if_right` such as `this could be useful`, `this may provide an edge`, `novel insight`, or `valuable perspective`." in prompt
 
 
@@ -141,6 +146,8 @@ def test_phase6_salvage_prompt_stays_selective() -> None:
         in prompt
     )
     assert "reuse the same observable, metric, comparator, and operator-decision language" in prompt
+    assert "package `edge_analysis.problem_statement` as one hidden operational problem" in prompt
+    assert "Preserve the current claim, process, metric, comparator, and operator while sharpening the wording." in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
@@ -192,8 +199,11 @@ def test_build_repair_prompt_includes_targeted_guidance() -> None:
     assert "Rewrite `test` so `metric` names one concrete literature-facing quantity" in repair_prompt
     assert "Rewrite `test.confirm` and `test.falsify` so each sentence literally names the same metric used in `test.metric`" in repair_prompt
     assert "Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode" in repair_prompt
+    assert "Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode already implied by the current claim, metric, or comparator." in repair_prompt
     assert "Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action" in repair_prompt
+    assert "design choice" in repair_prompt
     assert "Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain" in repair_prompt
+    assert "State what the operator will do differently if the cheap test confirms." in repair_prompt
     assert "Rewrite `edge_analysis.why_missed` so it names one concrete search, framing, workflow, metric, or discipline-boundary reason" in repair_prompt
     assert "Rewrite `edge_analysis.expected_asymmetry` so it explains why the lever is plausibly underused rather than already standard target-domain wisdom" in repair_prompt
     assert "Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause" in repair_prompt
