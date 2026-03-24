@@ -353,9 +353,10 @@ Rules:
 - Return exactly one short query string in the `query` field.
 - The query must read like a real technical search, not a sentence, explanation, or list.
 - Keep it compact: 4 to 10 words.
-- Preserve the mechanism or process anchor.
+- Preserve at least one exact 2-word mechanism/process/control phrase from `PATTERN NAME`, `CONTROL LEVER`, or `ABSTRACT STRUCTURE` when available.
 - Avoid the source domain and source category names.
 - Avoid vague generic wording and token soup.
+- Reject formal logic/query-language phrasing like `AND`, `OR`, `verification`, or `alignment` when it is not part of a real mechanism phrase anchor.
 - Do not include quotes, bullets, URLs, or extra punctuation.
 """
 
@@ -764,6 +765,11 @@ PHRASE_ANCHOR_TAIL_TOKENS = {
     "switching",
     "threshold",
 }
+FORMAL_QUERY_RED_FLAG_TOKENS = {
+    "alignment",
+    "simultaneous",
+    "verification",
+}
 QUERY_PHRASE_STOPWORDS = {
     "a",
     "an",
@@ -839,6 +845,57 @@ def _extract_jump_query_phrases(text: str, blocked_tokens: set[str]) -> list[str
         if phrase not in phrases:
             phrases.append(phrase)
     return phrases
+
+
+def _preferred_jump_query_anchor_phrases(
+    pattern: dict,
+    blocked_tokens: set[str],
+) -> list[str]:
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for text in (
+        str(pattern.get("pattern_name", "") or ""),
+        str(pattern.get("control_lever", "") or ""),
+        str(pattern.get("abstract_structure", "") or ""),
+    ):
+        raw_tokens = _tokenize_query_terms(text)
+        for index in range(len(raw_tokens) - 1):
+            first = raw_tokens[index]
+            second = raw_tokens[index + 1]
+            if (
+                first in blocked_tokens
+                or second in blocked_tokens
+                or first in QUERY_PHRASE_STOPWORDS
+                or second in QUERY_PHRASE_STOPWORDS
+                or first in GENERIC_QUERY_TOKENS
+                or second in GENERIC_QUERY_TOKENS
+            ):
+                continue
+            if len(first) <= 2 or len(second) <= 2:
+                continue
+            if first in WEAK_QUERY_TOKENS and second in WEAK_QUERY_TOKENS:
+                continue
+            if not (
+                _is_specific_jump_query_token(first)
+                or _is_specific_jump_query_token(second)
+                or second in PHRASE_ANCHOR_TAIL_TOKENS
+            ):
+                continue
+            phrase = f"{first} {second}"
+            if phrase in seen:
+                continue
+            seen.add(phrase)
+            phrases.append(phrase)
+    return phrases
+
+
+def _looks_like_formal_jump_query_token_soup(
+    raw_candidate: str,
+    candidate_tokens: list[str],
+) -> bool:
+    if re.search(r"\b(?:AND|OR|NOT|XOR)\b", raw_candidate):
+        return True
+    return sum(token in FORMAL_QUERY_RED_FLAG_TOKENS for token in candidate_tokens) >= 2
 
 
 def _build_jump_search_query_heuristic(
@@ -942,11 +999,11 @@ def _is_acceptable_llm_jump_query(
     source_category: str,
     heuristic_query: str,
 ) -> bool:
-    candidate = str(query or "").strip()
-    if not candidate or "\n" in candidate or "\r" in candidate:
+    raw_candidate = str(query or "").strip()
+    if not raw_candidate or "\n" in raw_candidate or "\r" in raw_candidate:
         return False
 
-    candidate = re.sub(r"\s+", " ", candidate)
+    candidate = re.sub(r"\s+", " ", raw_candidate)
     if len(candidate) > 96:
         return False
     if "http://" in candidate.lower() or "https://" in candidate.lower():
@@ -964,6 +1021,8 @@ def _is_acceptable_llm_jump_query(
         return False
     if any(token in blocked_tokens for token in candidate_tokens):
         return False
+    if _looks_like_formal_jump_query_token_soup(raw_candidate, candidate_tokens):
+        return False
 
     strong_tokens = [
         token
@@ -974,6 +1033,12 @@ def _is_acceptable_llm_jump_query(
         return False
     if not any(_is_specific_jump_query_token(token) for token in strong_tokens):
         return False
+
+    preferred_anchor_phrases = _preferred_jump_query_anchor_phrases(pattern, blocked_tokens)
+    lowered_candidate = candidate.lower()
+    if preferred_anchor_phrases:
+        if not any(phrase in lowered_candidate for phrase in preferred_anchor_phrases):
+            return False
 
     anchor_texts = [
         str(pattern.get("control_lever", "") or ""),
@@ -1002,10 +1067,12 @@ def _is_acceptable_llm_jump_query(
         return False
 
     candidate_token_set = set(candidate_tokens)
+    if preferred_anchor_phrases:
+        return True
+
     if candidate_token_set.intersection(anchor_tokens):
         return True
 
-    lowered_candidate = candidate.lower()
     return any(phrase in lowered_candidate for phrase in anchor_phrases)
 
 
