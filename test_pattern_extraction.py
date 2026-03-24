@@ -99,6 +99,70 @@ def test_profile_pattern_quality_prefers_operational_mechanism() -> None:
     assert any("missing controllable lever" in item for item in weak["concerns"])
 
 
+def test_build_jump_search_query_replaces_weak_feedback_style_terms() -> None:
+    query = jump._build_jump_search_query(
+        {
+            "search_query": "deficiency threshold triggered directed recruitment feedback",
+            "pattern_name": "Deficiency-triggered balancing",
+            "abstract_structure": (
+                "deficit detection compares underfilled channels and routes supply "
+                "toward the most depleted pool"
+            ),
+            "measurable_signal": "stockout rate and channel imbalance",
+            "control_lever": "tune the deficit detector and routing quota",
+            "transfer_rationale": (
+                "applies where underfilled channels are replenished by a "
+                "detector-guided routing rule"
+            ),
+        },
+        "Hiring",
+        "Operations",
+    )
+
+    tokens = set(query.split())
+    assert "feedback" not in tokens
+    assert "recruitment" not in tokens
+    assert "threshold" not in tokens
+    assert {"deficit", "detector", "routing"} <= tokens
+
+
+def test_build_jump_search_query_keeps_lock_in_anchor_but_drops_generic_terms() -> None:
+    query = jump._build_jump_search_query(
+        {
+            "search_query": "credibility threshold commitment lock-in stabilizing feedback",
+            "pattern_name": "Commitment lock-in under switching cost",
+            "abstract_structure": (
+                "belief updates exhibit hysteresis once switching cost and state "
+                "retention exceed a comparator boundary"
+            ),
+            "measurable_signal": "state retention rate and reversal frequency",
+            "control_lever": "tune switching cost and comparator boundary",
+            "transfer_rationale": (
+                "transfers to systems with hysteresis, switching cost, and "
+                "path-dependent state retention"
+            ),
+        },
+        "Politics",
+        "Social Systems",
+    )
+
+    tokens = set(query.split())
+    assert "credibility" not in tokens
+    assert "feedback" not in tokens
+    assert "threshold" not in tokens
+    assert {"commitment", "lock-in", "switching", "comparator"} <= tokens
+
+
+def test_build_jump_search_query_preserves_concrete_raw_anchor_terms() -> None:
+    query = jump._build_jump_search_query(
+        {"search_query": "queue threshold throttling latency"},
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert query == "queue throttling latency"
+
+
 def test_dive_filters_weak_patterns_and_records_only_weak_diagnostics(
     monkeypatch,
 ) -> None:

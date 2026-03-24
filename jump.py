@@ -671,6 +671,19 @@ GENERIC_QUERY_TOKENS = {
     "system",
     "systems",
 }
+WEAK_QUERY_TOKENS = {
+    "credibility",
+    "deficiency",
+    "directed",
+    "feedback",
+    "recruitment",
+    "stabilization",
+    "stabilizing",
+    "threshold",
+    "trigger",
+    "triggered",
+    "triggers",
+}
 MECHANISM_QUERY_TOKENS = {
     "accumulation",
     "amplification",
@@ -717,6 +730,16 @@ def _tokenize_query_terms(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", (text or "").lower())
 
 
+def _is_specific_jump_query_token(token: str) -> bool:
+    if token in WEAK_QUERY_TOKENS:
+        return False
+    if token in MECHANISM_QUERY_TOKENS:
+        return True
+    if "-" in token:
+        return True
+    return len(token) >= 7
+
+
 def _build_jump_search_query(
     pattern: dict,
     source_domain: str,
@@ -730,37 +753,49 @@ def _build_jump_search_query(
     blocked_tokens = set(_tokenize_query_terms(source_domain))
     blocked_tokens.update(_tokenize_query_terms(source_category))
 
-    def _filtered_tokens(text: str) -> list[str]:
+    def _filtered_tokens(text: str, *, specific_only: bool = False) -> list[str]:
         out = []
         for token in _tokenize_query_terms(text):
-            if token in blocked_tokens or token in GENERIC_QUERY_TOKENS:
+            if (
+                token in blocked_tokens
+                or token in GENERIC_QUERY_TOKENS
+                or token in WEAK_QUERY_TOKENS
+            ):
                 continue
             if len(token) <= 2:
+                continue
+            if specific_only and not _is_specific_jump_query_token(token):
                 continue
             out.append(token)
         return out
 
     selected: list[str] = []
+    base_specific_tokens = _filtered_tokens(raw_query, specific_only=True)
     base_tokens = _filtered_tokens(raw_query)
-    pattern_tokens = _filtered_tokens(
-        " ".join(
-            [
-                str(pattern.get("pattern_name", "") or ""),
-                str(pattern.get("abstract_structure", "") or ""),
-                str(pattern.get("measurable_signal", "") or ""),
-                str(pattern.get("control_lever", "") or ""),
-                str(pattern.get("transfer_rationale", "") or ""),
-            ]
-        )
-    )
+    pattern_field_text = [
+        str(pattern.get("control_lever", "") or ""),
+        str(pattern.get("abstract_structure", "") or ""),
+        str(pattern.get("measurable_signal", "") or ""),
+        str(pattern.get("pattern_name", "") or ""),
+        str(pattern.get("transfer_rationale", "") or ""),
+    ]
+    pattern_specific_tokens: list[str] = []
+    pattern_tokens: list[str] = []
+    for text in pattern_field_text:
+        pattern_specific_tokens.extend(_filtered_tokens(text, specific_only=True))
+        pattern_tokens.extend(_filtered_tokens(text))
 
-    for token in base_tokens:
-        if token not in selected:
-            selected.append(token)
-
-    for token in pattern_tokens:
-        if token in MECHANISM_QUERY_TOKENS and token not in selected:
-            selected.append(token)
+    for token_group in (
+        base_specific_tokens,
+        pattern_specific_tokens,
+        base_tokens,
+        pattern_tokens,
+    ):
+        for token in token_group:
+            if token not in selected:
+                selected.append(token)
+            if len(selected) >= 6:
+                break
         if len(selected) >= 6:
             break
 
