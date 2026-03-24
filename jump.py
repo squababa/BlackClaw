@@ -1668,6 +1668,105 @@ def _phase3_repair_context(data: dict | None) -> dict:
     }
 
 
+def _display_target_evidence_rank(summary: dict | None) -> tuple[float, ...]:
+    payload = summary if isinstance(summary, dict) else {}
+    best_entry = (
+        payload.get("best_core_target_evidence")
+        if isinstance(payload.get("best_core_target_evidence"), dict)
+        else {}
+    )
+    provenance_score = (
+        best_entry.get("provenance_score")
+        if isinstance(best_entry.get("provenance_score"), dict)
+        else {}
+    )
+    strength_rank = {
+        "strong_direct": 3.0,
+        "weak_direct": 2.0,
+        "contextual_only": 1.0,
+        "none": 0.0,
+    }.get(str(best_entry.get("strength") or "").strip(), 0.0)
+    entry_type_rank = {
+        "mechanism_assertion": 2.0,
+        "variable_mapping": 1.0,
+        "top_level_target_evidence": 0.0,
+    }.get(str(best_entry.get("entry_type") or "").strip(), 0.0)
+    return (
+        strength_rank,
+        1.0 if best_entry.get("direct_process_match") else 0.0,
+        1.0 if best_entry.get("direct_metric_match") else 0.0,
+        1.0 if not best_entry.get("weak_source") else 0.0,
+        1.0 if not best_entry.get("broad_page") else 0.0,
+        1.0 if not best_entry.get("generic_signal") else 0.0,
+        1.0 if not best_entry.get("mismatch_signal") else 0.0,
+        float(provenance_score.get("snippet_specificity") or 0.0),
+        float(provenance_score.get("overall") or 0.0),
+        entry_type_rank,
+    )
+
+
+def _select_display_target_evidence(
+    data: dict | None,
+    raw_target_candidates: list[dict],
+) -> tuple[str | None, str | None]:
+    payload = data if isinstance(data, dict) else {}
+    evidence_map = normalize_evidence_map(payload.get("evidence_map"))
+    candidate_pool = raw_target_candidates or [{"target_excerpt": None, "target_url": None}]
+    best_selection: dict | None = None
+
+    for candidate in candidate_pool:
+        working_payload = dict(payload)
+        working_payload["evidence_map"] = evidence_map
+
+        candidate_excerpt = str(candidate.get("target_excerpt") or "").strip() or None
+        candidate_url = str(candidate.get("target_url") or "").strip() or None
+        evaluation_source_reference = (
+            str(candidate.get("evaluation_source_reference") or "").strip()
+            or candidate_url
+        )
+        if candidate_excerpt:
+            working_payload["target_excerpt"] = candidate_excerpt
+        else:
+            working_payload.pop("target_excerpt", None)
+        if evaluation_source_reference:
+            working_payload["target_url"] = evaluation_source_reference
+        else:
+            working_payload.pop("target_url", None)
+
+        provenance_summary = summarize_evidence_map_provenance(working_payload)
+        rank = _display_target_evidence_rank(provenance_summary)
+        best_entry = (
+            provenance_summary.get("best_core_target_evidence")
+            if isinstance(provenance_summary.get("best_core_target_evidence"), dict)
+            else {}
+        )
+
+        selected_excerpt = candidate_excerpt
+        selected_url = candidate_url
+        if str(best_entry.get("entry_type") or "").strip() != "top_level_target_evidence":
+            best_excerpt = str(best_entry.get("evidence_snippet") or "").strip()
+            best_source = str(best_entry.get("source_reference") or "").strip()
+            if best_excerpt:
+                selected_excerpt = best_excerpt
+            if best_source:
+                selected_url = best_source
+
+        if best_selection is None or rank > best_selection["rank"]:
+            best_selection = {
+                "rank": rank,
+                "target_excerpt": selected_excerpt,
+                "target_url": selected_url,
+            }
+
+    if best_selection is not None:
+        return best_selection.get("target_excerpt"), best_selection.get("target_url")
+
+    first_candidate = raw_target_candidates[0] if raw_target_candidates else {}
+    fallback_excerpt = str(first_candidate.get("target_excerpt") or "").strip() or None
+    fallback_url = str(first_candidate.get("target_url") or "").strip() or None
+    return fallback_excerpt, fallback_url
+
+
 def _mechanism_word_tokens(text: object) -> set[str]:
     return {
         token
@@ -3113,8 +3212,7 @@ def lateral_jump_with_diagnostics(
     search_content = []
     source_lower = source_domain.lower()
     category_lower = source_category.lower()
-    target_url = None
-    target_excerpt = None
+    raw_target_candidates: list[dict] = []
     top_titles: list[str] = []
     for result in raw_results:
         title_text = str(result.get("title", "") or "").strip()
@@ -3124,12 +3222,19 @@ def lateral_jump_with_diagnostics(
             continue
         clean = sanitize(content)
         if clean:
-            if target_excerpt is None:
-                target_excerpt = clean[:500]
-            if target_url is None:
-                url = (result.get("url") or "").strip()
-                if url:
-                    target_url = url
+            url = (result.get("url") or "").strip()
+            source_reference = url or title_text
+            raw_target_candidates.append(
+                {
+                    "target_excerpt": clean[:500],
+                    "target_url": source_reference or None,
+                    "evaluation_source_reference": " ".join(
+                        part for part in (title_text, url) if part
+                    )
+                    or source_reference
+                    or None,
+                }
+            )
             if title_text and title_text not in top_titles and len(top_titles) < 3:
                 top_titles.append(title_text)
             search_content.append(f"Title: {result.get('title', 'Unknown')}")
@@ -3198,6 +3303,10 @@ def lateral_jump_with_diagnostics(
     diagnostic["stage2_outcome"] = "connection_found"
     diagnostic["stage2_target_domain"] = str(data.get("target_domain", "") or "").strip() or None
     data["abstract_structure"] = str(pattern.get("abstract_structure", "") or "").strip()
+    target_excerpt, target_url = _select_display_target_evidence(
+        data,
+        raw_target_candidates,
+    )
     if target_url:
         data["target_url"] = target_url
     if target_excerpt:

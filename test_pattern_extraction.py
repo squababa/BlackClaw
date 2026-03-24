@@ -843,6 +843,193 @@ def test_lateral_jump_with_diagnostics_records_success(monkeypatch) -> None:
     assert diagnostic["stage2_target_domain"] == "Wireless Scheduling"
 
 
+def _safety_interlock_jump_payload(evidence_map: dict | None = None) -> dict:
+    return {
+        "target_domain": "Safety Interlock Monitoring",
+        "connection": "Specific connection",
+        "mechanism": (
+            "safety interlock state comparison suppresses actuation when "
+            "guard-channel mismatch is detected across redundant channels."
+        ),
+        "mechanism_type": "threshold_switching",
+        "mechanism_type_confidence": 0.82,
+        "evidence_map": evidence_map
+        or {
+            "variable_mappings": [],
+            "mechanism_assertions": [],
+        },
+        "prediction": {
+            "observable": "mismatch-triggered actuation suppression rate",
+            "time_horizon": "during one diagnostic cycle",
+            "direction": "higher",
+            "magnitude": "higher suppression rate during mismatch faults",
+            "confidence": "medium",
+            "falsification_condition": "suppression rate does not change",
+            "utility_rationale": "reduce unsafe actuation",
+            "who_benefits": "controls engineers",
+        },
+        "test": {
+            "data": "replay redundant interlock diagnostics",
+            "metric": "mismatch-triggered actuation suppression rate",
+            "confirm": "suppression occurs during detected guard-channel mismatch",
+            "falsify": "actuation continues during detected guard-channel mismatch",
+        },
+        "edge_analysis": {
+            "problem_statement": "placeholder",
+            "why_missed": "placeholder",
+            "actionable_lever": "placeholder",
+            "cheap_test": {
+                "setup": "placeholder",
+                "metric": "placeholder",
+                "confirm": "placeholder",
+                "falsify": "placeholder",
+            },
+            "edge_if_right": "placeholder",
+            "primary_operator": "controls engineer",
+            "expected_asymmetry": "placeholder",
+        },
+    }
+
+
+def test_lateral_jump_with_diagnostics_prefers_stronger_raw_target_result(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump._tavily,
+        "search",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "title": "Plant safety overview",
+                    "content": "Industrial safety systems improve reliability across facilities.",
+                    "url": "https://vendor.test/overview",
+                },
+                {
+                    "title": "Redundant interlock diagnostics paper",
+                    "content": (
+                        "Redundant safety interlock channels suppress actuation when "
+                        "guard-channel mismatch is detected during diagnostic comparison."
+                    ),
+                    "url": "https://journal.test/interlock-diagnostics",
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_one_detect_with_diagnostics",
+        lambda **_kwargs: (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_two_hypothesize_with_diagnostics",
+        lambda **_kwargs: (_safety_interlock_jump_payload(), None),
+    )
+
+    connection, _diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is not None
+    assert connection["target_url"] == "https://journal.test/interlock-diagnostics"
+    assert (
+        connection["target_excerpt"]
+        == "Redundant safety interlock channels suppress actuation when "
+        "guard-channel mismatch is detected during diagnostic comparison."
+    )
+
+
+def test_lateral_jump_with_diagnostics_prefers_evidence_map_core_target_anchor(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump._tavily,
+        "search",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "title": "Industrial safety overview",
+                    "content": "Safety systems reduce faults across manufacturing plants.",
+                    "url": "https://magazine.test/safety-overview",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_one_detect_with_diagnostics",
+        lambda **_kwargs: (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_two_hypothesize_with_diagnostics",
+        lambda **_kwargs: (
+            _safety_interlock_jump_payload(
+                {
+                    "variable_mappings": [],
+                    "mechanism_assertions": [
+                        {
+                            "mechanism_claim": (
+                                "Safety interlock diagnostics suppress actuation when "
+                                "redundant guard channels disagree."
+                            ),
+                            "evidence_snippet": (
+                                "Safety interlock diagnostics suppress actuation when "
+                                "guard-channel mismatch is detected across redundant channels."
+                            ),
+                            "source_reference": (
+                                "IEC 61508 redundant interlock diagnostic requirements"
+                            ),
+                        }
+                    ],
+                }
+            ),
+            None,
+        ),
+    )
+
+    connection, _diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is not None
+    assert (
+        connection["target_url"]
+        == "IEC 61508 redundant interlock diagnostic requirements"
+    )
+    assert (
+        connection["target_excerpt"]
+        == "Safety interlock diagnostics suppress actuation when "
+        "guard-channel mismatch is detected across redundant channels."
+    )
+
+
 def test_jump_diagnostics_report_prints_attempts_and_aggregate(temp_db, capsys) -> None:
     store.save_exploration(
         seed_domain="Network Protocols",
