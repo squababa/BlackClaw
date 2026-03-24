@@ -73,6 +73,7 @@ Requirements:
 - Prefer the smaller honest claim over the broader impressive one. Do not reward elegant analogy shells that outrun the retrieved target evidence.
 - That primary claim must name one measurable target-domain operator or operator-driven outcome that can be checked in literature or experiments.
 - If the target material does not directly support a concrete target-domain claim at that level, return `no_connection`.
+- The first-pass Stage 2 output should already satisfy required-field checks without relying on repair. If any field would be generic, missing, or placeholder-like, rewrite it concretely now or return `no_connection`.
 - `connection`, `mechanism`, `prediction`, and `test` must all stay centered on that same primary claim. If they drift to different effects or outcomes, return `no_connection`.
 - `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` must stay centered on that same primary claim, process, comparator, and metric. Do not let the edge layer introduce a different operator problem or a second target outcome.
 - Explain one concrete shared mechanism, not a metaphor.
@@ -130,8 +131,10 @@ Requirements:
 - The mechanism field must name one specific causal process centered on the single primary causal operator that actually drives the analogy, not a broad analogy or generic system description.
 - The mechanism sentence must name a specific target-domain process that is directly evidenced in the retrieved target material or mechanism assertions.
 - The first clause of `mechanism` must open with the named target-domain process noun phrase itself, not with a consequence sentence, threshold/result summary, or broad pattern description.
+- `mechanism` must open with exactly one target-domain process noun phrase and then follow with one explicit causal chain in target-domain terms: process/operator -> control, trigger, comparator, or bottleneck variable -> resulting measurable change.
 - Open `mechanism` with the exact target-domain process noun phrase used in the strongest supporting evidence snippet, or a very close paraphrase of that wording.
 - Do not bridge into the process with wording like `operates by`, `works by`, `functions by`, or `acts by` when the process noun phrase itself is already available in the target evidence.
+- Do not use generic similarity wording in `mechanism` such as `mirrors`, `is analogous to`, `resembles`, `similar to`, or `shares dynamics with`.
 - Do not rename the target-domain process into a broader abstract label. If the evidence says `offset assignment`, `mode switching`, `atrial event detection`, or `token bucket refill saturation`, start from that wording.
 - The first clause should read like: `[specific target-domain process] [acts on/monitors/routes/tests] [control or monitored quantity]`, then state the discrete or measurable change that process causes.
 - Name the operative process itself, not an abstract pattern behind it. Do not stop at generic labels like threshold crossing, feedback loop, accumulation, switching, or competition without the target-domain process that performs that action.
@@ -194,10 +197,12 @@ Requirements:
 - `edge_analysis.problem_statement` must name one specific target-domain problem, blind spot, hidden failure mode, or missed control point.
 - `edge_analysis.actionable_lever` must name one concrete action, heuristic, filter, design change, or search direction that follows from the mechanism.
 - `edge_analysis.cheap_test` must include setup, metric, confirm, falsify, and optional time_to_signal. It must be a fast realistic validation path, not a multi-month research program by default.
-- `edge_analysis.cheap_test.setup` must read like one real operator move on a narrow slice of the target-domain workflow. Reuse the same process, comparator, and metric from `mechanism`/`prediction`/`test`, but make the setup smaller, cheaper, and more decision-facing than the main test.
-- `edge_analysis.cheap_test` must not merely restate `test.data` or say to validate the hypothesis. A good cheap test sounds like replaying one queue, filtering one candidate set, toggling one threshold, auditing one failure bucket, or comparing one narrow before/after operator intervention.
+- `edge_analysis.cheap_test.setup` must read like one real operator move on a narrow slice of the target-domain workflow. Name one real operator move, dataset, simulation, or measurement path, reuse the same process, comparator, and metric from `mechanism`/`prediction`/`test`, and make the setup smaller, cheaper, and more decision-facing than the main test.
+- `edge_analysis.cheap_test.metric` must stay aligned with `test.metric`; reuse the same named metric or an immediately identical wording, not a generic proxy.
+- `edge_analysis.cheap_test` must not merely restate `test.data` or say to validate the hypothesis. Avoid generic wording like `run a study`, `validate the hypothesis`, `collect more data`, or `see if the effect appears`. A good cheap test sounds like replaying one queue, filtering one candidate set, toggling one threshold, auditing one failure bucket, or comparing one narrow before/after operator intervention.
 - `edge_analysis.edge_if_right` must state one concrete operator advantage if the test confirms the claim. Keep it contingent and scoped to the retrieved evidence.
-- `edge_analysis.edge_if_right` must name the operator decision unlocked by the cheap test, not just say the result would be useful.
+- `edge_analysis.edge_if_right` must name one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed, not just say the result would be useful.
+- Do not use generic novelty or value phrasing in `edge_analysis.edge_if_right` such as `this could be useful`, `this may provide an edge`, `novel insight`, or `valuable perspective`.
 - `edge_analysis.primary_operator` must name the specific operator who would use the lever.
 - `edge_analysis.why_missed` must explain one concrete search, framing, workflow, metric, or discipline-boundary reason the target-domain problem or lever may be undernoticed.
 - `edge_analysis.expected_asymmetry` must explain why the lever is plausibly underused rather than already standard target-domain wisdom.
@@ -269,7 +274,7 @@ If valid:
   "source_domain": "{source_domain}",
   "target_domain": "target field from stage 1",
   "connection": "2-4 sentence explanation that starts with an evidence-bounded primary target-domain claim/process, then links the source-domain correspondence without broadening beyond the retrieved target evidence",
-  "mechanism": "one directly evidenced operative target-domain causal process opening with the exact or near-exact target-domain process noun phrase from the strongest evidence snippet, then naming the operator, control/monitored variable, and resulting discrete or measurable change measured by the test",
+  "mechanism": "one directly evidenced operative target-domain causal process opening with exactly one target-domain process noun phrase from the strongest evidence snippet, then naming one target-domain causal chain from operator/process to control/comparator variable to resulting measurable change measured by the test",
   "mechanism_type": "one controlled vocabulary tag",
   "mechanism_type_confidence": 0.82,
   "secondary_mechanism_types": ["optional additional controlled tag"],
@@ -309,13 +314,13 @@ If valid:
     "why_missed": "why standard framing or workflow may overlook it",
     "actionable_lever": "one concrete action implied by the mechanism",
     "cheap_test": {{
-      "setup": "fastest realistic validation path",
-      "metric": "one metric aligned with test.metric",
+      "setup": "one real operator move, dataset replay, simulation, or measurement path on a narrow workflow slice",
+      "metric": "the same named metric as test.metric",
       "confirm": "what result would support the lever",
       "falsify": "what result would kill the lever",
       "time_to_signal": "how quickly the test should produce evidence"
     }},
-    "edge_if_right": "concrete operator advantage if confirmed",
+    "edge_if_right": "one operator, one decision change, and one concrete advantage if confirmed",
     "expected_asymmetry": "why this is plausibly underexploited",
     "primary_operator": "specific operator who would use it",
     "deployment_scope": "where to try it first"
