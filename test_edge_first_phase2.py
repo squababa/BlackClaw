@@ -370,6 +370,77 @@ def test_format_transmission_is_problem_first() -> None:
     assert "Primary operator: real-time scheduling engineer" in output
 
 
+def test_format_transmission_prefers_grounded_target_evidence_and_shows_anchor() -> None:
+    payload = _build_edge_first_payload()
+    payload["target_url"] = "https://vendor.test/scheduling-overview"
+    payload["target_excerpt"] = (
+        "Time-triggered scheduling helps coordinate periodic workloads across many "
+        "industrial settings."
+    )
+    payload["evidence_map"] = {
+        "variable_mappings": [
+            {
+                "source_variable": "collision_of_catches_at_same_beat",
+                "target_variable": "simultaneous_task_activation_conflict",
+                "claim": (
+                    "Two tasks cannot share the same activation slot without a "
+                    "conflict."
+                ),
+                "evidence_snippet": (
+                    "Offset assignment must prevent simultaneous activation collisions "
+                    "among periodic tasks sharing execution resources."
+                ),
+                "source_reference": (
+                    "Collision-free offset assignment for periodic tasks"
+                ),
+                "support_level": "direct",
+            }
+        ],
+        "mechanism_assertions": [
+            {
+                "mechanism_claim": (
+                    "Feasible offset assignment satisfies collision-avoidance "
+                    "constraints across the hyperperiod to prevent simultaneous "
+                    "activations."
+                ),
+                "evidence_snippet": (
+                    "Feasible schedules are constructed by assigning offsets that "
+                    "satisfy collision-avoidance constraints across the hyperperiod."
+                ),
+                "source_reference": (
+                    "Collision-free offset assignment for periodic tasks"
+                ),
+            }
+        ],
+    }
+
+    output = transmit.format_transmission(
+        transmission_number=47,
+        source_domain=payload["source_domain"],
+        target_domain=payload["target_domain"],
+        connection=payload,
+        scores={
+            "novelty": 0.41,
+            "depth": 0.83,
+            "distance": 0.78,
+            "prediction_quality_score": 0.94,
+            "total": 0.79,
+        },
+        exploration_path=["Juggling", "siteswap timing", "Time-triggered scheduling"],
+    )
+
+    assert (
+        "EXCERPT: Feasible schedules are constructed by assigning offsets that "
+        "satisfy collision-avoidance constraints across the hyperperiod."
+    ) in output
+    assert (
+        "ANCHOR: collision_of_catches_at_same_beat -> "
+        "simultaneous_task_activation_conflict | Two tasks cannot share the same "
+        "activation slot without a conflict."
+    ) in output
+    assert "industrial settings" not in output
+
+
 def test_phase6_salvage_plan_targets_high_scoring_usefulness_near_miss() -> None:
     usefulness_proof = {
         "reasons": [

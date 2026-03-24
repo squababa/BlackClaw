@@ -1123,6 +1123,100 @@ def test_lateral_jump_with_diagnostics_sets_aligned_source_display_fields(
     assert connection["source_excerpt"] == connection["seed_excerpt"]
 
 
+def test_lateral_jump_with_diagnostics_prefers_grounded_seed_excerpt_over_description(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump._tavily,
+        "search",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "title": "Industrial safety overview",
+                    "content": (
+                        "Safety systems reduce faults across manufacturing plants."
+                    ),
+                    "url": "https://magazine.test/safety-overview",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_one_detect_with_diagnostics",
+        lambda **_kwargs: (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_two_hypothesize_with_diagnostics",
+        lambda **_kwargs: (
+            _safety_interlock_jump_payload(
+                {
+                    "variable_mappings": [
+                        {
+                            "source_variable": "masking threshold",
+                            "target_variable": "diagnostic state comparison",
+                            "claim": "Specific connection",
+                            "evidence_snippet": "Specific target evidence.",
+                            "source_reference": "https://journal.test/interlock-paper",
+                            "support_level": "direct",
+                        },
+                        {
+                            "source_variable": "bit allocation",
+                            "target_variable": "actuation suppression rate",
+                            "claim": "Specific connection",
+                            "evidence_snippet": "Specific target evidence.",
+                            "source_reference": "https://journal.test/interlock-paper",
+                            "support_level": "direct",
+                        },
+                    ],
+                    "mechanism_assertions": [],
+                }
+            ),
+            None,
+        ),
+    )
+
+    connection, _diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Masking-threshold allocation control",
+            "description": (
+                "Masking threshold analysis changes bit allocation decisions during "
+                "audio encoding."
+            ),
+            "abstract_structure": (
+                "Signal energy raises masking thresholds before encoders reduce "
+                "precision in neighboring bands."
+            ),
+            "measurable_signal": "masking threshold and bit allocation",
+            "control_lever": "adjust masking threshold and bit allocation",
+            "search_query": "queue threshold throttling latency",
+            "seed_url": "https://source.test/perceptual-audio-coding",
+            "seed_excerpt": (
+                "Masking threshold adaptation lowers bit allocation for masked "
+                "bands during encoding."
+            ),
+        },
+        "Psychoacoustics",
+        "Science",
+    )
+
+    assert connection is not None
+    assert connection["source_url"] == "https://source.test/perceptual-audio-coding"
+    assert (
+        connection["source_excerpt"]
+        == "Masking threshold adaptation lowers bit allocation for masked "
+        "bands during encoding."
+    )
+
+
 def test_evaluate_connection_candidate_prefers_connection_source_display_fields_for_late_gate(
     monkeypatch,
 ) -> None:
