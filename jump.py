@@ -2993,7 +2993,7 @@ def _stage_two_hypothesize_with_diagnostics(
     abstract_structure: str,
     stage_one: dict,
     search_results: str,
-) -> tuple[dict | None, str | None]:
+) -> tuple[dict | None, str | None, list[str] | None]:
     relevant_scars = _format_relevant_scars_for_prompt(
         str(stage_one.get("target_domain") or ""),
         abstract_structure,
@@ -3008,15 +3008,15 @@ def _stage_two_hypothesize_with_diagnostics(
     )
     extracted_json = _generate_json_with_retry(prompt, "stage2_hypothesize", 4096)
     if extracted_json is None:
-        return None, "generation_failed"
+        return None, "generation_failed", None
     try:
         data = json.loads(extracted_json)
     except json.JSONDecodeError:
-        return None, "invalid_json"
+        return None, "invalid_json", None
     if not isinstance(data, dict):
-        return None, "invalid_payload"
+        return None, "invalid_payload", None
     if data.get("no_connection", True):
-        return None, _short_stage_two_failure_hint(data) or "returned_no_connection"
+        return None, _short_stage_two_failure_hint(data) or "returned_no_connection", None
 
     data = _apply_mechanism_naming_precision(data)
     data = _apply_normalized_mechanism_typing(data)
@@ -3029,11 +3029,12 @@ def _stage_two_hypothesize_with_diagnostics(
             original_data=data,
         )
         if repaired is None or repaired.get("no_connection", True):
-            return None, "repair_failed"
+            return None, "repair_failed", None
         repaired = _apply_mechanism_naming_precision(repaired)
         repaired = _apply_normalized_mechanism_typing(repaired)
-        if _missing_required_fields(repaired):
-            return None, "repair_incomplete"
+        incomplete_fields = _missing_required_fields(repaired)
+        if incomplete_fields:
+            return None, "repair_incomplete", incomplete_fields
         data = repaired
 
     data["evidence_map"] = normalize_evidence_map(data.get("evidence_map"))
@@ -3041,7 +3042,7 @@ def _stage_two_hypothesize_with_diagnostics(
 
     # Jump output must never self-grade depth.
     data.pop("depth", None)
-    return data, None
+    return data, None, None
 
 
 def _stage_two_hypothesize(
@@ -3050,12 +3051,13 @@ def _stage_two_hypothesize(
     stage_one: dict,
     search_results: str,
 ) -> dict | None:
-    data, _failure_hint = _stage_two_hypothesize_with_diagnostics(
+    stage_two_result = _stage_two_hypothesize_with_diagnostics(
         source_domain=source_domain,
         abstract_structure=abstract_structure,
         stage_one=stage_one,
         search_results=search_results,
     )
+    data = stage_two_result[0] if isinstance(stage_two_result, tuple) and stage_two_result else None
     return data
 
 
@@ -3160,15 +3162,37 @@ def lateral_jump_with_diagnostics(
     diagnostic["stage1_outcome"] = "detect_signal"
     diagnostic["stage1_target_domain"] = str(stage_one.get("target_domain", "") or "").strip() or None
 
-    data, stage_two_failure_hint = _stage_two_hypothesize_with_diagnostics(
+    stage_two_result = _stage_two_hypothesize_with_diagnostics(
         source_domain=source_domain,
         abstract_structure=str(pattern.get("abstract_structure", "") or ""),
         stage_one=stage_one,
         search_results=combined,
     )
+    data = stage_two_result[0] if isinstance(stage_two_result, tuple) and len(stage_two_result) >= 1 else None
+    stage_two_failure_hint = (
+        stage_two_result[1]
+        if isinstance(stage_two_result, tuple) and len(stage_two_result) >= 2
+        else None
+    )
+    stage2_incomplete_fields = (
+        stage_two_result[2]
+        if isinstance(stage_two_result, tuple) and len(stage_two_result) >= 3
+        else None
+    )
     if data is None:
         diagnostic["stage2_outcome"] = "stage2_no_connection"
         diagnostic["stage2_failure_hint"] = stage_two_failure_hint or "returned_no_connection"
+        if (
+            diagnostic["stage2_failure_hint"] == "repair_incomplete"
+            and isinstance(stage2_incomplete_fields, list)
+        ):
+            cleaned_incomplete_fields = [
+                str(field).strip()
+                for field in stage2_incomplete_fields
+                if str(field).strip()
+            ]
+            if cleaned_incomplete_fields:
+                diagnostic["stage2_incomplete_fields"] = cleaned_incomplete_fields
         return None, diagnostic
 
     diagnostic["stage2_outcome"] = "connection_found"
