@@ -1701,6 +1701,28 @@ def _display_target_evidence_rank(summary: dict | None) -> tuple[float, ...]:
         if isinstance(best_entry.get("provenance_score"), dict)
         else {}
     )
+    evidence_snippet = str(best_entry.get("evidence_snippet") or "").strip()
+    source_reference = str(best_entry.get("source_reference") or "").strip()
+    snippet_word_count = len(evidence_snippet.split())
+    concise_snippet = 1.0 if 8 <= snippet_word_count <= 28 else 0.0
+    suspicious_reference = 0.0
+    lowered_reference = source_reference.lower()
+    if any(
+        marker in lowered_reference
+        for marker in (
+            "blog",
+            "guide",
+            "overview",
+            "introduction",
+            "magazine",
+            "marketing",
+            "vendor",
+            "company",
+            "product",
+            "solution",
+        )
+    ):
+        suspicious_reference = 1.0
     strength_rank = {
         "strong_direct": 3.0,
         "weak_direct": 2.0,
@@ -1716,10 +1738,15 @@ def _display_target_evidence_rank(summary: dict | None) -> tuple[float, ...]:
         strength_rank,
         1.0 if best_entry.get("direct_process_match") else 0.0,
         1.0 if best_entry.get("direct_metric_match") else 0.0,
+        float(best_entry.get("mechanism_overlap") or 0.0),
+        float(best_entry.get("metric_overlap") or 0.0),
+        float(best_entry.get("observable_overlap") or 0.0),
         1.0 if not best_entry.get("weak_source") else 0.0,
         1.0 if not best_entry.get("broad_page") else 0.0,
         1.0 if not best_entry.get("generic_signal") else 0.0,
         1.0 if not best_entry.get("mismatch_signal") else 0.0,
+        1.0 if not suspicious_reference else 0.0,
+        concise_snippet,
         float(provenance_score.get("snippet_specificity") or 0.0),
         float(provenance_score.get("overall") or 0.0),
         entry_type_rank,
@@ -1767,9 +1794,9 @@ def _select_display_source_evidence(
 
     candidates: list[dict] = []
     for field_name, field_priority in (
-        ("seed_excerpt", 1),
-        ("description", 3),
-        ("abstract_structure", 2),
+        ("seed_excerpt", 3),
+        ("description", 2),
+        ("abstract_structure", 1),
     ):
         candidate_text = re.sub(
             r"\s+",

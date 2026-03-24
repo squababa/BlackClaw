@@ -251,6 +251,61 @@ def format_transmission(
     def _overlap_count(left, right) -> int:
         return len(_alignment_terms(left) & _alignment_terms(right))
 
+    def _looks_generic_display_reference(value) -> bool:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return False
+        lowered = cleaned.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "blog",
+                "guide",
+                "overview",
+                "introduction",
+                "magazine",
+                "marketing",
+                "vendor",
+                "company",
+                "product",
+                "solution",
+            )
+        )
+
+    def _looks_generic_display_snippet(value, context_terms: set[str]) -> bool:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return False
+        lowered = cleaned.lower()
+        snippet_terms = _alignment_terms(cleaned)
+        if snippet_terms and context_terms and len(snippet_terms & context_terms) >= 2:
+            return False
+        return any(
+            phrase in lowered
+            for phrase in (
+                "widely used",
+                "important in",
+                "used in many",
+                "tradeoffs matter",
+                "reduce faults",
+                "various systems",
+                "across many",
+                "across manufacturing",
+                "helps improve",
+            )
+        )
+
+    def _display_snippet_conciseness_score(value) -> int:
+        cleaned = _clean_text(value)
+        if cleaned is None:
+            return 0
+        word_count = len(cleaned.split())
+        if 8 <= word_count <= 28:
+            return 2
+        if 6 <= word_count <= 36:
+            return 1
+        return 0
+
     def _first_evidence_aligned_claim(payload) -> str | None:
         if not isinstance(payload, dict):
             return None
@@ -387,6 +442,14 @@ def format_transmission(
             context_terms |= _alignment_terms(
                 central_mapping_candidate.get("target_variable")
             )
+        evidence_overlap = len(_alignment_terms(evidence_snippet) & context_terms)
+        reference_overlap = len(_alignment_terms(source_reference) & context_terms)
+        claim_snippet_overlap = _overlap_count(claim_text, evidence_snippet)
+        generic_snippet = _looks_generic_display_snippet(
+            evidence_snippet,
+            context_terms=context_terms,
+        )
+        generic_reference = _looks_generic_display_reference(source_reference)
 
         score = 0
         if candidate.get("kind") != "top_level_target":
@@ -412,10 +475,26 @@ def format_transmission(
                 score += 1
 
         if evidence_snippet is not None:
-            score += 1 + min(len(_alignment_terms(evidence_snippet) & context_terms), 3)
+            score += 1 + min(evidence_overlap, 4)
+            score += min(claim_snippet_overlap, 2)
+            score += _display_snippet_conciseness_score(evidence_snippet)
         if source_reference is not None:
-            score += 1 + min(len(_alignment_terms(source_reference) & context_terms), 2)
+            score += 1 + min(reference_overlap, 2)
+        if generic_snippet:
+            score -= 4
+        if generic_reference:
+            score -= 3
         return score
+
+    def _format_mapping_anchor_line(candidate: dict | None) -> str | None:
+        if not isinstance(candidate, dict):
+            return None
+        source_variable = _clean_text(candidate.get("source_variable"))
+        target_variable = _clean_text(candidate.get("target_variable"))
+        claim_text = _clean_text(candidate.get("claim_text"))
+        if source_variable is None or target_variable is None or claim_text is None:
+            return None
+        return f"    ANCHOR: {source_variable} -> {target_variable} | {claim_text}"
 
     def _select_target_display_evidence(
         target_reference_value: str,
@@ -999,6 +1078,15 @@ def format_transmission(
     scholarly_prior_art = _clean_text(scores.get("scholarly_prior_art_summary"))
     evidence_map_text = _format_evidence_map_block(evidence_map_payload)
     mechanism_typing_text = _format_mechanism_typing_block(connection)
+    target_anchor_line = _format_mapping_anchor_line(central_mapping_candidate)
+
+    target_evidence_lines = [
+        "  11) TARGET EVIDENCE",
+        f"    {_evidence_reference_label(target_url)}: {target_url}",
+        f"    EXCERPT: {target_excerpt}",
+    ]
+    if target_anchor_line is not None:
+        target_evidence_lines.append(target_anchor_line)
 
     lines = [
         f" ⚫ BLACKCLAW — TRANSMISSION #{transmission_number:04d}",
@@ -1048,9 +1136,7 @@ def format_transmission(
             f"    {_evidence_reference_label(source_url)}: {source_url}",
             f"    EXCERPT: {source_excerpt}",
             "",
-            "  11) TARGET EVIDENCE",
-            f"    {_evidence_reference_label(target_url)}: {target_url}",
-            f"    EXCERPT: {target_excerpt}",
+            *target_evidence_lines,
             "",
             "  12) SCORES",
             (
