@@ -238,6 +238,32 @@ def test_build_jump_search_query_prefers_compact_llm_query_when_valid(
     assert query == "deficit detector routing quota balancing"
 
 
+def test_is_acceptable_llm_jump_query_accepts_compact_query_with_phrase_anchor() -> None:
+    pattern = {
+        "search_query": "selection pressure variance collapse transition parameter",
+        "pattern_name": "Selection-pressure collapse gating",
+        "abstract_structure": (
+            "selection pressure rises until a collapse transition compresses diversity"
+        ),
+        "measurable_signal": "diversity loss and collapse transition frequency",
+        "control_lever": "tune selection pressure and restart threshold",
+    }
+
+    acceptable = jump._is_acceptable_llm_jump_query(
+        "selection pressure collapse gating",
+        pattern,
+        "Evolutionary Computation",
+        "Technology",
+        jump._build_jump_search_query_heuristic(
+            pattern,
+            "Evolutionary Computation",
+            "Technology",
+        ),
+    )
+
+    assert acceptable is True
+
+
 def test_build_jump_search_query_falls_back_when_llm_query_contains_source_domain(
     monkeypatch,
 ) -> None:
@@ -272,6 +298,40 @@ def test_build_jump_search_query_falls_back_when_llm_query_contains_source_domai
         pattern,
         "Hiring",
         "Operations",
+    )
+
+    assert query == expected
+
+
+def test_build_jump_search_query_falls_back_when_llm_query_is_formal_token_soup(
+    monkeypatch,
+) -> None:
+    pattern = {
+        "search_query": "selection pressure variance collapse transition parameter",
+        "pattern_name": "Selection-pressure collapse gating",
+        "abstract_structure": (
+            "selection pressure rises until a collapse transition compresses diversity"
+        ),
+        "measurable_signal": "diversity loss and collapse transition frequency",
+        "control_lever": "tune selection pressure and restart threshold",
+    }
+    expected = jump._build_jump_search_query_heuristic(
+        pattern,
+        "Evolutionary Computation",
+        "Technology",
+    )
+    monkeypatch.setattr(
+        jump,
+        "_generate_json_with_retry",
+        lambda *_args, **_kwargs: json.dumps(
+            {"query": "N-element simultaneous threshold AND gate alignment verification"}
+        ),
+    )
+
+    query = jump._build_jump_search_query(
+        pattern,
+        "Evolutionary Computation",
+        "Technology",
     )
 
     assert query == expected
