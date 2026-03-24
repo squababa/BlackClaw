@@ -644,10 +644,15 @@ def test_build_repair_prompt_targets_usefulness_alignment_bottleneck() -> None:
 
     assert "Phase 5 usefulness-alignment bottleneck" in repair_prompt
     assert "keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable" in repair_prompt
+    assert "Treat this as a repair-quality pass, not a reframing pass." in repair_prompt
     assert "Reuse the existing confirm-side comparator language instead of paraphrasing it" in repair_prompt
     assert "Reuse the existing falsify-side decision language" in repair_prompt
     assert "Keep `edge_analysis.cheap_test.metric` identical to `test.metric`" in repair_prompt
     assert "Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move" in repair_prompt
+    assert "Preserve the same target-domain process, operator decision, and target claim already grounded elsewhere in the payload." in repair_prompt
+    assert "Reuse the existing `test.confirm` comparator wording as closely as possible" in repair_prompt
+    assert "Reuse the existing `test.falsify` decision wording as closely as possible" in repair_prompt
+    assert "Keep the same operator, the same decision unlocked by the cheap test, and the same measured advantage family already implied by the current metric/comparator." in repair_prompt
     assert "The current cheap test sounds like generic validation rather than an operator move." in repair_prompt
 
 
@@ -666,6 +671,9 @@ def test_build_repair_prompt_marks_mechanism_only_rescue_as_narrow() -> None:
 
     assert "This is a mechanism-only rescue pass." in repair_prompt
     assert "Prefer the smallest wording change that restores direct process anchoring" in repair_prompt
+    assert "Preserve the original target-domain claim/process and repair only the unsupported opening or process wording." in repair_prompt
+    assert "Prefer the smallest valid rewrite to the opening/process phrasing rather than rewriting the whole causal story." in repair_prompt
+    assert "Reuse existing process wording from `mechanism` / `evidence_map.mechanism_assertions` wherever it is already specific and evidence-grounded" in repair_prompt
 
 
 def test_salvage_high_value_candidate_accepts_partial_mechanism_repair_for_replay_style_rescue(
