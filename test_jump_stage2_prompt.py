@@ -101,7 +101,9 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Good actionable levers name one concrete action" in prompt
     assert "Bad actionable levers are vague or advisory" in prompt
     assert "`edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` must stay centered on that same primary claim, process, comparator, and metric." in prompt
+    assert "The first-pass Stage 2 output should already satisfy required-field checks without relying on repair." in prompt
     assert "`edge_analysis.cheap_test.setup` must read like one real operator move on a narrow slice of the target-domain workflow." in prompt
+    assert "`edge_analysis.cheap_test.metric` must stay aligned with `test.metric`" in prompt
     assert "`edge_analysis.cheap_test` must not merely restate `test.data` or say to validate the hypothesis." in prompt
     assert "Good cheap tests sound like real operator moves on the same metric." in prompt
     assert "Bad cheap tests are generic validation suggestions or full restatements of the main test." in prompt
@@ -117,9 +119,13 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Bad direct core target evidence is only adjacent context or broad framing." in prompt
     assert "If `mechanism`, `test.metric`, `test.confirm`, `test.falsify`, `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.edge_if_right`, `edge_analysis.why_missed`, `edge_analysis.expected_asymmetry`, or the first 3 critical evidence snippets are only generic placeholders" in prompt
     assert "keep variable_mapping to exactly those 3" in prompt
+    assert "`mechanism` must open with exactly one target-domain process noun phrase and then follow with one explicit causal chain" in prompt
     assert "Open `mechanism` with the exact target-domain process noun phrase used in the strongest supporting evidence snippet" in prompt
+    assert "Do not use generic similarity wording in `mechanism` such as `mirrors`, `is analogous to`, `resembles`, `similar to`, or `shares dynamics with`." in prompt
     assert "Do not bridge into the process with wording like `operates by`, `works by`, `functions by`, or `acts by`" in prompt
     assert "Do not rename the target-domain process into a broader abstract label" in prompt
+    assert "`edge_analysis.edge_if_right` must name one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed" in prompt
+    assert "Do not use generic novelty or value phrasing in `edge_analysis.edge_if_right` such as `this could be useful`, `this may provide an edge`, `novel insight`, or `valuable perspective`." in prompt
 
 
 def test_phase6_salvage_prompt_stays_selective() -> None:
