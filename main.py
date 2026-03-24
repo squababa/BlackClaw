@@ -100,6 +100,7 @@ GOLDEN_EVALS_PATH = Path(__file__).with_name("golden_eval_pairs.json")
 LATE_STAGE_TIMING_LABELS = {
     "score": "Score",
     "validation": "Validation",
+    "symbolic_guardrail": "Symbolic guardrail",
     "salvage": "Salvage",
     "adversarial": "Adversarial",
     "invariance": "Invariance",
@@ -436,6 +437,31 @@ def _print_credibility_weighting_summary(score_label: str, scores: dict):
         parts.append(f"final_total={float(final_total):.3f}")
 
     print(f"  [{score_label}] Credibility: " + " | ".join(parts))
+
+
+def _print_structural_false_positive_summary(score_label: str, scores: dict):
+    """Render structural false-positive penalties when the early filter activates."""
+    if not isinstance(scores, dict):
+        return
+
+    penalty = float(scores.get("structural_false_positive_penalty") or 0.0)
+    if penalty <= 0.0005:
+        return
+
+    structural_score = scores.get("structural_false_positive_score")
+    score_text = (
+        f"{float(structural_score):.3f}"
+        if isinstance(structural_score, (int, float))
+        else "n/a"
+    )
+    print(
+        f"  [{score_label}] Structural filter: -{penalty:.3f} "
+        f"(score: {score_text})"
+    )
+    for reason in (scores.get("structural_false_positive_reasons") or [])[:4]:
+        cleaned = str(reason).strip()
+        if cleaned:
+            print(f"  [{score_label}] Structural - {cleaned}")
 
 
 def _record_late_stage_timing(
@@ -4448,6 +4474,7 @@ from score import (
 from llm_client import get_llm_client, get_provider_status
 from prediction_evidence import scan_prediction_for_evidence
 from sanitize import check_llm_output
+from symbolic_guardrails import run_symbolic_guardrail
 from transmit import (
     format_transmission,
     format_convergence_transmission,
@@ -5432,6 +5459,13 @@ def _strong_rejection_analysis(candidate: dict | None) -> dict:
     if payload.get("prediction_quality_ok") is False:
         categories.append("prediction_quality")
         rejection_stage = rejection_stage or "prediction_quality"
+
+    if any(
+        failure.startswith("symbolic_guardrail:")
+        for failure in stage_failure_lowers
+    ):
+        categories.append("symbolic_guardrail")
+        rejection_stage = rejection_stage or "symbolic_guardrail"
 
     if any(
         pattern in reason
@@ -7171,6 +7205,7 @@ def _evaluate_connection_candidate(
     _record_late_stage_timing(late_stage_timing, "score", score_started)
     print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
     _print_credibility_weighting_summary(score_label, scores)
+    _print_structural_false_positive_summary(score_label, scores)
     prediction_quality = (
         scores.get("prediction_quality")
         if isinstance(scores.get("prediction_quality"), dict)
@@ -7190,6 +7225,8 @@ def _evaluate_connection_candidate(
     evidence_credibility_ok = True
     evidence_credibility = None
     prediction_quality_ok = True
+    symbolic_guardrail_ok = True
+    symbolic_guardrail_result = None
     adversarial_ok = True
     adversarial_rubric = None
     invariance_ok = True
@@ -7225,6 +7262,14 @@ def _evaluate_connection_candidate(
             "prediction_quality": prediction_quality,
             "claim_provenance": claim_provenance,
             "mechanism_typing": mechanism_typing,
+            "structural_filter": {
+                "score": scores.get("structural_false_positive_score"),
+                "penalty": scores.get("structural_false_positive_penalty"),
+                "reasons": list(scores.get("structural_false_positive_reasons") or []),
+                "reason_codes": list(
+                    scores.get("structural_false_positive_reason_codes") or []
+                ),
+            },
         }
         if not validation_ok:
             print("  [Validation] Rejected hypothesis - skipping transmission")
@@ -7461,6 +7506,39 @@ def _evaluate_connection_candidate(
         and usefulness_ok
         and evidence_credibility_ok
     ):
+        symbolic_started = time.monotonic()
+        symbolic_guardrail_ok, symbolic_guardrail_result = run_symbolic_guardrail(
+            connection
+        )
+        _record_late_stage_timing(
+            late_stage_timing, "symbolic_guardrail", symbolic_started
+        )
+        if validation_log is not None and symbolic_guardrail_result is not None:
+            validation_log["symbolic_guardrail"] = symbolic_guardrail_result
+        if not symbolic_guardrail_ok:
+            print("  [Symbolic] Killed hypothesis - skipping transmission")
+            if symbolic_guardrail_result and symbolic_guardrail_result.get(
+                "failed_constraint"
+            ):
+                print(
+                    "  [Symbolic] - "
+                    f"{symbolic_guardrail_result.get('failed_constraint')}"
+                )
+            if symbolic_guardrail_result and symbolic_guardrail_result.get(
+                "explanation"
+            ):
+                print(
+                    "  [Symbolic] - "
+                    f"{symbolic_guardrail_result.get('explanation')}"
+                )
+
+    if (
+        passes_threshold
+        and validation_ok
+        and usefulness_ok
+        and evidence_credibility_ok
+        and symbolic_guardrail_ok
+    ):
         adversarial_started = time.monotonic()
         adversarial_ok, adversarial_rubric = run_adversarial_rubric(
             connection,
@@ -7480,6 +7558,7 @@ def _evaluate_connection_candidate(
         and validation_ok
         and usefulness_ok
         and evidence_credibility_ok
+        and symbolic_guardrail_ok
         and adversarial_ok
     ):
         invariance_started = time.monotonic()
@@ -7502,6 +7581,7 @@ def _evaluate_connection_candidate(
         and validation_ok
         and usefulness_ok
         and evidence_credibility_ok
+        and symbolic_guardrail_ok
         and adversarial_ok
         and invariance_ok
     ):
@@ -7525,6 +7605,7 @@ def _evaluate_connection_candidate(
         and validation_ok
         and usefulness_ok
         and evidence_credibility_ok
+        and symbolic_guardrail_ok
         and adversarial_ok
         and invariance_ok
         and not boring
@@ -7620,6 +7701,7 @@ def _evaluate_connection_candidate(
         and validation_ok
         and usefulness_ok
         and evidence_credibility_ok
+        and symbolic_guardrail_ok
         and adversarial_ok
         and invariance_ok
         and not boring
@@ -7638,6 +7720,10 @@ def _evaluate_connection_candidate(
     stage_failures: list[str] = []
     if not passes_threshold:
         stage_failures.append(f"below_threshold:{scores['total']:.3f}")
+    for reason in scores.get("structural_false_positive_reasons") or []:
+        cleaned = str(reason).strip()
+        if cleaned:
+            stage_failures.append(f"structural:{cleaned}")
     if not validation_ok:
         stage_failures.extend(
             f"validation:{reason}" for reason in validation_reasons if reason
@@ -7658,6 +7744,13 @@ def _evaluate_connection_candidate(
             and reason not in stage_failures
             and f"validation:{reason}" not in stage_failures
         )
+    if not symbolic_guardrail_ok:
+        symbolic_failure = (
+            (symbolic_guardrail_result or {}).get("failed_constraint")
+            or (symbolic_guardrail_result or {}).get("explanation")
+            or "deterministic quantitative constraint failed"
+        )
+        stage_failures.append(f"symbolic_guardrail:{symbolic_failure}")
     if not adversarial_ok:
         for reason in (adversarial_rubric or {}).get("kill_reasons", []):
             stage_failures.append(f"adversarial:{reason}")
@@ -7722,6 +7815,8 @@ def _evaluate_connection_candidate(
         "usefulness_proof": usefulness_proof,
         "evidence_credibility_ok": evidence_credibility_ok,
         "evidence_credibility": evidence_credibility,
+        "symbolic_guardrail_ok": symbolic_guardrail_ok,
+        "symbolic_guardrail_result": symbolic_guardrail_result,
         "adversarial_ok": adversarial_ok,
         "adversarial_rubric": adversarial_rubric,
         "invariance_ok": invariance_ok,
@@ -8124,6 +8219,8 @@ def _score_store_and_transmit(
             validation=candidate["validation_log"],
             evidence_map=candidate["prepared_connection"].get("evidence_map"),
             mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
+            adversarial_rubric=candidate.get("adversarial_rubric"),
+            invariance_result=candidate.get("invariance_result"),
             parent_transmission_number=strong_rejection_lineage.get(
                 "parent_transmission_number"
             ),

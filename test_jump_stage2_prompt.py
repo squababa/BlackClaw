@@ -559,6 +559,51 @@ def test_apply_mechanism_naming_precision_rewrites_fresh_bridge_openers() -> Non
     assert "operates by" not in rewritten["mechanism"].lower()
 
 
+def test_stage_two_hypothesize_injects_relevant_scars_into_prompt(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    class _DummyEmbedClient:
+        def embed_content(self, text: str) -> list[float]:
+            captured["embedded_text"] = text
+            return [1.0, 0.0]
+
+    def _fake_generate_json(prompt: str, stage_name: str, max_tokens: int) -> str:
+        captured["prompt"] = prompt
+        return json.dumps(_valid_stage2_payload())
+
+    monkeypatch.setattr(jump, "_llm_client", _DummyEmbedClient())
+    monkeypatch.setattr(
+        jump,
+        "get_relevant_scars",
+        lambda target_domain, abstract_structure_embedding, limit=4: [
+            {
+                "constraint_rule": "avoid sequential-only slot search under dense periodic load",
+                "applies_when": "dense periodic schedulers at high utilization",
+                "why_it_failed": "sequential assignment explored too little of the valid modular schedule space",
+                "does_not_apply_when": "sparse schedules where greedy assignment already clears conflicts",
+            }
+        ],
+    )
+    monkeypatch.setattr(jump, "_generate_json_with_retry", _fake_generate_json)
+
+    result = jump._stage_two_hypothesize(
+        "Juggling",
+        "modular collision filter",
+        {
+            "target_domain": "Time-triggered scheduling",
+            "signal": "modular timing constraints align",
+            "evidence": "offset assignment uses collision-avoidance rules",
+        },
+        "Result 1: collision-free offset assignment in periodic task systems",
+    )
+
+    assert result is not None
+    assert captured["embedded_text"] == "modular collision filter"
+    assert "RELEVANT PRIOR FAILURE CONSTRAINTS:" in captured["prompt"]
+    assert "constraint_rule: avoid sequential-only slot search under dense periodic load" in captured["prompt"]
+    assert "why_it_failed: sequential assignment explored too little of the valid modular schedule space" in captured["prompt"]
+
+
 def test_missing_required_fields_requests_repair_for_usefulness_alignment_bottleneck() -> None:
     payload = _valid_stage2_payload()
     payload["edge_analysis"]["cheap_test"]["setup"] = (
