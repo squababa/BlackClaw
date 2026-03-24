@@ -1,8 +1,10 @@
 import hashlib
 import sqlite3
+import sys
 
 import pytest
 
+import main
 import store
 
 
@@ -182,6 +184,13 @@ def _insert_feedback_anchor(
     )
     conn.commit()
     conn.close()
+
+
+def _run_log_scar_cli(monkeypatch, argv: list[str], inputs: list[str]) -> None:
+    answers = iter(inputs)
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    main.main()
 
 
 def test_build_canonical_mechanism_normalizes_and_sorts_fields() -> None:
@@ -696,6 +705,147 @@ def test_save_scar_feedback_supportive_result_records_evidence_without_new_scar(
     )
     assert len(evidence_rows) == 1
     assert evidence_rows[0]["scar_id"] == "scar-feedback-anchor"
+
+
+def test_log_scar_cli_attaches_evidence_to_existing_scar(
+    temp_db,
+    monkeypatch,
+    capsys,
+) -> None:
+    _insert_feedback_anchor(str(temp_db))
+
+    _run_log_scar_cli(
+        monkeypatch,
+        [
+            "main.py",
+            "--log-scar",
+            "--scar-id",
+            "scar-feedback-anchor",
+        ],
+        [
+            "torque transfer collapsed under high load during the same off-axis protocol",
+            "cheap_test_result",
+            "0.9",
+            "n",
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "[ScarFeedback] Logged evidence to scar scar-feedback-anchor under family fam-feedback."
+        in output
+    )
+
+    evidence_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT scar_id, evidence_type, observed_result FROM scar_evidence",
+    )
+    assert evidence_rows == [
+        {
+            "scar_id": "scar-feedback-anchor",
+            "evidence_type": "cheap_test_result",
+            "observed_result": (
+                "torque transfer collapsed under high load during the same off-axis protocol"
+            ),
+        }
+    ]
+
+
+def test_log_scar_cli_family_path_can_create_new_scar(
+    temp_db,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(store, "_embed_scar_retrieval_text", _fake_embedding)
+    monkeypatch.setattr(store, "_embed_scar_mechanism_text", _fake_embedding)
+    _insert_feedback_anchor(str(temp_db))
+
+    _run_log_scar_cli(
+        monkeypatch,
+        [
+            "main.py",
+            "--log-scar",
+            "--family-id",
+            "fam-feedback",
+        ],
+        [
+            (
+                "heat-reactive panel buckled after repeated warmup cycles and the "
+                "posture correction disappeared after the fabric softened"
+            ),
+            "measurement",
+            "0.92",
+            "y",
+            "avoid warmup cycles that soften the panel before off-axis load transfer",
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert "[ScarFeedback] Logged evidence and created new scar " in output
+    assert "under family fam-feedback." in output
+
+    scar_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT id, family_id, constraint_rule, failed_gate FROM scar_registry ORDER BY created_at ASC",
+    )
+    assert len(scar_rows) == 2
+    created_row = scar_rows[-1]
+    assert created_row["family_id"] == "fam-feedback"
+    assert created_row["constraint_rule"] == (
+        "avoid warmup cycles that soften the panel before off-axis load transfer"
+    )
+    assert created_row["failed_gate"] == "operator_feedback"
+
+    evidence_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT scar_id, evidence_type FROM scar_evidence",
+    )
+    assert evidence_rows == [
+        {"scar_id": created_row["id"], "evidence_type": "measurement"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("inputs", "expected_error"),
+    [
+        (
+            ["", "cheap_test_result", "0.9", "n"],
+            "  [!] observed_result is required",
+        ),
+        (
+            ["torque transfer collapsed under high load", "measurement", "1.2", "n"],
+            "  [!] confidence must be between 0.0 and 1.0",
+        ),
+    ],
+)
+def test_log_scar_cli_rejects_invalid_operator_input(
+    temp_db,
+    monkeypatch,
+    capsys,
+    inputs,
+    expected_error,
+) -> None:
+    _insert_feedback_anchor(str(temp_db))
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "main.py",
+            "--log-scar",
+            "--scar-id",
+            "scar-feedback-anchor",
+        ],
+    )
+    answers = iter(inputs)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.main()
+
+    assert excinfo.value.code == 1
+    assert expected_error in capsys.readouterr().out
+    assert _fetchall_dicts(str(temp_db), "SELECT * FROM scar_evidence") == []
 
 
 def test_save_strong_rejection_creates_validation_scar(temp_db, monkeypatch) -> None:
