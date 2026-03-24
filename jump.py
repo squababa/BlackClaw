@@ -672,6 +672,7 @@ GENERIC_QUERY_TOKENS = {
     "systems",
 }
 WEAK_QUERY_TOKENS = {
+    "adjust",
     "credibility",
     "deficiency",
     "directed",
@@ -680,6 +681,7 @@ WEAK_QUERY_TOKENS = {
     "stabilization",
     "stabilizing",
     "threshold",
+    "tune",
     "trigger",
     "triggered",
     "triggers",
@@ -723,6 +725,43 @@ MECHANISM_QUERY_TOKENS = {
     "triage",
     "tuning",
 }
+PHRASE_ANCHOR_TAIL_TOKENS = {
+    "block",
+    "collapse",
+    "cost",
+    "detector",
+    "gating",
+    "latency",
+    "lock-in",
+    "pressure",
+    "rate",
+    "routing",
+    "start",
+    "switching",
+    "threshold",
+}
+QUERY_PHRASE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "under",
+    "until",
+    "via",
+    "where",
+    "with",
+}
 
 
 def _tokenize_query_terms(text: str) -> list[str]:
@@ -738,6 +777,44 @@ def _is_specific_jump_query_token(token: str) -> bool:
     if "-" in token:
         return True
     return len(token) >= 7
+
+
+def _extract_jump_query_phrases(text: str, blocked_tokens: set[str]) -> list[str]:
+    phrases: list[str] = []
+    raw_tokens = _tokenize_query_terms(text)
+    for index in range(len(raw_tokens) - 1):
+        first = raw_tokens[index]
+        second = raw_tokens[index + 1]
+        if (
+            first in blocked_tokens
+            or second in blocked_tokens
+            or first in GENERIC_QUERY_TOKENS
+            or second in GENERIC_QUERY_TOKENS
+        ):
+            continue
+        if first in QUERY_PHRASE_STOPWORDS or second in QUERY_PHRASE_STOPWORDS:
+            continue
+        if len(first) <= 2 or len(second) <= 2:
+            continue
+        if first in WEAK_QUERY_TOKENS and second in WEAK_QUERY_TOKENS:
+            continue
+        if first in WEAK_QUERY_TOKENS:
+            continue
+        if not (
+            second in PHRASE_ANCHOR_TAIL_TOKENS
+            or second in MECHANISM_QUERY_TOKENS
+        ):
+            continue
+        if not (
+            _is_specific_jump_query_token(first)
+            or _is_specific_jump_query_token(second)
+            or second in PHRASE_ANCHOR_TAIL_TOKENS
+        ):
+            continue
+        phrase = f"{first} {second}"
+        if phrase not in phrases:
+            phrases.append(phrase)
+    return phrases
 
 
 def _build_jump_search_query(
@@ -779,11 +856,42 @@ def _build_jump_search_query(
         str(pattern.get("pattern_name", "") or ""),
         str(pattern.get("transfer_rationale", "") or ""),
     ]
+    phrase_field_text = [
+        str(pattern.get("control_lever", "") or ""),
+        str(pattern.get("abstract_structure", "") or ""),
+        str(pattern.get("measurable_signal", "") or ""),
+        str(pattern.get("pattern_name", "") or ""),
+        raw_query,
+    ]
+    phrase_anchors: list[str] = []
+    for text in phrase_field_text:
+        phrase_anchors.extend(_extract_jump_query_phrases(text, blocked_tokens))
     pattern_specific_tokens: list[str] = []
     pattern_tokens: list[str] = []
     for text in pattern_field_text:
         pattern_specific_tokens.extend(_filtered_tokens(text, specific_only=True))
         pattern_tokens.extend(_filtered_tokens(text))
+
+    covered_tokens: set[str] = set()
+
+    def _append_part(part: str) -> None:
+        if part in selected:
+            return
+        selected.append(part)
+        covered_tokens.update(_tokenize_query_terms(part))
+
+    for phrase in phrase_anchors:
+        if len(selected) >= 2:
+            break
+        if covered_tokens.intersection(_tokenize_query_terms(phrase)):
+            continue
+        _append_part(phrase)
+
+    max_parts = 6
+    if len(selected) >= 2:
+        max_parts = 4
+    elif len(selected) == 1:
+        max_parts = 5
 
     for token_group in (
         base_specific_tokens,
@@ -792,11 +900,12 @@ def _build_jump_search_query(
         pattern_tokens,
     ):
         for token in token_group:
-            if token not in selected:
-                selected.append(token)
-            if len(selected) >= 6:
+            if token in covered_tokens:
+                continue
+            _append_part(token)
+            if len(selected) >= max_parts:
                 break
-        if len(selected) >= 6:
+        if len(selected) >= max_parts:
             break
 
     return " ".join(selected[:6]) or raw_query

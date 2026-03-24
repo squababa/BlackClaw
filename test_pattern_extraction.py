@@ -120,10 +120,11 @@ def test_build_jump_search_query_replaces_weak_feedback_style_terms() -> None:
     )
 
     tokens = set(query.split())
+    assert "deficit detector" in query
     assert "feedback" not in tokens
     assert "recruitment" not in tokens
     assert "threshold" not in tokens
-    assert {"deficit", "detector", "routing"} <= tokens
+    assert "routing" in tokens
 
 
 def test_build_jump_search_query_keeps_lock_in_anchor_but_drops_generic_terms() -> None:
@@ -147,10 +148,11 @@ def test_build_jump_search_query_keeps_lock_in_anchor_but_drops_generic_terms() 
     )
 
     tokens = set(query.split())
+    assert "commitment lock-in" in query
+    assert "switching cost" in query
     assert "credibility" not in tokens
     assert "feedback" not in tokens
     assert "threshold" not in tokens
-    assert {"commitment", "lock-in", "switching", "comparator"} <= tokens
 
 
 def test_build_jump_search_query_preserves_concrete_raw_anchor_terms() -> None:
@@ -160,7 +162,47 @@ def test_build_jump_search_query_preserves_concrete_raw_anchor_terms() -> None:
         "Technology",
     )
 
-    assert query == "queue throttling latency"
+    assert query == "queue threshold throttling latency"
+
+
+def test_build_jump_search_query_preserves_selection_pressure_phrase_anchor() -> None:
+    query = jump._build_jump_search_query(
+        {
+            "search_query": "selection pressure variance collapse transition parameter",
+            "pattern_name": "Selection-pressure collapse gating",
+            "abstract_structure": (
+                "selection pressure rises until a collapse transition compresses "
+                "diversity"
+            ),
+            "measurable_signal": "diversity loss and collapse transition frequency",
+            "control_lever": "tune selection pressure and restart threshold",
+        },
+        "Evolutionary Computation",
+        "Technology",
+    )
+
+    assert "selection pressure" in query
+    assert "transition parameter" not in query
+
+
+def test_build_jump_search_query_prefers_mutation_rate_phrase_anchor() -> None:
+    query = jump._build_jump_search_query(
+        {
+            "search_query": "perturbation rate per-element probability mutation scheduled",
+            "pattern_name": "Scheduled mutation-rate annealing",
+            "abstract_structure": (
+                "scheduled perturbation lowers mutation rate after each failed "
+                "adaptation block"
+            ),
+            "measurable_signal": "mutation rate and failed adaptation count",
+            "control_lever": "adjust mutation rate and perturbation schedule",
+        },
+        "Optimization",
+        "Technology",
+    )
+
+    assert "mutation rate" in query
+    assert "scheduled" not in query
 
 
 def test_dive_filters_weak_patterns_and_records_only_weak_diagnostics(
