@@ -2659,6 +2659,7 @@ def lateral_jump(
     if data is None:
         return None
 
+    data["abstract_structure"] = str(pattern.get("abstract_structure", "") or "").strip()
     if target_url:
         data["target_url"] = target_url
     if target_excerpt:

@@ -8124,6 +8124,8 @@ def _score_store_and_transmit(
             validation=candidate["validation_log"],
             evidence_map=candidate["prepared_connection"].get("evidence_map"),
             mechanism_typing=candidate["prepared_connection"].get("mechanism_typing"),
+            adversarial_rubric=candidate.get("adversarial_rubric"),
+            invariance_result=candidate.get("invariance_result"),
             parent_transmission_number=strong_rejection_lineage.get(
                 "parent_transmission_number"
             ),
