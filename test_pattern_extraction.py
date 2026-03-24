@@ -687,6 +687,63 @@ def test_lateral_jump_with_diagnostics_records_stage2_no_connection(monkeypatch)
     assert diagnostic["stage2_failure_hint"] == "returned_no_connection"
 
 
+def test_lateral_jump_with_diagnostics_records_repair_incomplete_fields(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump._tavily,
+        "search",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "title": "Independent target paper",
+                    "content": "concrete signal in another field",
+                    "url": "https://target.test/paper",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_one_detect_with_diagnostics",
+        lambda **_kwargs: (
+            {
+                "target_domain": "Wireless Scheduling",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_two_hypothesize_with_diagnostics",
+        lambda **_kwargs: (
+            None,
+            "repair_incomplete",
+            ["mechanism", "edge_analysis.actionable_lever"],
+        ),
+    )
+
+    connection, diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is None
+    assert diagnostic["stage2_outcome"] == "stage2_no_connection"
+    assert diagnostic["stage2_failure_hint"] == "repair_incomplete"
+    assert diagnostic["stage2_incomplete_fields"] == [
+        "mechanism",
+        "edge_analysis.actionable_lever",
+    ]
+
+
 def test_lateral_jump_with_diagnostics_records_success(monkeypatch) -> None:
     monkeypatch.setattr(
         jump._tavily,
@@ -829,3 +886,39 @@ def test_jump_diagnostics_report_prints_attempts_and_aggregate(temp_db, capsys) 
     assert "total_attempted_patterns\t2" in output
     assert "no_results\t1\t50.0%" in output
     assert "stage2_no_connection\t1\t50.0%" in output
+
+
+def test_jump_diagnostics_report_prints_repair_incomplete_fields(
+    temp_db,
+    capsys,
+) -> None:
+    store.save_exploration(
+        seed_domain="Network Protocols",
+        seed_category="Technology",
+        pattern_diagnostics={
+            "summary": "patterns_ready: kept 1/1 patterns; jump_outcome=patterns_present_but_no_connection",
+            "jump_attempts": [
+                {
+                    "pattern_name": "Pattern C",
+                    "built_jump_query": "query c",
+                    "result_count": 1,
+                    "top_result_titles": ["Target C"],
+                    "stage1_outcome": "detect_signal",
+                    "stage1_target_domain": "Wireless Scheduling",
+                    "stage2_outcome": "stage2_no_connection",
+                    "stage2_failure_hint": "repair_incomplete",
+                    "stage2_incomplete_fields": [
+                        "mechanism",
+                        "edge_analysis.actionable_lever",
+                    ],
+                },
+            ],
+        },
+        transmitted=False,
+    )
+
+    main._print_jump_diagnostics(limit=5)
+    output = capsys.readouterr().out
+
+    assert "failure_hint=repair_incomplete" in output
+    assert "incomplete_fields=mechanism, edge_analysis.actionable_lever" in output

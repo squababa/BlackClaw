@@ -1093,3 +1093,37 @@ def test_salvage_high_value_candidate_adds_benchmark_conversion_guidance(
     assert "Benchmark conversion priority:" in captured["prompt"]
     assert "threshold tuning" in captured["prompt"]
     assert "benchmark_packaging" in captured["prompt"]
+
+
+def test_stage_two_hypothesize_with_diagnostics_returns_incomplete_field_names(
+    monkeypatch,
+) -> None:
+    payload = _valid_stage2_payload()
+    payload["edge_analysis"]["actionable_lever"] = "Investigate further."
+
+    monkeypatch.setattr(jump, "_format_relevant_scars_for_prompt", lambda *_args: "")
+    monkeypatch.setattr(
+        jump,
+        "_generate_json_with_retry",
+        lambda *_args, **_kwargs: json.dumps(payload),
+    )
+    monkeypatch.setattr(
+        jump,
+        "_repair_missing_fields",
+        lambda *_args, **_kwargs: payload,
+    )
+
+    repaired, failure_hint, incomplete_fields = jump._stage_two_hypothesize_with_diagnostics(
+        source_domain="Juggling",
+        abstract_structure="load compared against a queue threshold",
+        stage_one={
+            "target_domain": "Time-triggered scheduling",
+            "signal": "shared structural signal",
+            "evidence": "specific evidence",
+        },
+        search_results="Title: target paper\nconcrete target evidence",
+    )
+
+    assert repaired is None
+    assert failure_hint == "repair_incomplete"
+    assert incomplete_fields == ["edge_analysis.actionable_lever"]

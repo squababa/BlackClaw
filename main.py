@@ -1658,6 +1658,32 @@ def _print_jump_diagnostics(limit: int = 20) -> None:
                 print(
                     f"    target={target_domain} | failure_hint={failure_hint}"
                 )
+            incomplete_fields = (
+                attempt.get("stage2_incomplete_fields")
+                if isinstance(attempt.get("stage2_incomplete_fields"), list)
+                else []
+            )
+            if (
+                stage2_outcome == "stage2_no_connection"
+                and str(attempt.get("stage2_failure_hint") or "").strip()
+                == "repair_incomplete"
+                and incomplete_fields
+            ):
+                shown_fields = [
+                    _truncate_text(field, 32)
+                    for field in incomplete_fields[:6]
+                    if str(field).strip()
+                ]
+                suffix = (
+                    f" (+{len(incomplete_fields) - len(shown_fields)} more)"
+                    if len(incomplete_fields) > len(shown_fields)
+                    else ""
+                )
+                print(
+                    "    incomplete_fields="
+                    + ", ".join(shown_fields)
+                    + suffix
+                )
             titles = attempt.get("top_result_titles")
             if isinstance(titles, list) and titles:
                 print(
