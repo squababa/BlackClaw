@@ -6775,6 +6775,17 @@ def _normalize_scar_evidence_type(value: object) -> str:
     return "manual_review"
 
 
+def _validate_scar_feedback_confidence(value: object) -> float:
+    """Parse operator confidence and require an in-range probability."""
+    try:
+        clean_confidence = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("confidence must be a float between 0.0 and 1.0") from exc
+    if clean_confidence < 0.0 or clean_confidence > 1.0:
+        raise ValueError("confidence must be between 0.0 and 1.0")
+    return clean_confidence
+
+
 def _load_scar_with_conn(
     conn: sqlite3.Connection,
     scar_id: str | None,
@@ -6954,6 +6965,7 @@ def _build_operator_feedback_scar_payload(
     note: str | None,
     feedback_signal: str,
     evidence_type: str,
+    new_constraint_rule: str | None = None,
 ) -> dict | None:
     """Build a new scar payload from operator feedback when a new failure mode appears."""
     applies_when = _clean_optional_text(anchor_row["applies_when"])
@@ -6962,13 +6974,15 @@ def _build_operator_feedback_scar_payload(
     if applies_when is None or target_function is None or mechanism_type is None:
         return None
 
-    constraint_rule = _truncate_inline_text(
-        (
-            f"Do not reuse this {mechanism_type} lever for {target_function} "
-            f"when real-world cheap tests show {observed_result}."
-        ),
-        limit=280,
-    )
+    constraint_rule = _truncate_inline_text(new_constraint_rule, limit=280)
+    if constraint_rule is None:
+        constraint_rule = _truncate_inline_text(
+            (
+                f"Do not reuse this {mechanism_type} lever for {target_function} "
+                f"when real-world cheap tests show {observed_result}."
+            ),
+            limit=280,
+        )
     if not _scar_rule_is_specific_enough(constraint_rule):
         return None
 
@@ -7011,7 +7025,7 @@ def _build_operator_feedback_scar_payload(
         "does_not_apply_when": anchor_row["does_not_apply_when"],
         "repairability": repairability,
         "severity": _derive_scar_severity(repairability, "operator_feedback"),
-        "confidence": max(0.0, min(1.0, float(confidence))),
+        "confidence": confidence,
         "retrieval_weight": retrieval_weight,
         "status": "active",
         "created_at": created_at,
@@ -7044,7 +7058,7 @@ def _insert_scar_evidence_with_conn(
             summary,
             _clean_optional_text(uri),
             observed_result,
-            max(0.0, min(1.0, float(confidence))),
+            confidence,
             _now(),
         ),
     )
@@ -7059,15 +7073,20 @@ def save_scar_feedback(
     family_id: str | None = None,
     uri: str | None = None,
     note: str | None = None,
+    allow_new_scar_creation: bool = True,
+    new_constraint_rule: str | None = None,
 ) -> dict:
     """Attach operator feedback to a scar, or create a new scar for a new failure mode."""
     clean_observed_result = _clean_optional_text(observed_result)
     if clean_observed_result is None:
         raise ValueError("observed_result is required")
 
-    clean_confidence = max(0.0, min(1.0, float(confidence)))
+    clean_confidence = _validate_scar_feedback_confidence(confidence)
     clean_evidence_type = _normalize_scar_evidence_type(evidence_type)
     clean_note = _clean_optional_text(note)
+    clean_scar_id = _clean_optional_text(scar_id)
+    clean_family_id = _clean_optional_text(family_id)
+    clean_new_constraint_rule = _clean_optional_text(new_constraint_rule)
     feedback_signal = _classify_feedback_signal(
         "\n".join(
             part for part in (clean_observed_result, clean_note) if part
@@ -7075,89 +7094,113 @@ def save_scar_feedback(
     )
 
     conn = _connect()
-    anchor_row = _load_scar_with_conn(conn, scar_id)
-    resolved_family_id = _clean_optional_text(family_id)
-    if anchor_row is None and resolved_family_id is None:
-        conn.close()
-        raise ValueError("scar_id or family_id is required")
-    if anchor_row is None:
-        anchor_row = _select_best_scar_for_family_with_conn(conn, resolved_family_id)
-    if anchor_row is None:
-        conn.close()
-        raise ValueError("No scar anchor found for operator feedback")
-    if resolved_family_id is None:
-        resolved_family_id = _clean_optional_text(anchor_row["family_id"])
-    family_row = _load_scar_family_with_conn(conn, resolved_family_id)
+    try:
+        if clean_scar_id is None and clean_family_id is None:
+            raise ValueError("scar_id or family_id is required")
 
-    evidence_id = f"scar-evidence-{uuid.uuid4().hex}"
-    target_scar_id = str(anchor_row["id"])
-    created_scar_id = None
-    action = "attached_to_existing"
+        anchor_row = None
+        if clean_scar_id is not None:
+            anchor_row = _load_scar_with_conn(conn, clean_scar_id)
+            if anchor_row is None:
+                raise ValueError(f"scar_id not found: {clean_scar_id}")
 
-    if (
-        feedback_signal == "failed"
-        and resolved_family_id is not None
-        and not _feedback_matches_existing_scar(
-            clean_observed_result,
-            anchor_row,
-            family_row,
-        )
-    ):
-        new_scar_payload = _build_operator_feedback_scar_payload(
-            anchor_row=anchor_row,
+        family_row = None
+        resolved_family_id = clean_family_id
+        if clean_family_id is not None:
+            family_row = _load_scar_family_with_conn(conn, clean_family_id)
+            if family_row is None:
+                raise ValueError(f"family_id not found: {clean_family_id}")
+            if anchor_row is None:
+                anchor_row = _select_best_scar_for_family_with_conn(conn, clean_family_id)
+                if anchor_row is None:
+                    raise ValueError(
+                        f"No active scar anchor found for family_id: {clean_family_id}"
+                    )
+
+        if anchor_row is None:
+            raise ValueError("scar_id or family_id is required")
+        if resolved_family_id is None:
+            resolved_family_id = _clean_optional_text(anchor_row["family_id"])
+        if family_row is None and resolved_family_id is not None:
+            family_row = _load_scar_family_with_conn(conn, resolved_family_id)
+
+        evidence_id = f"scar-evidence-{uuid.uuid4().hex}"
+        target_scar_id = str(anchor_row["id"])
+        created_scar_id = None
+        action = "attached_to_existing"
+
+        if (
+            allow_new_scar_creation
+            and feedback_signal == "failed"
+            and resolved_family_id is not None
+            and not _feedback_matches_existing_scar(
+                clean_observed_result,
+                anchor_row,
+                family_row,
+            )
+        ):
+            new_scar_payload = _build_operator_feedback_scar_payload(
+                anchor_row=anchor_row,
+                observed_result=clean_observed_result,
+                confidence=clean_confidence,
+                note=clean_note,
+                feedback_signal=feedback_signal,
+                evidence_type=clean_evidence_type,
+                new_constraint_rule=clean_new_constraint_rule,
+            )
+            if new_scar_payload is not None:
+                _persist_scar_with_conn(
+                    conn,
+                    strong_rejection_id=None,
+                    exploration_id=None,
+                    scar_payload=new_scar_payload,
+                    attempt_id=f"operator_feedback:{evidence_id}",
+                    occurrence_outcome="matched",
+                )
+                target_scar_id = str(new_scar_payload["id"])
+                created_scar_id = target_scar_id
+                action = "created_new_scar"
+        elif allow_new_scar_creation and clean_new_constraint_rule is not None:
+            if resolved_family_id is None:
+                raise ValueError(
+                    f"Cannot create a new scar under scar_id {target_scar_id}: no family_id is set"
+                )
+
+        summary = _truncate_inline_text(
+            _first_nonempty_text(clean_note, clean_observed_result),
+            limit=240,
+        ) or clean_observed_result
+        _insert_scar_evidence_with_conn(
+            conn,
+            evidence_id=evidence_id,
+            scar_id=target_scar_id,
+            evidence_type=clean_evidence_type,
+            summary=summary,
             observed_result=clean_observed_result,
             confidence=clean_confidence,
-            note=clean_note,
-            feedback_signal=feedback_signal,
-            evidence_type=clean_evidence_type,
+            uri=uri,
         )
-        if new_scar_payload is not None:
-            _persist_scar_with_conn(
+
+        if created_scar_id is None:
+            _maybe_increase_scar_retrieval_weight_with_conn(
                 conn,
-                strong_rejection_id=None,
-                exploration_id=None,
-                scar_payload=new_scar_payload,
-                attempt_id=f"operator_feedback:{evidence_id}",
-                occurrence_outcome="matched",
+                scar_id=target_scar_id,
+                feedback_signal=feedback_signal,
+                evidence_type=clean_evidence_type,
+                confidence=clean_confidence,
             )
-            target_scar_id = str(new_scar_payload["id"])
-            created_scar_id = target_scar_id
-            action = "created_new_scar"
 
-    summary = _truncate_inline_text(
-        _first_nonempty_text(clean_note, clean_observed_result),
-        limit=240,
-    ) or clean_observed_result
-    _insert_scar_evidence_with_conn(
-        conn,
-        evidence_id=evidence_id,
-        scar_id=target_scar_id,
-        evidence_type=clean_evidence_type,
-        summary=summary,
-        observed_result=clean_observed_result,
-        confidence=clean_confidence,
-        uri=uri,
-    )
-
-    if created_scar_id is None:
-        _maybe_increase_scar_retrieval_weight_with_conn(
-            conn,
-            scar_id=target_scar_id,
-            feedback_signal=feedback_signal,
-            evidence_type=clean_evidence_type,
-            confidence=clean_confidence,
-        )
-
-    conn.commit()
-    conn.close()
-    return {
-        "action": action,
-        "scar_id": target_scar_id,
-        "family_id": resolved_family_id,
-        "created_scar_id": created_scar_id,
-        "evidence_id": evidence_id,
-        "feedback_signal": feedback_signal,
-    }
+        conn.commit()
+        return {
+            "action": action,
+            "scar_id": target_scar_id,
+            "family_id": resolved_family_id,
+            "created_scar_id": created_scar_id,
+            "evidence_id": evidence_id,
+            "feedback_signal": feedback_signal,
+        }
+    finally:
+        conn.close()
 
 
 def build_mechanism_signature(connection: dict) -> str:

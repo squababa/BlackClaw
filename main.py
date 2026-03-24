@@ -28,9 +28,11 @@ from hypothesis_validation import (
 )
 from store import (
     _connect,
+    SCAR_EVIDENCE_TYPES,
     TRANSMISSION_MANUAL_GRADES,
     init_db,
     save_exploration,
+    save_scar_feedback,
     save_transmission,
     is_semantic_duplicate,
     build_mechanism_signature,
@@ -529,6 +531,20 @@ def _late_stage_timing_text(payload: dict | None) -> str:
 def _parse_report_only_args():
     """Parse report-only and seed preflight flags before config-dependent imports."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument(
+        "--log-scar",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--scar-id",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--family-id",
+        type=str,
+        default=None,
+    )
     parser.add_argument(
         "--kill-stats",
         action="store_true",
@@ -1036,6 +1052,149 @@ def _short_timestamp(value: object) -> str:
     if not text:
         return "—"
     return text.replace("T", " ")[:19]
+
+
+def _clean_cli_text(value: object) -> str | None:
+    """Normalize one CLI string into stripped text or None."""
+    text = str(value or "").strip()
+    return text or None
+
+
+def _resolve_log_scar_target(
+    *,
+    scar_id: str | None,
+    family_id: str | None,
+) -> dict:
+    """Validate the requested scar feedback target before prompting."""
+    clean_scar_id = _clean_cli_text(scar_id)
+    clean_family_id = _clean_cli_text(family_id)
+    if (clean_scar_id is None) == (clean_family_id is None):
+        raise ValueError("--log-scar requires exactly one of --scar-id or --family-id")
+
+    conn = _connect()
+    try:
+        if clean_scar_id is not None:
+            scar_row = conn.execute(
+                """
+                SELECT id, family_id
+                FROM scar_registry
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (clean_scar_id,),
+            ).fetchone()
+            if scar_row is None:
+                raise ValueError(f"scar_id not found: {clean_scar_id}")
+            return {
+                "scar_id": str(scar_row["id"]),
+                "family_id": _clean_cli_text(scar_row["family_id"]),
+            }
+
+        family_row = conn.execute(
+            """
+            SELECT id
+            FROM scar_families
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (clean_family_id,),
+        ).fetchone()
+        if family_row is None:
+            raise ValueError(f"family_id not found: {clean_family_id}")
+        scar_row = conn.execute(
+            """
+            SELECT id, family_id
+            FROM scar_registry
+            WHERE family_id = ?
+              AND COALESCE(TRIM(status), 'active') != 'superseded'
+            ORDER BY retrieval_weight DESC, confidence DESC, severity DESC, updated_at DESC, id ASC
+            LIMIT 1
+            """,
+            (clean_family_id,),
+        ).fetchone()
+        if scar_row is None:
+            raise ValueError(f"No active scar anchor found for family_id: {clean_family_id}")
+        return {
+            "scar_id": str(scar_row["id"]),
+            "family_id": str(family_row["id"]),
+        }
+    finally:
+        conn.close()
+
+
+def _prompt_log_scar_feedback() -> dict:
+    """Collect the narrow operator feedback payload for manual scar logging."""
+    observed_result = input("observed_result: ").strip()
+    if not observed_result:
+        raise ValueError("observed_result is required")
+
+    allowed_evidence_types = ", ".join(SCAR_EVIDENCE_TYPES)
+    evidence_type = input(f"evidence_type [{allowed_evidence_types}]: ").strip().lower()
+    if evidence_type not in SCAR_EVIDENCE_TYPES:
+        raise ValueError(f"evidence_type must be one of: {allowed_evidence_types}")
+
+    confidence_text = input("confidence [0.0-1.0]: ").strip()
+    try:
+        confidence = float(confidence_text)
+    except ValueError as exc:
+        raise ValueError("confidence must be a float between 0.0 and 1.0") from exc
+    if confidence < 0.0 or confidence > 1.0:
+        raise ValueError("confidence must be between 0.0 and 1.0")
+
+    introduce_new_constraint = (
+        input("Does this introduce a new constraint? [y/N]: ").strip().lower()
+        in {"y", "yes"}
+    )
+    new_constraint_rule = None
+    if introduce_new_constraint:
+        new_constraint_rule = input("constraint_rule: ").strip()
+        if not new_constraint_rule:
+            raise ValueError(
+                "constraint_rule is required when introducing a new constraint"
+            )
+
+    return {
+        "observed_result": observed_result,
+        "evidence_type": evidence_type,
+        "confidence": confidence,
+        "allow_new_scar_creation": introduce_new_constraint,
+        "new_constraint_rule": new_constraint_rule,
+    }
+
+
+def _run_log_scar_cli(
+    *,
+    scar_id: str | None,
+    family_id: str | None,
+) -> None:
+    """Run the operator scar feedback flow and print a short success summary."""
+    target = _resolve_log_scar_target(scar_id=scar_id, family_id=family_id)
+    prompt_payload = _prompt_log_scar_feedback()
+    if prompt_payload["allow_new_scar_creation"] and target["family_id"] is None:
+        raise ValueError(
+            f"Cannot create a new scar under scar_id {target['scar_id']}: no family_id is set"
+        )
+
+    result = save_scar_feedback(
+        scar_id=_clean_cli_text(scar_id),
+        family_id=_clean_cli_text(family_id),
+        observed_result=prompt_payload["observed_result"],
+        evidence_type=prompt_payload["evidence_type"],
+        confidence=prompt_payload["confidence"],
+        allow_new_scar_creation=prompt_payload["allow_new_scar_creation"],
+        new_constraint_rule=prompt_payload["new_constraint_rule"],
+    )
+
+    family_text = result["family_id"] or "none"
+    if result["created_scar_id"] is not None:
+        print(
+            "[ScarFeedback] Logged evidence and created new scar "
+            f"{result['created_scar_id']} under family {family_text}."
+        )
+        return
+    print(
+        f"[ScarFeedback] Logged evidence to scar {result['scar_id']} under family {family_text}."
+    )
 
 
 def _provenance_failure_detail_text(detail: object, limit: int = 120) -> str:
@@ -4037,6 +4196,15 @@ if __name__ == "__main__":
     ):
         print("  [!] --grade-transmission also requires --grade.")
         sys.exit(1)
+    if (
+        (
+            _early_report_args.scar_id is not None
+            or _early_report_args.family_id is not None
+        )
+        and not _early_report_args.log_scar
+    ):
+        print("  [!] --scar-id and --family-id can only be used with --log-scar.")
+        sys.exit(1)
     if _early_report_args.apply_suggested_grades and _early_report_args.grade is not None:
         print(
             "  [!] --grade cannot be combined with --apply-suggested-grades."
@@ -4061,6 +4229,16 @@ if __name__ == "__main__":
     if _early_strong_rejection_action_count > 1:
         print(
             "  [!] Use only one strong-rejection action at a time: --strong-rejections, --strong-rejection, --replay-strong-rejection, --mark-salvaged, or --dismiss-strong-rejection."
+        )
+        sys.exit(1)
+    if _early_report_args.log_scar and (
+        _early_transmission_review_action_count > 0
+        or _early_prediction_action_count > 0
+        or _early_strong_rejection_action_count > 0
+        or _early_other_report_count > 0
+    ):
+        print(
+            "  [!] --log-scar cannot be combined with report-only, prediction, or strong-rejection actions."
         )
         sys.exit(1)
     if _early_prediction_action_count > 0 and _early_other_report_count > 0:
@@ -4662,6 +4840,23 @@ def parse_args():
         default=None,
         metavar="NUMBER",
         help="Show concise lineage/scar metadata for a transmission and exit",
+    )
+    parser.add_argument(
+        "--log-scar",
+        action="store_true",
+        help="Interactively log operator scar evidence and exit",
+    )
+    parser.add_argument(
+        "--scar-id",
+        type=str,
+        default=None,
+        help="Existing scar id to attach operator scar feedback to",
+    )
+    parser.add_argument(
+        "--family-id",
+        type=str,
+        default=None,
+        help="Existing scar family id to attach operator scar feedback under",
     )
     parser.add_argument(
         "--note",
@@ -8534,6 +8729,8 @@ def run_cycle(
 def main():
     """Main entry point."""
     args = parse_args()
+    clean_scar_id = _clean_cli_text(args.scar_id)
+    clean_family_id = _clean_cli_text(args.family_id)
 
     if args.rut_window <= 0:
         print("  [!] --rut-window requires a positive integer.")
@@ -8604,6 +8801,7 @@ def main():
             args.dismiss_strong_rejection is not None,
         ]
     )
+    scar_feedback_action_count = 1 if args.log_scar else 0
     if args.eval_limit is not None and args.eval_limit <= 0:
         print("  [!] --eval-limit requires a positive integer.")
         sys.exit(1)
@@ -8618,6 +8816,9 @@ def main():
         sys.exit(1)
     if args.grade_transmission is not None and args.grade is None:
         print("  [!] --grade-transmission also requires --grade.")
+        sys.exit(1)
+    if (args.scar_id is not None or args.family_id is not None) and not args.log_scar:
+        print("  [!] --scar-id and --family-id can only be used with --log-scar.")
         sys.exit(1)
     if args.apply_suggested_grades and args.grade is not None:
         print("  [!] --grade cannot be combined with --apply-suggested-grades.")
@@ -8649,11 +8850,42 @@ def main():
             "  [!] Use only one of --strong-rejections, --strong-rejection, --replay-strong-rejection, --strong-rejection-lineage, --backfill-lineage-scars, --populate-scar-summaries, --mark-salvaged, or --dismiss-strong-rejection at a time."
         )
         sys.exit(1)
+    if args.log_scar and (clean_scar_id is None) == (clean_family_id is None):
+        print("  [!] --log-scar requires exactly one of --scar-id or --family-id.")
+        sys.exit(1)
+    if args.log_scar and (
+        feedback_action_count > 0
+        or prediction_action_count > 0
+        or strong_rejection_action_count > 0
+        or args.run_eval
+        or args.export
+        or args.seed is not None
+        or args.dry_run
+        or args.once
+        or args.cooldown != CYCLE_COOLDOWN
+        or args.threshold != TRANSMIT_THRESHOLD
+        or args.max_patterns != MAX_PATTERNS_PER_CYCLE
+    ):
+        print(
+            "  [!] --log-scar cannot be combined with other CLI actions, eval/export, seed selection, or run-loop flags."
+        )
+        sys.exit(1)
     if feedback_action_count > 0 and (
-        prediction_action_count > 0 or strong_rejection_action_count > 0
+        prediction_action_count > 0
+        or strong_rejection_action_count > 0
+        or scar_feedback_action_count > 0
     ):
         print(
             "  [!] Prediction, audit, and strong-rejection actions cannot be combined with transmission review/feedback actions."
+        )
+        sys.exit(1)
+    if scar_feedback_action_count > 0 and (
+        feedback_action_count > 0
+        or prediction_action_count > 0
+        or strong_rejection_action_count > 0
+    ):
+        print(
+            "  [!] --log-scar cannot be combined with transmission review, prediction, audit, or strong-rejection actions."
         )
         sys.exit(1)
     if prediction_action_count > 0 and strong_rejection_action_count > 0:
@@ -8663,6 +8895,7 @@ def main():
         sys.exit(1)
     if args.run_eval and (
         feedback_action_count > 0
+        or scar_feedback_action_count > 0
         or prediction_action_count > 0
         or strong_rejection_action_count > 0
         or args.export
@@ -8810,6 +9043,17 @@ def main():
 
     if args.transmission_lineage is not None:
         if not _print_transmission_lineage(args.transmission_lineage):
+            sys.exit(1)
+        return
+
+    if args.log_scar:
+        try:
+            _run_log_scar_cli(
+                scar_id=clean_scar_id,
+                family_id=clean_family_id,
+            )
+        except ValueError as exc:
+            print(f"  [!] {exc}")
             sys.exit(1)
         return
 
