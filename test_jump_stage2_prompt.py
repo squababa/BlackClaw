@@ -698,6 +698,35 @@ def test_build_repair_prompt_marks_mechanism_assertion_completion_as_narrow() ->
     assert "Use that strongest current target snippet as the default `evidence_snippet` anchor" in repair_prompt
 
 
+def test_build_repair_prompt_marks_edge_if_right_only_completion_as_narrow() -> None:
+    payload = _valid_stage2_payload()
+    payload["edge_analysis"]["edge_if_right"] = "This could be useful."
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["edge_analysis.edge_if_right"],
+        original_data=payload,
+    )
+
+    assert "This is an `edge_analysis.edge_if_right`-only completion pass." in repair_prompt
+    assert (
+        "prefer returning only `{\"edge_analysis\": {\"edge_if_right\": ...}}` "
+        "instead of rewriting the full candidate."
+    ) in repair_prompt
+    assert "Write exactly one operator, one decision change unlocked by confirmation" in repair_prompt
+    assert "Do not add a new stakeholder, KPI, roadmap claim, or strategic narrative." in repair_prompt
+    assert (
+        "Reuse the current `edge_analysis.primary_operator` wording directly: "
+        "`real-time scheduling engineer`."
+    ) in repair_prompt
+    assert (
+        "Keep `edge_analysis.edge_if_right` tied to the current metric and decision "
+        "boundary: `collision rate per hyperperiod`."
+    ) in repair_prompt
+    assert "Reuse the current cheap-test / confirm-side wording as closely as possible" in repair_prompt
+
+
 def test_salvage_high_value_candidate_accepts_partial_mechanism_repair_for_replay_style_rescue(
     monkeypatch,
 ) -> None:
@@ -860,6 +889,51 @@ def test_apply_mechanism_naming_precision_rewrites_result_first_common_cause_ope
     assert "when redundant subsystems share" not in rewritten["mechanism"].lower()
     assert passed is False
     assert "mechanism must name a specific process" not in reasons
+
+
+def test_apply_mechanism_naming_precision_prefers_annealing_process_anchor() -> None:
+    payload = _valid_stage2_payload()
+    payload["source_domain"] = "Materials engineering"
+    payload["target_domain"] = "Post-weld heat treatment and residual stress management"
+    payload["mechanism"] = (
+        "Residual stress redistribution reduces crack initiation by allowing "
+        "plastic accommodation during thermal exposure."
+    )
+    payload["prediction"]["observable"] = (
+        "crack initiation rate after post-weld heat treatment"
+    )
+    payload["test"]["metric"] = "crack initiation rate"
+    payload["test"]["confirm"] = (
+        "crack initiation rate is lower after post-weld heat-treatment annealing "
+        "than without annealing"
+    )
+    payload["test"]["falsify"] = (
+        "crack initiation rate does not fall after post-weld heat-treatment annealing"
+    )
+    payload["evidence_map"]["mechanism_assertions"][0] = {
+        "mechanism_claim": (
+            "Post-weld heat-treatment annealing redistributes residual stress "
+            "through creep-assisted stress relaxation."
+        ),
+        "evidence_snippet": (
+            "Post-weld heat-treatment annealing redistributes residual stress "
+            "through creep-assisted stress relaxation, reducing crack initiation "
+            "in welded joints."
+        ),
+        "source_reference": "Residual stress relief during post-weld heat treatment",
+    }
+
+    passed_before, reasons_before = validate_hypothesis(payload)
+    rewritten = jump._apply_mechanism_naming_precision(payload)
+    passed_after, reasons_after = validate_hypothesis(rewritten)
+
+    assert passed_before is False
+    assert "mechanism must name a specific process" in reasons_before
+    assert rewritten["mechanism"].startswith(
+        "Post-weld heat-treatment annealing redistributes residual stress"
+    )
+    assert passed_after is False
+    assert "mechanism must name a specific process" not in reasons_after
 
 
 def test_apply_mechanism_naming_precision_rewrites_bridge_opening_from_current_mechanism() -> None:

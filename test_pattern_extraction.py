@@ -1030,6 +1030,195 @@ def test_lateral_jump_with_diagnostics_prefers_evidence_map_core_target_anchor(
     )
 
 
+def test_lateral_jump_with_diagnostics_sets_aligned_source_display_fields(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump._tavily,
+        "search",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "title": "Industrial safety overview",
+                    "content": (
+                        "Safety systems reduce faults across manufacturing plants."
+                    ),
+                    "url": "https://magazine.test/safety-overview",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_one_detect_with_diagnostics",
+        lambda **_kwargs: (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        jump,
+        "_stage_two_hypothesize_with_diagnostics",
+        lambda **_kwargs: (
+            _safety_interlock_jump_payload(
+                {
+                    "variable_mappings": [
+                        {
+                            "source_variable": "masking threshold",
+                            "target_variable": "diagnostic state comparison",
+                            "claim": "Specific connection",
+                            "evidence_snippet": "Specific target evidence.",
+                            "source_reference": "https://journal.test/interlock-paper",
+                            "support_level": "direct",
+                        },
+                        {
+                            "source_variable": "bit allocation",
+                            "target_variable": "actuation suppression rate",
+                            "claim": "Specific connection",
+                            "evidence_snippet": "Specific target evidence.",
+                            "source_reference": "https://journal.test/interlock-paper",
+                            "support_level": "direct",
+                        },
+                    ],
+                    "mechanism_assertions": [],
+                }
+            ),
+            None,
+        ),
+    )
+
+    connection, _diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Masking-threshold allocation control",
+            "description": (
+                "Masking threshold analysis lowers bit allocation for bands that "
+                "stay below the audibility threshold."
+            ),
+            "abstract_structure": (
+                "Signal energy shifts the masking threshold and suppresses coding "
+                "precision in masked neighboring bands."
+            ),
+            "measurable_signal": "masking threshold and bit allocation",
+            "control_lever": "adjust masking threshold and bit allocation",
+            "search_query": "queue threshold throttling latency",
+            "seed_url": "https://source.test/perceptual-audio-coding",
+            "seed_excerpt": "Audio compression is widely used in digital media.",
+        },
+        "Psychoacoustics",
+        "Science",
+    )
+
+    assert connection is not None
+    assert connection["seed_url"] == "https://source.test/perceptual-audio-coding"
+    assert connection["source_url"] == "https://source.test/perceptual-audio-coding"
+    assert (
+        connection["seed_excerpt"]
+        == "Masking threshold analysis lowers bit allocation for bands that "
+        "stay below the audibility threshold."
+    )
+    assert connection["source_excerpt"] == connection["seed_excerpt"]
+
+
+def test_evaluate_connection_candidate_prefers_connection_source_display_fields_for_late_gate(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        main,
+        "score_connection",
+        lambda *_args, **_kwargs: {
+            "total": 0.92,
+            "depth": 0.8,
+            "distance": 0.7,
+            "novelty": 0.8,
+            "prediction_quality": {"passes": True, "score": 0.9},
+            "structural_false_positive_reasons": [],
+            "structural_false_positive_reason_codes": [],
+        },
+    )
+    monkeypatch.setattr(main, "validate_hypothesis", lambda _connection: (True, []))
+    monkeypatch.setattr(
+        main,
+        "summarize_evidence_map_provenance",
+        lambda _payload: {
+            "passes": True,
+            "evidence_map": {"variable_mappings": [], "mechanism_assertions": []},
+            "issues": [],
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_evaluate_usefulness_proof_gate",
+        lambda **_kwargs: {"passes": True, "reasons": []},
+    )
+
+    def _capture_gate(**kwargs):
+        captured.update(kwargs)
+        return {"passes": False, "reasons": ["test-stop"]}
+
+    monkeypatch.setattr(main, "_evaluate_transmit_evidence_gate", _capture_gate)
+
+    candidate = main._evaluate_connection_candidate(
+        score_label="SourceDisplayFields",
+        source_domain="Psychoacoustics",
+        target_domain="Perceptual Audio Coding",
+        patterns_payload=[
+            {
+                "seed_url": "https://source.test/generic-audio-overview",
+                "seed_excerpt": "Audio compression is widely used in digital media.",
+            }
+        ],
+        connection={
+            "connection": "Specific connection",
+            "mechanism": "Specific mechanism",
+            "mechanism_type": "threshold_switching",
+            "mechanism_type_confidence": 0.8,
+            "secondary_mechanism_types": [],
+            "prediction": {
+                "observable": "per-band bit allocation",
+                "time_horizon": "during one encoding pass",
+                "direction": "lower",
+                "magnitude": "lower",
+                "confidence": "medium",
+                "falsification_condition": "no change",
+                "utility_rationale": "improve coding efficiency",
+                "who_benefits": "codec engineers",
+            },
+            "test": {
+                "data": "codec benchmark",
+                "metric": "per-band bit allocation",
+                "confirm": "per-band bit allocation falls",
+                "falsify": "per-band bit allocation does not change",
+            },
+            "assumptions": ["a"],
+            "boundary_conditions": "b",
+            "target_url": "https://target.test/paper",
+            "target_excerpt": "target excerpt",
+            "seed_url": "https://source.test/perceptual-audio-coding",
+            "seed_excerpt": (
+                "Masking threshold analysis lowers bit allocation for bands that "
+                "stay below the audibility threshold."
+            ),
+            "evidence_map": {"variable_mappings": [], "mechanism_assertions": []},
+        },
+        threshold=0.6,
+        dedup_enabled=False,
+    )
+
+    assert candidate["should_transmit"] is False
+    assert captured["seed_url"] == "https://source.test/perceptual-audio-coding"
+    assert (
+        captured["seed_excerpt"]
+        == "Masking threshold analysis lowers bit allocation for bands that "
+        "stay below the audibility threshold."
+    )
+
+
 def test_jump_diagnostics_report_prints_attempts_and_aggregate(temp_db, capsys) -> None:
     store.save_exploration(
         seed_domain="Network Protocols",
