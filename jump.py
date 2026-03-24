@@ -2888,12 +2888,59 @@ def _repair_guidance_for_missing_fields(
             "- Rewrite `edge_analysis.expected_asymmetry` so it explains why the lever is plausibly underused rather than already standard target-domain wisdom. Reject `widely known`, `standard practice`, or generic novelty claims."
         )
     if "evidence_map.variable_mappings" in missing_fields:
+        if missing_field_set == {"evidence_map.variable_mappings"}:
+            guidance.append(
+                "- This is a variable-mapping completion pass. Keep `connection`, `mechanism`, `prediction`, `test`, `variable_mapping`, `edge_analysis`, and `evidence_map.mechanism_assertions` stable."
+            )
+            guidance.append(
+                "- If only this field is missing, prefer returning only `{\"evidence_map\": {\"variable_mappings\": [...]}}` instead of rewriting the full candidate."
+            )
         guidance.append(
             "- Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause with concrete overlapping terms from the claim or mapped variable. Do not use vague background snippets."
         )
         guidance.append(
             "- Repair the critical mappings before touching non-critical ones. Keep exactly 3 critical mappings if support is thin, and make those the first 3 `variable_mapping` plus `evidence_map.variable_mappings` entries."
         )
+        guidance.append(
+            "- Complete the missing critical variable mappings from the current payload one supported entry at a time. Reuse the existing source-variable / target-variable pairs, target claim wording, and target evidence wording wherever they are already grounded."
+        )
+        guidance.append(
+            "- Prioritize only the first 3 critical mappings. Do not invent extra mappings, broaden the mechanism, or expand beyond the current grounded claim."
+        )
+        current_variable_mapping = (
+            original_data.get("variable_mapping")
+            if isinstance(original_data, dict) and isinstance(original_data.get("variable_mapping"), dict)
+            else {}
+        )
+        current_mapping_entries: dict[str, dict] = {}
+        for entry in evidence_map.get("variable_mappings", []):
+            if not isinstance(entry, dict):
+                continue
+            source_variable = str(entry.get("source_variable") or "").strip()
+            target_variable = str(entry.get("target_variable") or "").strip()
+            if not source_variable or not target_variable:
+                continue
+            current_mapping_entries[f"{source_variable} -> {target_variable}"] = entry
+        for source_variable, target_variable in list(current_variable_mapping.items())[:3]:
+            source_text = str(source_variable).strip()
+            target_text = str(target_variable).strip()
+            if not source_text or not target_text:
+                continue
+            pair = f"{source_text} -> {target_text}"
+            guidance.append(
+                f"- Keep the critical pair wording exactly aligned to the current payload: `{pair}`."
+            )
+            current_entry = current_mapping_entries.get(pair) or {}
+            current_claim = str(current_entry.get("claim") or "").strip()
+            current_snippet = str(current_entry.get("evidence_snippet") or "").strip()
+            if current_claim:
+                guidance.append(
+                    f"- Reuse this current mapping claim as the starting point and narrow it only if needed: `{current_claim}`."
+                )
+            if current_snippet:
+                guidance.append(
+                    f"- Reuse this current evidence wording where possible and keep the repaired claim as a narrow paraphrase of it: `{current_snippet}`."
+                )
         for failure in (repair_context.get("critical_failures") or [])[:3]:
             if not isinstance(failure, dict):
                 continue

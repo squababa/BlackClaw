@@ -728,6 +728,28 @@ def test_build_repair_prompt_marks_mechanism_assertion_completion_as_narrow() ->
     assert "Use that strongest current target snippet as the default `evidence_snippet` anchor" in repair_prompt
 
 
+def test_build_repair_prompt_marks_variable_mapping_completion_as_narrow() -> None:
+    payload = _valid_stage2_payload()
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["evidence_map.variable_mappings"],
+        original_data=payload,
+    )
+
+    assert "This is a variable-mapping completion pass." in repair_prompt
+    assert (
+        "prefer returning only `{\"evidence_map\": {\"variable_mappings\": [...]}}` "
+        "instead of rewriting the full candidate."
+    ) in repair_prompt
+    assert "Complete the missing critical variable mappings from the current payload one supported entry at a time." in repair_prompt
+    assert "Prioritize only the first 3 critical mappings." in repair_prompt
+    assert "Keep the critical pair wording exactly aligned to the current payload: `throw_offset -> task_offset`." in repair_prompt
+    assert "Reuse this current mapping claim as the starting point and narrow it only if needed: `Periodic tasks are assigned offsets within a shared hyperperiod.`." in repair_prompt
+    assert "Reuse this current evidence wording where possible and keep the repaired claim as a narrow paraphrase of it: `Tasks are assigned offsets within the hyperperiod to determine activation times.`." in repair_prompt
+
+
 def test_build_repair_prompt_marks_edge_if_right_only_completion_as_narrow() -> None:
     payload = _valid_stage2_payload()
     payload["edge_analysis"]["edge_if_right"] = "This could be useful."
