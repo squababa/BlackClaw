@@ -627,6 +627,75 @@ def init_db():
             notes TEXT,
             FOREIGN KEY (exploration_id) REFERENCES explorations(id)
         );
+        CREATE TABLE IF NOT EXISTS scar_families (
+            id TEXT PRIMARY KEY,
+            mechanism_type TEXT NOT NULL,
+            target_function TEXT NOT NULL,
+            canonical_text TEXT NOT NULL,
+            canonical_fingerprint TEXT NOT NULL UNIQUE,
+            summary_constraint_rule TEXT NOT NULL,
+            summary_applies_when TEXT NOT NULL,
+            summary_why_it_fails TEXT NOT NULL,
+            scar_count INTEGER NOT NULL DEFAULT 0,
+            fundamental_count INTEGER NOT NULL DEFAULT 0,
+            repairable_count INTEGER NOT NULL DEFAULT 0,
+            avg_confidence REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS scar_registry (
+            id TEXT PRIMARY KEY,
+            family_id TEXT,
+            target_domain TEXT NOT NULL,
+            target_focus TEXT,
+            target_category TEXT,
+            source_domain TEXT NOT NULL,
+            source_category TEXT,
+            seed_pattern_name TEXT,
+            abstract_structure TEXT NOT NULL,
+            target_function TEXT NOT NULL,
+            mechanism_type TEXT NOT NULL,
+            mechanism_canonical_text TEXT NOT NULL,
+            mechanism_fingerprint TEXT NOT NULL,
+            scar_type TEXT NOT NULL,
+            failed_gate TEXT NOT NULL,
+            failed_assumption TEXT,
+            broken_invariant TEXT,
+            observed_result TEXT,
+            cheap_test_context TEXT NOT NULL,
+            constraint_rule TEXT NOT NULL,
+            applies_when TEXT NOT NULL,
+            does_not_apply_when TEXT,
+            repairability TEXT NOT NULL,
+            severity INTEGER NOT NULL,
+            confidence REAL NOT NULL,
+            retrieval_weight REAL NOT NULL DEFAULT 1.0,
+            status TEXT NOT NULL DEFAULT "active",
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (family_id) REFERENCES scar_families(id)
+        );
+        CREATE TABLE IF NOT EXISTS scar_vectors (
+            scar_id TEXT NOT NULL,
+            vector_kind TEXT NOT NULL,
+            embedding_model TEXT NOT NULL,
+            embedding_version TEXT NOT NULL,
+            dimension INTEGER NOT NULL,
+            vector_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (scar_id, vector_kind, embedding_model, embedding_version),
+            FOREIGN KEY (scar_id) REFERENCES scar_registry(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS scar_occurrences (
+            id TEXT PRIMARY KEY,
+            scar_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            exploration_id TEXT,
+            similarity REAL,
+            outcome TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (scar_id) REFERENCES scar_registry(id) ON DELETE CASCADE
+        );
         CREATE INDEX IF NOT EXISTS idx_explorations_timestamp
             ON explorations(timestamp);
         CREATE INDEX IF NOT EXISTS idx_explorations_seed
@@ -702,6 +771,16 @@ def init_db():
             ON strong_rejections(total_score);
         CREATE INDEX IF NOT EXISTS idx_strong_rejections_status
             ON strong_rejections(status);
+        CREATE INDEX IF NOT EXISTS idx_scar_registry_target_domain
+            ON scar_registry(target_domain);
+        CREATE INDEX IF NOT EXISTS idx_scar_registry_mechanism_type
+            ON scar_registry(mechanism_type);
+        CREATE INDEX IF NOT EXISTS idx_scar_registry_status
+            ON scar_registry(status);
+        CREATE INDEX IF NOT EXISTS idx_scar_registry_family_id
+            ON scar_registry(family_id);
+        CREATE INDEX IF NOT EXISTS idx_scar_occurrences_scar_id
+            ON scar_occurrences(scar_id);
     """)
     # Migration for older DB files created before chain_path existed.
     existing_columns = {
@@ -5608,6 +5687,46 @@ def _canonical_text(value) -> str:
     return str(value).strip()
 
 
+def build_canonical_mechanism(payload: dict) -> str:
+    """Serialize the mechanism core into a deterministic canonical string."""
+
+    def _normalize_text(value: object) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
+    def _normalize_value(value):
+        if isinstance(value, dict):
+            return {
+                _normalize_text(key): _normalize_value(nested)
+                for key, nested in sorted(
+                    value.items(),
+                    key=lambda item: _normalize_text(item[0]),
+                )
+            }
+        if isinstance(value, list):
+            return [_normalize_value(item) for item in value]
+        return _normalize_text(value)
+
+    raw_variable_mapping = payload.get("variable_mapping") or {}
+    normalized_mapping: dict[str, object]
+    if isinstance(raw_variable_mapping, dict):
+        normalized_mapping = {
+            _normalize_text(key): _normalize_value(value)
+            for key, value in sorted(
+                raw_variable_mapping.items(),
+                key=lambda item: _normalize_text(item[0]),
+            )
+        }
+    else:
+        normalized_mapping = {"value": _normalize_value(raw_variable_mapping)}
+
+    canonical_payload = {
+        "mechanism_type": _normalize_text(payload.get("mechanism_type")),
+        "target_function": _normalize_text(payload.get("target_function")),
+        "variable_mapping": normalized_mapping,
+    }
+    return json.dumps(canonical_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def build_mechanism_signature(connection: dict) -> str:
     """
     Build a signature string from mechanism + variable_mapping + prediction.
@@ -5657,6 +5776,140 @@ def _signature_similarity(text_a: str, text_b: str) -> float:
     if embedded is not None:
         return embedded
     return _jaccard_similarity(text_a, text_b)
+
+
+def get_relevant_scars(
+    target_domain: str,
+    abstract_structure_embedding: list[float],
+    limit: int = 4,
+) -> list[dict]:
+    """Retrieve compressed target-domain scars ranked for prompt injection."""
+    clean_target_domain = _clean_optional_text(target_domain)
+    if clean_target_domain is None or not abstract_structure_embedding or limit <= 0:
+        return []
+
+    conn = _connect()
+    rows = conn.execute(
+        """
+        SELECT
+            sr.id,
+            sr.family_id,
+            sr.constraint_rule,
+            sr.applies_when,
+            sr.does_not_apply_when,
+            sr.failed_assumption,
+            sr.broken_invariant,
+            sr.observed_result,
+            sr.failed_gate,
+            sr.repairability,
+            sr.updated_at,
+            sr.created_at,
+            sf.summary_why_it_fails,
+            sv.vector_json,
+            COALESCE(occ.occurrence_count, 0) AS occurrence_count
+        FROM scar_registry sr
+        LEFT JOIN scar_families sf
+            ON sf.id = sr.family_id
+        LEFT JOIN scar_vectors sv
+            ON sv.scar_id = sr.id
+           AND sv.vector_kind = 'retrieval'
+        LEFT JOIN (
+            SELECT scar_id, COUNT(*) AS occurrence_count
+            FROM scar_occurrences
+            GROUP BY scar_id
+        ) occ
+            ON occ.scar_id = sr.id
+        WHERE sr.target_domain = ?
+          AND COALESCE(TRIM(sr.status), 'active') != 'superseded'
+          AND sv.vector_json IS NOT NULL
+          AND TRIM(sv.vector_json) != ''
+        """,
+        (clean_target_domain,),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return []
+
+    max_frequency = max(int(row["occurrence_count"] or 0) for row in rows) or 1
+    now = datetime.now(timezone.utc)
+    ranked: list[dict] = []
+    for row in rows:
+        try:
+            stored_embedding = json.loads(row["vector_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(stored_embedding, list) or not stored_embedding:
+            continue
+
+        semantic_similarity = max(
+            0.0,
+            min(1.0, float(compute_similarity(abstract_structure_embedding, stored_embedding))),
+        )
+        fundamental_failure_score = 1.0 if (row["repairability"] or "").strip().lower() == "fundamental" else 0.0
+        frequency_score = min(
+            1.0,
+            float(int(row["occurrence_count"] or 0)) / float(max_frequency),
+        )
+
+        updated_at = _clean_optional_text(row["updated_at"]) or _clean_optional_text(row["created_at"])
+        recency_score = 0.0
+        if updated_at is not None:
+            candidate = updated_at[:-1] + "+00:00" if updated_at.endswith("Z") else updated_at
+            try:
+                parsed = datetime.fromisoformat(candidate)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                days_old = max(
+                    0.0,
+                    (now - parsed.astimezone(timezone.utc)).total_seconds() / 86400.0,
+                )
+                recency_score = math.exp(-days_old / 30.0)
+            except ValueError:
+                recency_score = 0.0
+
+        blended_score = (
+            (semantic_similarity * 0.75)
+            + (fundamental_failure_score * 0.10)
+            + (frequency_score * 0.10)
+            + (recency_score * 0.05)
+        )
+
+        why_it_failed = (
+            _clean_optional_text(row["summary_why_it_fails"])
+            or _clean_optional_text(row["broken_invariant"])
+            or _clean_optional_text(row["observed_result"])
+            or _clean_optional_text(row["failed_assumption"])
+            or _clean_optional_text(row["failed_gate"])
+            or "prior cheap test failed"
+        )
+
+        ranked.append(
+            {
+                "family_key": _clean_optional_text(row["family_id"]) or _clean_optional_text(row["id"]),
+                "score": blended_score,
+                "scar": {
+                    "constraint_rule": _clean_optional_text(row["constraint_rule"]) or "",
+                    "applies_when": _clean_optional_text(row["applies_when"]) or "",
+                    "why_it_failed": why_it_failed,
+                    "does_not_apply_when": _clean_optional_text(row["does_not_apply_when"]),
+                },
+            }
+        )
+
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+
+    results: list[dict] = []
+    seen_families: set[str] = set()
+    for item in ranked:
+        family_key = item["family_key"]
+        if family_key in seen_families:
+            continue
+        seen_families.add(family_key)
+        results.append(item["scar"])
+        if len(results) >= int(limit):
+            break
+    return results
 
 
 def _cluster_id_for_row(row: sqlite3.Row) -> str:

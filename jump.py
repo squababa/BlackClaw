@@ -20,7 +20,7 @@ from hypothesis_validation import (
 )
 from llm_client import get_llm_client
 from sanitize import sanitize, check_llm_output
-from store import increment_tavily_calls, increment_llm_calls
+from store import get_relevant_scars, increment_tavily_calls, increment_llm_calls
 from debug_log import log_gemini_output
 
 _llm_client = get_llm_client()
@@ -61,9 +61,12 @@ STAGE 1 DETECTION JSON:
 {stage_one_json}
 SEARCH RESULTS:
 {search_results}
+RELEVANT PRIOR FAILURE CONSTRAINTS:
+{relevant_scars}
 
 Requirements:
 - Keep target_domain aligned with Stage 1.
+- If RELEVANT PRIOR FAILURE CONSTRAINTS are provided, treat them as hard cautionary constraints. Do not repeat the same failure mode unless the retrieved target evidence specifically overcomes it.
 - Lock onto exactly one primary target-domain causal claim before elaborating the comparison.
 - The primary target-domain claim must be no broader than the retrieved target-domain evidence. Do not generalize beyond what the target snippets directly support.
 - If the search results support only a narrow, local, conditional, or partial version of the claim, make that narrower version the core claim.
@@ -2492,17 +2495,59 @@ def _stage_one_detect(
     return data
 
 
+def _format_relevant_scars_for_prompt(
+    target_domain: str,
+    abstract_structure: str,
+    limit: int = 4,
+) -> str:
+    clean_target = str(target_domain or "").strip()
+    clean_abstract = str(abstract_structure or "").strip()
+    if not clean_target or not clean_abstract:
+        return "None."
+    try:
+        abstract_structure_embedding = _llm_client.embed_content(clean_abstract)
+        scars = get_relevant_scars(
+            clean_target,
+            abstract_structure_embedding,
+            limit=limit,
+        )
+    except Exception:
+        return "None."
+    if not scars:
+        return "None."
+
+    blocks = []
+    for index, scar in enumerate(scars, start=1):
+        blocks.append(
+            "\n".join(
+                [
+                    f"{index}. constraint_rule: {str(scar.get('constraint_rule') or '').strip()}",
+                    f"applies_when: {str(scar.get('applies_when') or '').strip()}",
+                    f"why_it_failed: {str(scar.get('why_it_failed') or '').strip()}",
+                    "does_not_apply_when: "
+                    f"{str(scar.get('does_not_apply_when') or 'n/a').strip()}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
+
+
 def _stage_two_hypothesize(
     source_domain: str,
     abstract_structure: str,
     stage_one: dict,
     search_results: str,
 ) -> dict | None:
+    relevant_scars = _format_relevant_scars_for_prompt(
+        str(stage_one.get("target_domain") or ""),
+        abstract_structure,
+    )
     prompt = HYPOTHESIZE_PROMPT.format(
         source_domain=source_domain,
         abstract_structure=abstract_structure,
         stage_one_json=json.dumps(stage_one, ensure_ascii=False, sort_keys=True),
         search_results=search_results,
+        relevant_scars=relevant_scars,
         mechanism_vocab=MECHANISM_VOCAB_TEXT,
     )
     extracted_json = _generate_json_with_retry(prompt, "stage2_hypothesize", 4096)
