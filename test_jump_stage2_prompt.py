@@ -1,6 +1,7 @@
 import json
 
 import jump
+import transmit
 from hypothesis_validation import validate_hypothesis
 
 
@@ -96,6 +97,9 @@ def _valid_stage2_payload() -> dict:
 def test_hypothesize_prompt_has_stronger_examples() -> None:
     prompt = jump.HYPOTHESIZE_PROMPT
 
+    assert "Final candidate wording must read like a concise operator briefing, not an analogy, essay, or literature summary." in prompt
+    assert "Prefer short, direct sentences. Prefer explicit operators, metrics, comparators, and decisions over abstract connective filler." in prompt
+    assert "Reduce analogy-style phrasing, decorative transitions, and explanatory padding." in prompt
     assert "Good problem statements name one concrete hidden failure mode" in prompt
     assert "`edge_analysis.problem_statement` must describe one hidden or underexploited operational problem, not a broad summary of the field." in prompt
     assert "Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode on the same observable or metric already used in `prediction` / `test`." in prompt
@@ -131,6 +135,8 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "`edge_analysis.edge_if_right` must name exactly one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed" in prompt
     assert "`edge_analysis.edge_if_right` must say what the operator will do differently if the cheap test confirms" in prompt
     assert "Do not use generic novelty or value phrasing in `edge_analysis.edge_if_right` such as `this could be useful`, `this may provide an edge`, `novel insight`, or `valuable perspective`." in prompt
+    assert "Package the edge layer like an operator handoff: one hidden problem, one concrete lever, one cheap test, and one decision change if the cheap test confirms." in prompt
+    assert "Avoid analogy-heavy framing, literature-summary phrasing, and padded connective filler." in prompt
 
 
 def test_phase6_salvage_prompt_stays_selective() -> None:
@@ -145,9 +151,23 @@ def test_phase6_salvage_prompt_stays_selective() -> None:
         "`edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together"
         in prompt
     )
+    assert "Rewrite toward concise operator-briefing prose: short direct sentences, explicit operator/metric/decision language, minimal connective filler." in prompt
+    assert "Remove analogy-heavy phrasing, literature-summary framing, and decorative explanation." in prompt
     assert "reuse the same observable, metric, comparator, and operator-decision language" in prompt
     assert "package `edge_analysis.problem_statement` as one hidden operational problem" in prompt
+    assert "`edge_analysis.cheap_test` as one cheap operator check" in prompt
     assert "Preserve the current claim, process, metric, comparator, and operator while sharpening the wording." in prompt
+
+
+def test_transmission_rewrite_prompt_prefers_direct_operator_framing() -> None:
+    prompt = transmit.REWRITE_PROMPT
+
+    assert "tight, operator-facing transmission" in prompt
+    assert "First sentence: lead with the concrete target-domain claim or decision-relevant fact" in prompt
+    assert "Second sentence: name the specific shared mechanism directly" in prompt
+    assert "Third sentence: state the operator decision, implication, or why the decision changes if true" in prompt
+    assert "Prefer explicit operators, metrics, comparators, and decisions over abstract framing" in prompt
+    assert "Avoid analogy language, literary framing, literature-summary phrasing, and padded transitions" in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:

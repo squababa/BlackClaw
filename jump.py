@@ -68,6 +68,9 @@ Requirements:
 - Keep target_domain aligned with Stage 1.
 - If RELEVANT PRIOR FAILURE CONSTRAINTS are provided, treat them as hard cautionary constraints. Do not repeat the same failure mode unless the retrieved target evidence specifically overcomes it.
 - Lock onto exactly one primary target-domain causal claim before elaborating the comparison.
+- Final candidate wording must read like a concise operator briefing, not an analogy, essay, or literature summary.
+- Prefer short, direct sentences. Prefer explicit operators, metrics, comparators, and decisions over abstract connective filler.
+- Reduce analogy-style phrasing, decorative transitions, and explanatory padding. State the claim and mechanism directly.
 - The primary target-domain claim must be no broader than the retrieved target-domain evidence. Do not generalize beyond what the target snippets directly support.
 - If the search results support only a narrow, local, conditional, or partial version of the claim, make that narrower version the core claim.
 - Prefer the smaller honest claim over the broader impressive one. Do not reward elegant analogy shells that outrun the retrieved target evidence.
@@ -211,6 +214,8 @@ Requirements:
 - `edge_analysis.why_missed` must explain one concrete search, framing, workflow, metric, or discipline-boundary reason the target-domain problem or lever may be undernoticed.
 - `edge_analysis.expected_asymmetry` must explain why the lever is plausibly underused rather than already standard target-domain wisdom.
 - `edge_analysis.deployment_scope` should name where to try it first.
+- Package the edge layer like an operator handoff: one hidden problem, one concrete lever, one cheap test, and one decision change if the cheap test confirms.
+- Keep `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` tight and operational. Avoid analogy-heavy framing, literature-summary phrasing, and padded connective filler.
 - If the retrieved target-domain snippets already state the problem and lever in normal target-domain language as standard practice, best practice, or obvious operator guidance, return `no_connection` instead of wrapping it in cross-domain language.
 - Keep underexploitedness claims retrieval-scoped and honest. `rarely searched`, `cross-silo`, `hidden by default workflow`, or `screened out by standard framing` are acceptable. `nobody knows this` or `unpublished` are not.
 - Good problem statements name one concrete hidden failure mode tied to the same metric or observable and to one operator decision. Examples:
@@ -376,13 +381,15 @@ Repair only the listed fields. Keep `source_domain`, `target_domain`, `connectio
 Phase 6 rules:
 - This candidate already scored well enough to deserve one narrow rescue pass. Do not broaden the claim, add new unsupported mechanisms, or relax evidence discipline.
 - Prefer the smallest valid rewrite that clears the listed blockers. A narrow honest repair is better than a broad rewrite that drifts or fails validation.
+- Rewrite toward concise operator-briefing prose: short direct sentences, explicit operator/metric/decision language, minimal connective filler.
+- Remove analogy-heavy phrasing, literature-summary framing, and decorative explanation. Keep the claim concrete and operational.
 - If `mechanism` is listed, rewrite it to open with one exact target-domain process noun phrase pulled from the strongest direct target-domain evidence.
 - If `mechanism` is listed, do not open with broad bridges like `operates by`, `works by`, `functions by`, or analogy-heavy framing when a concrete process noun phrase is available.
 - If only `mechanism` is listed, keep the edge layer and test language unchanged. Fix the anchor, not the whole story.
 - If only `mechanism` is listed, you may return a JSON object containing only the repaired `mechanism` field.
 - If any edge-analysis fields are listed, rewrite `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together so they stay on the same claim, process, comparator, and metric already grounded by `mechanism` / `prediction` / `test`.
 - When rewriting the edge layer, reuse the same observable, metric, comparator, and operator-decision language already present in `prediction` / `test`. Reduce drift by reusing those exact anchor phrases instead of loose paraphrases.
-- When rewriting the edge layer, package `edge_analysis.problem_statement` as one hidden operational problem, `edge_analysis.actionable_lever` as one concrete operator move or design choice, and `edge_analysis.edge_if_right` as one operator decision consequence if confirmed.
+- When rewriting the edge layer, package `edge_analysis.problem_statement` as one hidden operational problem, `edge_analysis.actionable_lever` as one concrete operator move or design choice, `edge_analysis.cheap_test` as one cheap operator check, and `edge_analysis.edge_if_right` as one operator decision consequence if confirmed.
 - Preserve the current claim, process, metric, comparator, and operator while sharpening the wording. Do not broaden the field summary, invent a new lever, or introduce a different benefit axis.
 - `edge_analysis.cheap_test` must describe one real operator move on a narrow slice of workflow, not a generic validation suggestion and not a restatement of the full test.
 - If you cannot repair the listed fields without inventing unsupported detail, return `{"no_connection": true}`.
