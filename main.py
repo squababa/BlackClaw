@@ -7834,10 +7834,10 @@ def _evaluate_connection_candidate(
     provenance_ok = bool(source_target_provenance_ok and claim_provenance_ok)
 
     distance_score = scores.get("distance", 0)
-    distance_ok = True
-    if distance_score < 0.5:
+    distance_ok = distance_score >= 0.5
+    if not distance_ok:
         print(
-            f"  [Distance] - note: distance {distance_score:.2f} is below the old 0.5 floor; keeping as a non-blocking signal"
+            f"  [Distance] - rejected: distance {distance_score:.2f} below 0.5 minimum"
         )
 
     scholarly_prior_art_summary = scores.get("scholarly_prior_art_summary")
@@ -7868,6 +7868,7 @@ def _evaluate_connection_candidate(
         and not boring
         and not semantic_duplicate
         and provenance_ok
+        and distance_ok
         and not white_detected
     )
 
@@ -7925,6 +7926,8 @@ def _evaluate_connection_candidate(
                 stage_failures.append(f"claim_provenance:{issue}")
     if not provenance_ok:
         stage_failures.append("provenance:incomplete")
+    if not distance_ok:
+        stage_failures.append(f"distance:{distance_score:.3f}")
     if white_detected:
         stage_failures.append("novelty:white_detected")
 
