@@ -7521,7 +7521,16 @@ def _evaluate_connection_candidate(
         else evaluate_prediction_quality(connection)
     )
     claim_provenance = summarize_evidence_map_provenance(connection)
-    seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
+    selected_seed_url = _clean_inline_text(connection.get("seed_url")) or _clean_inline_text(
+        connection.get("source_url")
+    )
+    selected_seed_excerpt = _clean_inline_text(
+        connection.get("seed_excerpt")
+    ) or _clean_inline_text(connection.get("source_excerpt"))
+    if selected_seed_url is not None or selected_seed_excerpt is not None:
+        seed_url, seed_excerpt = selected_seed_url, selected_seed_excerpt
+    else:
+        seed_url, seed_excerpt = _extract_seed_provenance(patterns_payload)
 
     passes_threshold = scores["total"] >= threshold
     rewritten_description = connection.get("connection", "")

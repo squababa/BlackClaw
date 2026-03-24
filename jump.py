@@ -1302,6 +1302,8 @@ MECHANISM_ANCHOR_PROCESS_TERMS = {
     "analysis",
     "accumulat",
     "accumulation",
+    "anneal",
+    "annealing",
     "assign",
     "assignment",
     "avoidance",
@@ -1328,6 +1330,8 @@ MECHANISM_ANCHOR_PROCESS_TERMS = {
     "filter",
     "filtering",
     "gating",
+    "heat",
+    "heating",
     "hyperperiod",
     "inhibit",
     "inhibition",
@@ -1337,7 +1341,11 @@ MECHANISM_ANCHOR_PROCESS_TERMS = {
     "prevent",
     "prevents",
     "rate",
+    "relax",
+    "relaxation",
     "refill",
+    "residual",
+    "redistribution",
     "route",
     "routing",
     "sample",
@@ -1705,6 +1713,81 @@ def _display_target_evidence_rank(summary: dict | None) -> tuple[float, ...]:
     )
 
 
+def _display_source_evidence_rank(
+    text: object,
+    *,
+    source_terms: set[str],
+    mapped_source_terms: set[str],
+    field_priority: int,
+) -> tuple[int, int, int, int, int]:
+    candidate_terms = _repair_term_set(text)
+    candidate_text = re.sub(r"\s+", " ", str(text or "")).strip()
+    return (
+        len(candidate_terms & mapped_source_terms),
+        len(candidate_terms & source_terms),
+        min(len(candidate_text.split()), 24),
+        field_priority,
+        len(candidate_text),
+    )
+
+
+def _select_display_source_evidence(
+    pattern: dict | None,
+    data: dict | None,
+    source_domain: str,
+) -> tuple[str | None, str | None]:
+    source_pattern = pattern if isinstance(pattern, dict) else {}
+    payload = data if isinstance(data, dict) else {}
+    evidence_map = normalize_evidence_map(payload.get("evidence_map"))
+    seed_url = str(source_pattern.get("seed_url") or "").strip() or None
+
+    source_terms = _repair_term_set(source_domain)
+    source_terms.update(_repair_term_set(source_pattern.get("pattern_name")))
+    source_terms.update(_repair_term_set(source_pattern.get("measurable_signal")))
+    source_terms.update(_repair_term_set(source_pattern.get("control_lever")))
+
+    mapped_source_terms: set[str] = set()
+    for entry in evidence_map.get("variable_mappings", [])[:3]:
+        if not isinstance(entry, dict):
+            continue
+        mapped_source_terms.update(_repair_term_set(entry.get("source_variable")))
+
+    candidates: list[dict] = []
+    for field_name, field_priority in (
+        ("seed_excerpt", 1),
+        ("description", 3),
+        ("abstract_structure", 2),
+    ):
+        candidate_text = re.sub(
+            r"\s+",
+            " ",
+            str(source_pattern.get(field_name) or ""),
+        ).strip()
+        if not candidate_text:
+            continue
+        candidates.append(
+            {
+                "excerpt": candidate_text,
+                "url": seed_url,
+                "rank": _display_source_evidence_rank(
+                    candidate_text,
+                    source_terms=source_terms,
+                    mapped_source_terms=mapped_source_terms,
+                    field_priority=field_priority,
+                ),
+            }
+        )
+
+    if not candidates:
+        return seed_url, (
+            re.sub(r"\s+", " ", str(source_pattern.get("seed_excerpt") or "")).strip()
+            or None
+        )
+
+    best_candidate = max(candidates, key=lambda item: item["rank"])
+    return best_candidate.get("url"), best_candidate.get("excerpt")
+
+
 def _select_display_target_evidence(
     data: dict | None,
     raw_target_candidates: list[dict],
@@ -1862,11 +1945,11 @@ def _mechanism_precision_candidate_rank(candidate: dict) -> tuple[int, int, int,
         if int(candidate.get("measurable_hits") or 0) > 0
         and int(candidate.get("control_hits") or 0) > 0
         else 0,
+        int(candidate.get("phrase_process_hits") or 0),
+        int(candidate.get("process_score") or 0),
         int(candidate.get("measurable_hits") or 0),
         int(candidate.get("control_hits") or 0),
         int(candidate.get("source_priority") or 0),
-        int(candidate.get("phrase_process_hits") or 0),
-        int(candidate.get("process_score") or 0),
         len(phrase_terms),
     )
 
@@ -2007,6 +2090,9 @@ def _mechanism_needs_precision_rewrite(mechanism: object) -> bool:
     text = str(mechanism or "").strip().lower()
     if not text:
         return False
+    opening_phrase = _extract_process_phrase(mechanism)
+    if not opening_phrase or _process_anchor_score(opening_phrase) <= 0:
+        return True
     if not _has_mechanism_connector(mechanism):
         return True
     if any(phrase in text for phrase in MECHANISM_BRIDGE_OPENERS):
@@ -2535,6 +2621,13 @@ def _repair_guidance_for_missing_fields(
         or test_payload.get("falsify")
         or ""
     ).strip()
+    cheap_test_payload = (
+        normalized_edge.get("cheap_test")
+        if isinstance(normalized_edge.get("cheap_test"), dict)
+        else {}
+    )
+    cheap_test_metric_anchor = str(cheap_test_payload.get("metric") or "").strip()
+    cheap_test_confirm_anchor = str(cheap_test_payload.get("confirm") or "").strip()
     if any(field in usefulness_bottleneck_fields for field in missing_fields):
         guidance.append(
             "- Phase 5 usefulness-alignment bottleneck: keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable unless they are empty. Rewrite the edge layer so it points to the exact same core claim, process, comparator, and metric already named elsewhere."
@@ -2694,12 +2787,36 @@ def _repair_guidance_for_missing_fields(
                 "- The current cheap test is too close to `test.data`. Make it smaller and more operational so it informs one near-term operator decision before committing to the full test."
             )
     if "edge_analysis.edge_if_right" in missing_fields:
+        if missing_field_set == {"edge_analysis.edge_if_right"}:
+            guidance.append(
+                "- This is an `edge_analysis.edge_if_right`-only completion pass. Keep `connection`, `mechanism`, `prediction`, `test`, `variable_mapping`, `evidence_map`, and the rest of `edge_analysis` stable."
+            )
+            guidance.append(
+                "- If only this field is missing, prefer returning only `{\"edge_analysis\": {\"edge_if_right\": ...}}` instead of rewriting the full candidate."
+            )
         guidance.append(
             "- Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain such as lower collision rate, earlier warning, lower cost, higher throughput, or reduced false positives. Reject generic usefulness language and name the decision or workflow advantage unlocked if the cheap test confirms."
         )
         guidance.append(
+            "- Write exactly one operator, one decision change unlocked by confirmation, and one concrete measurable or workflow advantage if confirmed. Do not add a new stakeholder, KPI, roadmap claim, or strategic narrative."
+        )
+        guidance.append(
             "- Keep the same operator, the same decision unlocked by the cheap test, and the same measured advantage family already implied by the current metric/comparator. Do not introduce a new benefit axis, stakeholder, or unrelated KPI."
         )
+        if operator_anchor:
+            guidance.append(
+                f"- Reuse the current `edge_analysis.primary_operator` wording directly: `{operator_anchor}`."
+            )
+        current_edge_metric_anchor = cheap_test_metric_anchor or metric_anchor
+        if current_edge_metric_anchor:
+            guidance.append(
+                f"- Keep `edge_analysis.edge_if_right` tied to the current metric and decision boundary: `{current_edge_metric_anchor}`."
+            )
+        current_edge_confirm_anchor = cheap_test_confirm_anchor or confirm_anchor
+        if current_edge_confirm_anchor:
+            guidance.append(
+                f"- Reuse the current cheap-test / confirm-side wording as closely as possible so the operator advantage stays on the same decision boundary: `{current_edge_confirm_anchor}`."
+            )
         if confirm_anchor:
             guidance.append(
                 "- Keep `edge_analysis.edge_if_right` tied to the same decision unlocked by the current confirm condition, not to a new loosely related benefit."
@@ -3335,10 +3452,21 @@ def lateral_jump_with_diagnostics(
         data,
         raw_target_candidates,
     )
+    seed_url, seed_excerpt = _select_display_source_evidence(
+        pattern,
+        data,
+        source_domain,
+    )
     if target_url:
         data["target_url"] = target_url
     if target_excerpt:
         data["target_excerpt"] = target_excerpt
+    if seed_url:
+        data["seed_url"] = seed_url
+        data["source_url"] = seed_url
+    if seed_excerpt:
+        data["seed_excerpt"] = seed_excerpt
+        data["source_excerpt"] = seed_excerpt
     return data, diagnostic
 
 
