@@ -1,6 +1,7 @@
 import json
 
 import jump
+import transmit
 from hypothesis_validation import validate_hypothesis
 
 
@@ -96,9 +97,16 @@ def _valid_stage2_payload() -> dict:
 def test_hypothesize_prompt_has_stronger_examples() -> None:
     prompt = jump.HYPOTHESIZE_PROMPT
 
+    assert "Final candidate wording must read like a concise operator briefing, not an analogy, essay, or literature summary." in prompt
+    assert "Prefer short, direct sentences. Prefer explicit operators, metrics, comparators, and decisions over abstract connective filler." in prompt
+    assert "Reduce analogy-style phrasing, decorative transitions, and explanatory padding." in prompt
     assert "Good problem statements name one concrete hidden failure mode" in prompt
+    assert "`edge_analysis.problem_statement` must describe one hidden or underexploited operational problem, not a broad summary of the field." in prompt
+    assert "Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode on the same observable or metric already used in `prediction` / `test`." in prompt
     assert "Bad problem statements are generic or essay-like" in prompt
-    assert "Good actionable levers name one concrete action" in prompt
+    assert "Good actionable levers name one concrete operator action or design choice" in prompt
+    assert "`edge_analysis.actionable_lever` must reuse the current mechanism, metric, or operator context." in prompt
+    assert "Do not write advisory phrasing like `consider`, `explore`, `may help`, `investigate`, or other non-operational wording." in prompt
     assert "Bad actionable levers are vague or advisory" in prompt
     assert "`edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` must stay centered on that same primary claim, process, comparator, and metric." in prompt
     assert "The first-pass Stage 2 output should already satisfy required-field checks without relying on repair." in prompt
@@ -124,8 +132,11 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     assert "Do not use generic similarity wording in `mechanism` such as `mirrors`, `is analogous to`, `resembles`, `similar to`, or `shares dynamics with`." in prompt
     assert "Do not bridge into the process with wording like `operates by`, `works by`, `functions by`, or `acts by`" in prompt
     assert "Do not rename the target-domain process into a broader abstract label" in prompt
-    assert "`edge_analysis.edge_if_right` must name one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed" in prompt
+    assert "`edge_analysis.edge_if_right` must name exactly one operator, one decision change unlocked by the cheap test, and one concrete advantage if confirmed" in prompt
+    assert "`edge_analysis.edge_if_right` must say what the operator will do differently if the cheap test confirms" in prompt
     assert "Do not use generic novelty or value phrasing in `edge_analysis.edge_if_right` such as `this could be useful`, `this may provide an edge`, `novel insight`, or `valuable perspective`." in prompt
+    assert "Package the edge layer like an operator handoff: one hidden problem, one concrete lever, one cheap test, and one decision change if the cheap test confirms." in prompt
+    assert "Avoid analogy-heavy framing, literature-summary phrasing, and padded connective filler." in prompt
 
 
 def test_phase6_salvage_prompt_stays_selective() -> None:
@@ -140,7 +151,23 @@ def test_phase6_salvage_prompt_stays_selective() -> None:
         "`edge_analysis.cheap_test`, and `edge_analysis.edge_if_right` together"
         in prompt
     )
+    assert "Rewrite toward concise operator-briefing prose: short direct sentences, explicit operator/metric/decision language, minimal connective filler." in prompt
+    assert "Remove analogy-heavy phrasing, literature-summary framing, and decorative explanation." in prompt
     assert "reuse the same observable, metric, comparator, and operator-decision language" in prompt
+    assert "package `edge_analysis.problem_statement` as one hidden operational problem" in prompt
+    assert "`edge_analysis.cheap_test` as one cheap operator check" in prompt
+    assert "Preserve the current claim, process, metric, comparator, and operator while sharpening the wording." in prompt
+
+
+def test_transmission_rewrite_prompt_prefers_direct_operator_framing() -> None:
+    prompt = transmit.REWRITE_PROMPT
+
+    assert "tight, operator-facing transmission" in prompt
+    assert "First sentence: lead with the concrete target-domain claim or decision-relevant fact" in prompt
+    assert "Second sentence: name the specific shared mechanism directly" in prompt
+    assert "Third sentence: state the operator decision, implication, or why the decision changes if true" in prompt
+    assert "Prefer explicit operators, metrics, comparators, and decisions over abstract framing" in prompt
+    assert "Avoid analogy language, literary framing, literature-summary phrasing, and padded transitions" in prompt
 
 
 def test_missing_required_fields_requests_repair_for_generic_generation() -> None:
@@ -192,8 +219,11 @@ def test_build_repair_prompt_includes_targeted_guidance() -> None:
     assert "Rewrite `test` so `metric` names one concrete literature-facing quantity" in repair_prompt
     assert "Rewrite `test.confirm` and `test.falsify` so each sentence literally names the same metric used in `test.metric`" in repair_prompt
     assert "Rewrite `edge_analysis.problem_statement` so it names one specific hidden target-domain failure mode" in repair_prompt
+    assert "Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode already implied by the current claim, metric, or comparator." in repair_prompt
     assert "Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action" in repair_prompt
+    assert "design choice" in repair_prompt
     assert "Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain" in repair_prompt
+    assert "State what the operator will do differently if the cheap test confirms." in repair_prompt
     assert "Rewrite `edge_analysis.why_missed` so it names one concrete search, framing, workflow, metric, or discipline-boundary reason" in repair_prompt
     assert "Rewrite `edge_analysis.expected_asymmetry` so it explains why the lever is plausibly underused rather than already standard target-domain wisdom" in repair_prompt
     assert "Rewrite the first 3 `evidence_map.variable_mappings` entries so each `evidence_snippet` is at least one self-contained technical sentence or clause" in repair_prompt
@@ -726,6 +756,28 @@ def test_build_repair_prompt_marks_mechanism_assertion_completion_as_narrow() ->
     assert "Keep the repaired mechanism assertion tied to the current `mechanism`" in repair_prompt
     assert "Keep the repaired mechanism assertion tied to the current target claim in `prediction.observable`" in repair_prompt
     assert "Use that strongest current target snippet as the default `evidence_snippet` anchor" in repair_prompt
+
+
+def test_build_repair_prompt_marks_variable_mapping_completion_as_narrow() -> None:
+    payload = _valid_stage2_payload()
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["evidence_map.variable_mappings"],
+        original_data=payload,
+    )
+
+    assert "This is a variable-mapping completion pass." in repair_prompt
+    assert (
+        "prefer returning only `{\"evidence_map\": {\"variable_mappings\": [...]}}` "
+        "instead of rewriting the full candidate."
+    ) in repair_prompt
+    assert "Complete the missing critical variable mappings from the current payload one supported entry at a time." in repair_prompt
+    assert "Prioritize only the first 3 critical mappings." in repair_prompt
+    assert "Keep the critical pair wording exactly aligned to the current payload: `throw_offset -> task_offset`." in repair_prompt
+    assert "Reuse this current mapping claim as the starting point and narrow it only if needed: `Periodic tasks are assigned offsets within a shared hyperperiod.`." in repair_prompt
+    assert "Reuse this current evidence wording where possible and keep the repaired claim as a narrow paraphrase of it: `Tasks are assigned offsets within the hyperperiod to determine activation times.`." in repair_prompt
 
 
 def test_build_repair_prompt_marks_edge_if_right_only_completion_as_narrow() -> None:

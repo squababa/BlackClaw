@@ -16,11 +16,13 @@ from debug_log import log_gemini_output
 console = Console()
 _llm_client = get_llm_client()
 
-REWRITE_PROMPT = """Rewrite this discovery into a tight, compelling transmission. Rules:
-- Maximum 3 sentences
-- First sentence: state the connection as a surprising fact
-- Second sentence: explain the specific shared mechanism
-- Third sentence: state why this matters or what it implies
+REWRITE_PROMPT = """Rewrite this discovery into a tight, operator-facing transmission. Rules:
+- Maximum 3 short sentences
+- First sentence: lead with the concrete target-domain claim or decision-relevant fact
+- Second sentence: name the specific shared mechanism directly
+- Third sentence: state the operator decision, implication, or why the decision changes if true
+- Prefer explicit operators, metrics, comparators, and decisions over abstract framing
+- Avoid analogy language, literary framing, literature-summary phrasing, and padded transitions
 - No jargon. A smart 16-year-old should understand it.
 - No hedge words (perhaps, might, could). State it directly.
 - If the connection is boring when stated plainly, say so and return {{"boring": true}}
