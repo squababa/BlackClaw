@@ -698,6 +698,17 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY (scar_id) REFERENCES scar_registry(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS scar_evidence (
+            id TEXT PRIMARY KEY,
+            scar_id TEXT NOT NULL,
+            evidence_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            uri TEXT,
+            observed_result TEXT,
+            confidence REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (scar_id) REFERENCES scar_registry(id) ON DELETE CASCADE
+        );
         CREATE INDEX IF NOT EXISTS idx_explorations_timestamp
             ON explorations(timestamp);
         CREATE INDEX IF NOT EXISTS idx_explorations_seed
@@ -783,6 +794,8 @@ def init_db():
             ON scar_registry(family_id);
         CREATE INDEX IF NOT EXISTS idx_scar_occurrences_scar_id
             ON scar_occurrences(scar_id);
+        CREATE INDEX IF NOT EXISTS idx_scar_evidence_scar_id
+            ON scar_evidence(scar_id);
     """)
     # Migration for older DB files created before chain_path existed.
     existing_columns = {
@@ -5846,6 +5859,11 @@ def _derive_failed_gate(
         return direct.lower()
 
     validation_payload = _json_object_or_empty(validation)
+    symbolic_guardrail = _json_object_or_empty(
+        validation_payload.get("symbolic_guardrail")
+    )
+    if _collapse_whitespace(symbolic_guardrail.get("status")) == "failed":
+        return "symbolic_guardrail"
     if validation_payload and validation_payload.get("passed") is False:
         return "validation"
     adversarial_payload = _json_object_or_empty(adversarial_rubric)
@@ -5873,6 +5891,18 @@ def _derive_scar_type(
     """Classify the scar into a coarse reusable failure type."""
     lower_reasons = " ".join(reason.lower() for reason in rejection_reasons)
     claim_provenance = _json_object_or_empty(validation.get("claim_provenance"))
+    symbolic_guardrail = _json_object_or_empty(validation.get("symbolic_guardrail"))
+    if failed_gate == "symbolic_guardrail":
+        check_type = _collapse_whitespace(symbolic_guardrail.get("check_type")) or ""
+        if check_type in {
+            "geometry",
+            "force_balance",
+            "range_of_motion",
+            "material_stretch",
+            "threshold_inequality",
+        }:
+            return "violated_physical_constraint"
+        return "target_mismatch"
     if claim_provenance.get("missing_critical_mappings") or any(
         isinstance(detail, dict) and str(detail.get("kind") or "").strip() == "variable_mapping"
         for detail in (claim_provenance.get("failure_details") or [])
@@ -5910,6 +5940,7 @@ def _derive_constraint_rule(
     """Build one reusable constraint rule from the stored failure signal."""
     claim_provenance = _json_object_or_empty(validation.get("claim_provenance"))
     prediction_quality = _json_object_or_empty(validation.get("prediction_quality"))
+    symbolic_guardrail = _json_object_or_empty(validation.get("symbolic_guardrail"))
     scar_details = scar_summary.get("details") if isinstance(scar_summary.get("details"), dict) else {}
 
     failed_pairs = []
@@ -5924,6 +5955,16 @@ def _derive_constraint_rule(
         text = _collapse_whitespace(pair)
         if text is not None and text not in failed_pairs:
             failed_pairs.append(text)
+
+    if failed_gate == "symbolic_guardrail":
+        check_type = (
+            _collapse_whitespace(symbolic_guardrail.get("check_type")) or "physical"
+        ).replace("_", " ")
+        return (
+            "reject operator levers when explicit "
+            f"{check_type} constraints fail deterministic arithmetic checks "
+            "before operator review"
+        )
 
     if failed_gate == "validation":
         if failed_pairs:
@@ -6026,6 +6067,16 @@ def _derive_observed_result(
     validation: dict,
 ) -> str | None:
     """Capture the most concrete failure observation from the available payloads."""
+    symbolic_guardrail = _json_object_or_empty(validation.get("symbolic_guardrail"))
+    if failed_gate == "symbolic_guardrail":
+        return _truncate_inline_text(
+            _first_nonempty_text(
+                symbolic_guardrail.get("explanation"),
+                symbolic_guardrail.get("failed_constraint"),
+                _first_list_text(rejection_reasons),
+            ),
+            limit=240,
+        )
     if failed_gate == "adversarial":
         return _truncate_inline_text(
             _first_list_text(adversarial_rubric.get("kill_reasons"))
@@ -6082,7 +6133,7 @@ def _derive_broken_invariant(
 
 def _derive_repairability(failed_gate: str | None) -> str:
     """Classify repairability conservatively from the gate that failed."""
-    if failed_gate in {"adversarial", "invariance"}:
+    if failed_gate in {"adversarial", "invariance", "symbolic_guardrail"}:
         return "fundamental"
     if failed_gate == "validation":
         return "repairable"
@@ -6581,9 +6632,11 @@ def _resolve_or_create_scar_family_with_conn(
 def _persist_scar_with_conn(
     conn: sqlite3.Connection,
     *,
-    strong_rejection_id: int,
+    strong_rejection_id: int | None,
     exploration_id: int | None,
     scar_payload: dict,
+    attempt_id: str | None = None,
+    occurrence_outcome: str = "confirmed",
 ) -> None:
     """Persist one scar plus embedding and occurrence rows inside an existing transaction."""
     if not isinstance(scar_payload, dict) or not scar_payload:
@@ -6677,9 +6730,16 @@ def _persist_scar_with_conn(
         )
 
     occurrence_id = f"scar-occ-{uuid.uuid4().hex}"
-    attempt_id = f"strong_rejection:{int(strong_rejection_id)}"
-    if exploration_id is not None:
-        attempt_id = f"exploration:{int(exploration_id)}:{attempt_id}"
+    occurrence_attempt_id = attempt_id
+    if occurrence_attempt_id is None:
+        if strong_rejection_id is not None:
+            occurrence_attempt_id = f"strong_rejection:{int(strong_rejection_id)}"
+            if exploration_id is not None:
+                occurrence_attempt_id = (
+                    f"exploration:{int(exploration_id)}:{occurrence_attempt_id}"
+                )
+        else:
+            occurrence_attempt_id = f"scar:{scar_payload['id']}"
     conn.execute(
         """INSERT INTO scar_occurrences (
             id, scar_id, attempt_id, exploration_id, similarity, outcome, created_at
@@ -6687,15 +6747,417 @@ def _persist_scar_with_conn(
         (
             occurrence_id,
             scar_payload["id"],
-            attempt_id,
+            occurrence_attempt_id,
             str(int(exploration_id)) if exploration_id is not None else None,
             1.0,
-            "confirmed",
+            occurrence_outcome,
             scar_payload.get("created_at") or _now(),
         ),
     )
 
     _refresh_scar_family_summary_with_conn(conn, family_id)
+
+
+SCAR_EVIDENCE_TYPES = (
+    "cheap_test_result",
+    "measurement",
+    "note",
+    "simulation",
+    "manual_review",
+)
+
+
+def _normalize_scar_evidence_type(value: object) -> str:
+    """Normalize operator scar-evidence labels to the conservative local set."""
+    clean_value = _clean_optional_text(value)
+    if clean_value in SCAR_EVIDENCE_TYPES:
+        return clean_value
+    return "manual_review"
+
+
+def _load_scar_with_conn(
+    conn: sqlite3.Connection,
+    scar_id: str | None,
+) -> sqlite3.Row | None:
+    """Fetch one scar row by id."""
+    clean_scar_id = _clean_optional_text(scar_id)
+    if clean_scar_id is None:
+        return None
+    return conn.execute(
+        """
+        SELECT *
+        FROM scar_registry
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (clean_scar_id,),
+    ).fetchone()
+
+
+def _load_scar_family_with_conn(
+    conn: sqlite3.Connection,
+    family_id: str | None,
+) -> sqlite3.Row | None:
+    """Fetch one scar family row by id."""
+    clean_family_id = _clean_optional_text(family_id)
+    if clean_family_id is None:
+        return None
+    return conn.execute(
+        """
+        SELECT *
+        FROM scar_families
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (clean_family_id,),
+    ).fetchone()
+
+
+def _select_best_scar_for_family_with_conn(
+    conn: sqlite3.Connection,
+    family_id: str | None,
+) -> sqlite3.Row | None:
+    """Choose the best active scar anchor inside one family."""
+    clean_family_id = _clean_optional_text(family_id)
+    if clean_family_id is None:
+        return None
+    return conn.execute(
+        """
+        SELECT *
+        FROM scar_registry
+        WHERE family_id = ?
+          AND COALESCE(TRIM(status), 'active') != 'superseded'
+        ORDER BY retrieval_weight DESC, confidence DESC, severity DESC, updated_at DESC, id ASC
+        LIMIT 1
+        """,
+        (clean_family_id,),
+    ).fetchone()
+
+
+def _classify_feedback_signal(text: object) -> str:
+    """Classify operator feedback as supportive, failed, or unclear."""
+    clean_text = _clean_optional_text(text)
+    if clean_text is None:
+        return "unclear"
+    lower = clean_text.lower()
+    positive_markers = (
+        "worked",
+        "works",
+        "improved",
+        "improvement",
+        "reduced",
+        "reduction",
+        "helped",
+        "effective",
+        "viable",
+        "success",
+        "successful",
+        "passed",
+        "confirmed",
+        "held up",
+        "stable",
+    )
+    negative_markers = (
+        "failed",
+        "failure",
+        "worse",
+        "no effect",
+        "did not",
+        "didn't",
+        "collapsed",
+        "broke",
+        "buckled",
+        "unstable",
+        "fatigue",
+        "pain",
+        "regressed",
+        "increased",
+        "slipped",
+        "conflict",
+    )
+    positive_hits = sum(1 for marker in positive_markers if marker in lower)
+    negative_hits = sum(1 for marker in negative_markers if marker in lower)
+    if positive_hits > negative_hits and positive_hits > 0:
+        return "supportive"
+    if negative_hits > 0:
+        return "failed"
+    return "unclear"
+
+
+def _feedback_matches_existing_scar(
+    observed_result: str,
+    scar_row: sqlite3.Row,
+    family_row: sqlite3.Row | None,
+) -> bool:
+    """Decide whether operator feedback fits the existing scar rather than a new failure mode."""
+    reference_text = "\n".join(
+        part
+        for part in (
+            scar_row["constraint_rule"],
+            scar_row["failed_assumption"],
+            scar_row["broken_invariant"],
+            scar_row["observed_result"],
+            family_row["summary_why_it_fails"] if family_row is not None else None,
+        )
+        if _clean_optional_text(part) is not None
+    )
+    if not reference_text.strip():
+        return True
+    return _signature_similarity(observed_result, reference_text) >= 0.18
+
+
+def _should_increase_feedback_retrieval_weight(
+    *,
+    evidence_type: str,
+    confidence: float,
+    feedback_signal: str,
+) -> bool:
+    """Only strong real-world failures should increase scar retrieval weight."""
+    return (
+        feedback_signal == "failed"
+        and confidence >= 0.8
+        and evidence_type in {"cheap_test_result", "measurement", "simulation"}
+    )
+
+
+def _maybe_increase_scar_retrieval_weight_with_conn(
+    conn: sqlite3.Connection,
+    *,
+    scar_id: str,
+    feedback_signal: str,
+    evidence_type: str,
+    confidence: float,
+) -> None:
+    """Apply one conservative retrieval-weight bump for strong failed cheap tests."""
+    if not _should_increase_feedback_retrieval_weight(
+        evidence_type=evidence_type,
+        confidence=confidence,
+        feedback_signal=feedback_signal,
+    ):
+        return
+    conn.execute(
+        """
+        UPDATE scar_registry
+        SET retrieval_weight = MIN(1.35, retrieval_weight + 0.1),
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (_now(), scar_id),
+    )
+
+
+def _build_operator_feedback_scar_payload(
+    *,
+    anchor_row: sqlite3.Row,
+    observed_result: str,
+    confidence: float,
+    note: str | None,
+    feedback_signal: str,
+    evidence_type: str,
+) -> dict | None:
+    """Build a new scar payload from operator feedback when a new failure mode appears."""
+    applies_when = _clean_optional_text(anchor_row["applies_when"])
+    target_function = _clean_optional_text(anchor_row["target_function"])
+    mechanism_type = _clean_optional_text(anchor_row["mechanism_type"])
+    if applies_when is None or target_function is None or mechanism_type is None:
+        return None
+
+    constraint_rule = _truncate_inline_text(
+        (
+            f"Do not reuse this {mechanism_type} lever for {target_function} "
+            f"when real-world cheap tests show {observed_result}."
+        ),
+        limit=280,
+    )
+    if not _scar_rule_is_specific_enough(constraint_rule):
+        return None
+
+    retrieval_weight = float(anchor_row["retrieval_weight"] or 1.0)
+    if _should_increase_feedback_retrieval_weight(
+        evidence_type=evidence_type,
+        confidence=confidence,
+        feedback_signal=feedback_signal,
+    ):
+        retrieval_weight = min(1.35, retrieval_weight + 0.1)
+
+    created_at = _now()
+    repairability = _clean_optional_text(anchor_row["repairability"]) or "unknown"
+    return {
+        "id": f"scar-{uuid.uuid4().hex}",
+        "family_id": _clean_optional_text(anchor_row["family_id"]),
+        "target_domain": anchor_row["target_domain"],
+        "target_focus": anchor_row["target_focus"],
+        "target_category": anchor_row["target_category"],
+        "source_domain": anchor_row["source_domain"],
+        "source_category": anchor_row["source_category"],
+        "seed_pattern_name": anchor_row["seed_pattern_name"],
+        "abstract_structure": anchor_row["abstract_structure"],
+        "target_function": target_function,
+        "mechanism_type": mechanism_type,
+        "mechanism_canonical_text": anchor_row["mechanism_canonical_text"],
+        "mechanism_fingerprint": anchor_row["mechanism_fingerprint"],
+        "scar_type": _clean_optional_text(anchor_row["scar_type"]) or "no_measurable_effect",
+        "failed_gate": "operator_feedback",
+        "failed_assumption": None,
+        "broken_invariant": None,
+        "observed_result": observed_result,
+        "cheap_test_context": _truncate_inline_text(
+            _first_nonempty_text(note, anchor_row["cheap_test_context"]),
+            limit=240,
+        )
+        or "operator replay of the proposed lever on a narrow target-domain slice",
+        "constraint_rule": constraint_rule,
+        "applies_when": applies_when,
+        "does_not_apply_when": anchor_row["does_not_apply_when"],
+        "repairability": repairability,
+        "severity": _derive_scar_severity(repairability, "operator_feedback"),
+        "confidence": max(0.0, min(1.0, float(confidence))),
+        "retrieval_weight": retrieval_weight,
+        "status": "active",
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+
+
+def _insert_scar_evidence_with_conn(
+    conn: sqlite3.Connection,
+    *,
+    evidence_id: str,
+    scar_id: str,
+    evidence_type: str,
+    summary: str,
+    observed_result: str,
+    confidence: float,
+    uri: str | None,
+) -> None:
+    """Insert one operator-feedback evidence row."""
+    conn.execute(
+        """
+        INSERT INTO scar_evidence (
+            id, scar_id, evidence_type, summary, uri, observed_result, confidence, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            evidence_id,
+            scar_id,
+            evidence_type,
+            summary,
+            _clean_optional_text(uri),
+            observed_result,
+            max(0.0, min(1.0, float(confidence))),
+            _now(),
+        ),
+    )
+
+
+def save_scar_feedback(
+    *,
+    observed_result: str,
+    evidence_type: str,
+    confidence: float,
+    scar_id: str | None = None,
+    family_id: str | None = None,
+    uri: str | None = None,
+    note: str | None = None,
+) -> dict:
+    """Attach operator feedback to a scar, or create a new scar for a new failure mode."""
+    clean_observed_result = _clean_optional_text(observed_result)
+    if clean_observed_result is None:
+        raise ValueError("observed_result is required")
+
+    clean_confidence = max(0.0, min(1.0, float(confidence)))
+    clean_evidence_type = _normalize_scar_evidence_type(evidence_type)
+    clean_note = _clean_optional_text(note)
+    feedback_signal = _classify_feedback_signal(
+        "\n".join(
+            part for part in (clean_observed_result, clean_note) if part
+        )
+    )
+
+    conn = _connect()
+    anchor_row = _load_scar_with_conn(conn, scar_id)
+    resolved_family_id = _clean_optional_text(family_id)
+    if anchor_row is None and resolved_family_id is None:
+        conn.close()
+        raise ValueError("scar_id or family_id is required")
+    if anchor_row is None:
+        anchor_row = _select_best_scar_for_family_with_conn(conn, resolved_family_id)
+    if anchor_row is None:
+        conn.close()
+        raise ValueError("No scar anchor found for operator feedback")
+    if resolved_family_id is None:
+        resolved_family_id = _clean_optional_text(anchor_row["family_id"])
+    family_row = _load_scar_family_with_conn(conn, resolved_family_id)
+
+    evidence_id = f"scar-evidence-{uuid.uuid4().hex}"
+    target_scar_id = str(anchor_row["id"])
+    created_scar_id = None
+    action = "attached_to_existing"
+
+    if (
+        feedback_signal == "failed"
+        and resolved_family_id is not None
+        and not _feedback_matches_existing_scar(
+            clean_observed_result,
+            anchor_row,
+            family_row,
+        )
+    ):
+        new_scar_payload = _build_operator_feedback_scar_payload(
+            anchor_row=anchor_row,
+            observed_result=clean_observed_result,
+            confidence=clean_confidence,
+            note=clean_note,
+            feedback_signal=feedback_signal,
+            evidence_type=clean_evidence_type,
+        )
+        if new_scar_payload is not None:
+            _persist_scar_with_conn(
+                conn,
+                strong_rejection_id=None,
+                exploration_id=None,
+                scar_payload=new_scar_payload,
+                attempt_id=f"operator_feedback:{evidence_id}",
+                occurrence_outcome="matched",
+            )
+            target_scar_id = str(new_scar_payload["id"])
+            created_scar_id = target_scar_id
+            action = "created_new_scar"
+
+    summary = _truncate_inline_text(
+        _first_nonempty_text(clean_note, clean_observed_result),
+        limit=240,
+    ) or clean_observed_result
+    _insert_scar_evidence_with_conn(
+        conn,
+        evidence_id=evidence_id,
+        scar_id=target_scar_id,
+        evidence_type=clean_evidence_type,
+        summary=summary,
+        observed_result=clean_observed_result,
+        confidence=clean_confidence,
+        uri=uri,
+    )
+
+    if created_scar_id is None:
+        _maybe_increase_scar_retrieval_weight_with_conn(
+            conn,
+            scar_id=target_scar_id,
+            feedback_signal=feedback_signal,
+            evidence_type=clean_evidence_type,
+            confidence=clean_confidence,
+        )
+
+    conn.commit()
+    conn.close()
+    return {
+        "action": action,
+        "scar_id": target_scar_id,
+        "family_id": resolved_family_id,
+        "created_scar_id": created_scar_id,
+        "evidence_id": evidence_id,
+        "feedback_signal": feedback_signal,
+    }
 
 
 def build_mechanism_signature(connection: dict) -> str:
@@ -6749,14 +7211,30 @@ def _signature_similarity(text_a: str, text_b: str) -> float:
     return _jaccard_similarity(text_a, text_b)
 
 
-def get_relevant_scars(
+def _compress_scar_prompt_item(
+    *,
+    constraint_rule: object,
+    applies_when: object,
+    why_it_failed: object,
+    does_not_apply_when: object,
+) -> dict:
+    """Build one prompt-safe compressed scar payload."""
+    return {
+        "constraint_rule": _truncate_inline_text(constraint_rule, limit=180) or "",
+        "applies_when": _truncate_inline_text(applies_when, limit=160) or "",
+        "why_it_failed": _truncate_inline_text(why_it_failed, limit=180)
+        or "prior cheap test failed",
+        "does_not_apply_when": _truncate_inline_text(does_not_apply_when, limit=140),
+    }
+
+
+def _rank_relevant_scar_groups(
     target_domain: str,
     abstract_structure_embedding: list[float],
-    limit: int = 4,
 ) -> list[dict]:
-    """Retrieve compressed target-domain scars ranked for prompt injection."""
+    """Rank scar candidates, then collapse them into one result per family."""
     clean_target_domain = _clean_optional_text(target_domain)
-    if clean_target_domain is None or not abstract_structure_embedding or limit <= 0:
+    if clean_target_domain is None or not abstract_structure_embedding:
         return []
 
     conn = _connect()
@@ -6775,6 +7253,8 @@ def get_relevant_scars(
             sr.repairability,
             sr.updated_at,
             sr.created_at,
+            sf.summary_constraint_rule,
+            sf.summary_applies_when,
             sf.summary_why_it_fails,
             sv.vector_json,
             COALESCE(occ.occurrence_count, 0) AS occurrence_count
@@ -6858,28 +7338,113 @@ def get_relevant_scars(
         ranked.append(
             {
                 "family_key": _clean_optional_text(row["family_id"]) or _clean_optional_text(row["id"]),
+                "family_id": _clean_optional_text(row["family_id"]),
+                "scar_id": _clean_optional_text(row["id"]),
                 "score": blended_score,
-                "scar": {
-                    "constraint_rule": _clean_optional_text(row["constraint_rule"]) or "",
-                    "applies_when": _clean_optional_text(row["applies_when"]) or "",
-                    "why_it_failed": why_it_failed,
-                    "does_not_apply_when": _clean_optional_text(row["does_not_apply_when"]),
-                },
+                "semantic_similarity": semantic_similarity,
+                "constraint_rule": _clean_optional_text(row["constraint_rule"]) or "",
+                "applies_when": _clean_optional_text(row["applies_when"]) or "",
+                "why_it_failed": why_it_failed,
+                "does_not_apply_when": _clean_optional_text(row["does_not_apply_when"]),
+                "summary_constraint_rule": _clean_optional_text(row["summary_constraint_rule"]),
+                "summary_applies_when": _clean_optional_text(row["summary_applies_when"]),
+                "summary_why_it_fails": _clean_optional_text(row["summary_why_it_fails"]),
             }
         )
 
     ranked.sort(key=lambda item: item["score"], reverse=True)
 
-    results: list[dict] = []
-    seen_families: set[str] = set()
+    grouped: dict[str, list[dict]] = {}
     for item in ranked:
-        family_key = item["family_key"]
-        if family_key in seen_families:
-            continue
-        seen_families.add(family_key)
-        results.append(item["scar"])
-        if len(results) >= int(limit):
-            break
+        grouped.setdefault(item["family_key"], []).append(item)
+
+    collapsed: list[dict] = []
+    for family_key, items in grouped.items():
+        best_item = items[0]
+        has_multiple_family_candidates = len(items) > 1
+        has_family_summary = all(
+            _clean_optional_text(best_item.get(key))
+            for key in (
+                "summary_constraint_rule",
+                "summary_applies_when",
+                "summary_why_it_fails",
+            )
+        )
+        use_family_summary = bool(
+            best_item.get("family_id")
+            and has_multiple_family_candidates
+            and has_family_summary
+        )
+        prompt_item = _compress_scar_prompt_item(
+            constraint_rule=(
+                best_item.get("summary_constraint_rule")
+                if use_family_summary
+                else best_item.get("constraint_rule")
+            ),
+            applies_when=(
+                best_item.get("summary_applies_when")
+                if use_family_summary
+                else best_item.get("applies_when")
+            ),
+            why_it_failed=(
+                best_item.get("summary_why_it_fails")
+                if use_family_summary
+                else best_item.get("why_it_failed")
+            ),
+            does_not_apply_when=best_item.get("does_not_apply_when"),
+        )
+        collapsed.append(
+            {
+                "family_key": family_key,
+                "family_id": best_item.get("family_id"),
+                "scar_ids": [item.get("scar_id") for item in items if item.get("scar_id")],
+                "blended_rank_score": best_item["score"],
+                "semantic_similarity": best_item["semantic_similarity"],
+                "used_family_summary": use_family_summary,
+                "prompt_item": prompt_item,
+            }
+        )
+
+    collapsed.sort(
+        key=lambda item: (
+            -float(item.get("blended_rank_score") or 0.0),
+            0 if item.get("used_family_summary") else 1,
+            str(item.get("family_key") or ""),
+        )
+    )
+    return collapsed
+
+
+def get_relevant_scars_debug(
+    target_domain: str,
+    abstract_structure_embedding: list[float],
+    limit: int = 4,
+) -> list[dict]:
+    """Return family-collapsed retrieval rows with ranking/debug metadata."""
+    if limit <= 0:
+        return []
+    ranked_groups = _rank_relevant_scar_groups(
+        target_domain=target_domain,
+        abstract_structure_embedding=abstract_structure_embedding,
+    )
+    return ranked_groups[: max(1, int(limit))]
+
+
+def get_relevant_scars(
+    target_domain: str,
+    abstract_structure_embedding: list[float],
+    limit: int = 4,
+) -> list[dict]:
+    """Retrieve compressed target-domain scars ranked for prompt injection."""
+    if limit <= 0:
+        return []
+    ranked_groups = _rank_relevant_scar_groups(
+        target_domain=target_domain,
+        abstract_structure_embedding=abstract_structure_embedding,
+    )
+    results: list[dict] = []
+    for item in ranked_groups[: max(1, int(limit))]:
+        results.append(dict(item["prompt_item"]))
     return results
 
 

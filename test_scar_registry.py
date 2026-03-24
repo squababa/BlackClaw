@@ -87,6 +87,103 @@ def _base_connection_payload() -> dict:
     }
 
 
+def _insert_feedback_anchor(
+    db_path: str,
+    *,
+    family_id: str = "fam-feedback",
+    family_summary: tuple[str, str, str] = (
+        "avoid off-axis overload beyond tested load windows",
+        "off-axis load transfer under asymmetric tension",
+        "torque transfer collapsed under high load",
+    ),
+    scar_id: str = "scar-feedback-anchor",
+    repairability: str = "repairable",
+    retrieval_weight: float = 1.0,
+    observed_result: str = "torque transfer collapsed under high load",
+    constraint_rule: str = "avoid off-axis overload beyond tested load windows",
+) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        """INSERT INTO scar_families (
+            id, mechanism_type, target_function, canonical_text,
+            canonical_fingerprint, summary_constraint_rule, summary_applies_when,
+            summary_why_it_fails, scar_count, fundamental_count, repairable_count,
+            avg_confidence, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            family_id,
+            "load_transfer",
+            "stabilize off-axis posture correction",
+            "feedback family canonical",
+            f"fp-{family_id}",
+            family_summary[0],
+            family_summary[1],
+            family_summary[2],
+            1,
+            0,
+            1 if repairability == "repairable" else 0,
+            0.8,
+            "2026-03-01T00:00:00+00:00",
+            "2026-03-20T00:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """INSERT INTO scar_registry (
+            id, family_id, target_domain, source_domain, abstract_structure,
+            target_function, mechanism_type, mechanism_canonical_text,
+            mechanism_fingerprint, scar_type, failed_gate, failed_assumption,
+            broken_invariant, observed_result, cheap_test_context, constraint_rule,
+            applies_when, does_not_apply_when, repairability, severity, confidence,
+            retrieval_weight, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            scar_id,
+            family_id,
+            "Biomechanics",
+            "Tension Systems",
+            "off-axis load transfer under asymmetric tension",
+            "stabilize off-axis posture correction",
+            "load_transfer",
+            "canonical feedback mechanism",
+            f"fingerprint-{family_id}",
+            "implementation_infeasible",
+            "validation",
+            "load remains stable across asymmetric tension",
+            "torque transfer breaks when lateral load spikes",
+            observed_result,
+            "repeat the off-axis gym protocol under measured load",
+            constraint_rule,
+            "off-axis load transfer under asymmetric tension",
+            "low-load assisted setups",
+            repairability,
+            3,
+            0.8,
+            retrieval_weight,
+            "active",
+            "2026-03-21T00:00:00+00:00",
+            "2026-03-21T00:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """INSERT INTO scar_vectors (
+            scar_id, vector_kind, embedding_model, embedding_version,
+            dimension, vector_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (
+            scar_id,
+            "retrieval",
+            "test-model",
+            "v1",
+            3,
+            "[1.0,0.0,0.0]",
+            "2026-03-21T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_build_canonical_mechanism_normalizes_and_sorts_fields() -> None:
     payload = {
         "mechanism_type": "  Modular_Arithmetic  ",
@@ -316,10 +413,289 @@ def test_get_relevant_scars_returns_ranked_unique_families(temp_db) -> None:
     scars = store.get_relevant_scars("Wireless Scheduling", [1.0, 0.0], limit=4)
 
     assert len(scars) == 2
-    assert scars[0]["constraint_rule"] == "add non-sequential validity filters before greedy assignment"
+    assert scars[0]["constraint_rule"] == "avoid narrow sequential search"
+    assert scars[0]["applies_when"] == "dense periodic schedulers"
     assert scars[0]["why_it_failed"] == "sequential search collapses under dense combinatorics"
     assert scars[1]["constraint_rule"] == "respect saturation breakpoints"
     assert scars[1]["does_not_apply_when"] is None
+
+
+def test_get_relevant_scars_debug_collapses_same_family_and_reports_scores(
+    temp_db,
+) -> None:
+    conn = sqlite3.connect(str(temp_db))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        """INSERT INTO scar_families (
+            id, mechanism_type, target_function, canonical_text,
+            canonical_fingerprint, summary_constraint_rule, summary_applies_when,
+            summary_why_it_fails, scar_count, fundamental_count, repairable_count,
+            avg_confidence, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "fam-debug",
+            "modular_arithmetic",
+            "collision avoidance",
+            "family debug canonical",
+            "fp-debug",
+            "prefer family summary rule",
+            "dense periodic schedulers",
+            "family summary explains the recurring miss",
+            2,
+            1,
+            1,
+            0.8,
+            "2026-03-01T00:00:00+00:00",
+            "2026-03-20T00:00:00+00:00",
+        ),
+    )
+    for scar_id, updated_at, vector in (
+        ("scar-debug-1", "2026-03-22T00:00:00+00:00", "[1.0,0.0]"),
+        ("scar-debug-2", "2026-03-21T00:00:00+00:00", "[0.9,0.1]"),
+    ):
+        conn.execute(
+            """INSERT INTO scar_registry (
+                id, family_id, target_domain, source_domain, abstract_structure,
+                target_function, mechanism_type, mechanism_canonical_text,
+                mechanism_fingerprint, scar_type, failed_gate, cheap_test_context,
+                constraint_rule, applies_when, repairability, severity, confidence,
+                status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                scar_id,
+                "fam-debug",
+                "Wireless Scheduling",
+                "Juggling",
+                "periodic modular search",
+                "collision avoidance",
+                "modular_arithmetic",
+                f"canonical:{scar_id}",
+                f"fingerprint:{scar_id}",
+                "bad_mapping",
+                "validation",
+                "replay one dense schedule slice",
+                f"raw rule {scar_id}",
+                "dense periodic schedulers",
+                "repairable",
+                3,
+                0.8,
+                "active",
+                updated_at,
+                updated_at,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO scar_vectors (
+                scar_id, vector_kind, embedding_model, embedding_version,
+                dimension, vector_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                scar_id,
+                "retrieval",
+                "test-model",
+                "v1",
+                2,
+                vector,
+                updated_at,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    debug_rows = store.get_relevant_scars_debug(
+        "Wireless Scheduling",
+        [1.0, 0.0],
+        limit=4,
+    )
+
+    assert len(debug_rows) == 1
+    row = debug_rows[0]
+    assert row["family_id"] == "fam-debug"
+    assert row["used_family_summary"] is True
+    assert set(row["scar_ids"]) == {"scar-debug-1", "scar-debug-2"}
+    assert row["blended_rank_score"] > 0.0
+    assert row["semantic_similarity"] > 0.0
+    assert row["prompt_item"]["constraint_rule"] == "prefer family summary rule"
+
+
+def test_get_relevant_scars_debug_excludes_superseded_and_wrong_target_domain(
+    temp_db,
+) -> None:
+    conn = sqlite3.connect(str(temp_db))
+    conn.execute("PRAGMA foreign_keys=ON")
+    for scar_id, target_domain, status, vector in (
+        ("scar-keep", "Wireless Scheduling", "active", "[1.0,0.0]"),
+        ("scar-superseded", "Wireless Scheduling", "superseded", "[1.0,0.0]"),
+        ("scar-other-target", "Another Domain", "active", "[1.0,0.0]"),
+    ):
+        conn.execute(
+            """INSERT INTO scar_registry (
+                id, family_id, target_domain, source_domain, abstract_structure,
+                target_function, mechanism_type, mechanism_canonical_text,
+                mechanism_fingerprint, scar_type, failed_gate, cheap_test_context,
+                constraint_rule, applies_when, repairability, severity, confidence,
+                status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                scar_id,
+                None,
+                target_domain,
+                "Juggling",
+                "periodic modular search",
+                "collision avoidance",
+                "modular_arithmetic",
+                f"canonical:{scar_id}",
+                f"fingerprint:{scar_id}",
+                "bad_mapping",
+                "validation",
+                "replay one dense schedule slice",
+                f"rule {scar_id}",
+                "dense periodic schedulers",
+                "repairable",
+                3,
+                0.8,
+                status,
+                "2026-03-22T00:00:00+00:00",
+                "2026-03-22T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO scar_vectors (
+                scar_id, vector_kind, embedding_model, embedding_version,
+                dimension, vector_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                scar_id,
+                "retrieval",
+                "test-model",
+                "v1",
+                2,
+                vector,
+                "2026-03-22T00:00:00+00:00",
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    debug_rows = store.get_relevant_scars_debug(
+        "Wireless Scheduling",
+        [1.0, 0.0],
+        limit=4,
+    )
+
+    assert len(debug_rows) == 1
+    assert debug_rows[0]["scar_ids"] == ["scar-keep"]
+    assert debug_rows[0]["prompt_item"]["constraint_rule"] == "rule scar-keep"
+
+
+def test_save_scar_feedback_attaches_evidence_to_existing_scar(
+    temp_db,
+) -> None:
+    _insert_feedback_anchor(str(temp_db))
+
+    result = store.save_scar_feedback(
+        scar_id="scar-feedback-anchor",
+        observed_result="torque transfer collapsed under high load during the same off-axis protocol",
+        evidence_type="cheap_test_result",
+        confidence=0.9,
+        note="repeat failure under the same load window",
+    )
+
+    assert result["action"] == "attached_to_existing"
+    assert result["created_scar_id"] is None
+    assert result["scar_id"] == "scar-feedback-anchor"
+
+    evidence_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT scar_id, evidence_type, observed_result FROM scar_evidence",
+    )
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0]["scar_id"] == "scar-feedback-anchor"
+    assert evidence_rows[0]["evidence_type"] == "cheap_test_result"
+
+    scar_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT id, retrieval_weight FROM scar_registry WHERE id = 'scar-feedback-anchor'",
+    )
+    assert scar_rows[0]["retrieval_weight"] > 1.0
+
+
+def test_save_scar_feedback_creates_new_scar_for_new_failure_mode(
+    temp_db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store, "_embed_scar_retrieval_text", _fake_embedding)
+    monkeypatch.setattr(store, "_embed_scar_mechanism_text", _fake_embedding)
+    _insert_feedback_anchor(str(temp_db))
+
+    result = store.save_scar_feedback(
+        family_id="fam-feedback",
+        observed_result=(
+            "heat-reactive panel buckled after repeated warmup cycles and the posture "
+            "correction disappeared after the fabric softened"
+        ),
+        evidence_type="measurement",
+        confidence=0.92,
+        note="thermal loop test on the second prototype",
+    )
+
+    assert result["action"] == "created_new_scar"
+    assert result["created_scar_id"] is not None
+    assert result["family_id"] == "fam-feedback"
+
+    scar_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT id, family_id, observed_result, retrieval_weight, failed_gate FROM scar_registry",
+    )
+    assert len(scar_rows) == 2
+    created_rows = [row for row in scar_rows if row["id"] == result["created_scar_id"]]
+    assert len(created_rows) == 1
+    assert created_rows[0]["family_id"] == "fam-feedback"
+    assert created_rows[0]["failed_gate"] == "operator_feedback"
+    assert created_rows[0]["retrieval_weight"] > 1.0
+
+    evidence_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT scar_id, evidence_type FROM scar_evidence",
+    )
+    assert evidence_rows == [
+        {"scar_id": result["created_scar_id"], "evidence_type": "measurement"}
+    ]
+
+
+def test_save_scar_feedback_supportive_result_records_evidence_without_new_scar(
+    temp_db,
+) -> None:
+    _insert_feedback_anchor(str(temp_db))
+
+    result = store.save_scar_feedback(
+        scar_id="scar-feedback-anchor",
+        observed_result=(
+            "the lever worked under the tested off-axis load and reduced fatigue in the "
+            "same movement plane"
+        ),
+        evidence_type="cheap_test_result",
+        confidence=0.88,
+        note="supportive field note from the gym replay",
+    )
+
+    assert result["action"] == "attached_to_existing"
+    assert result["feedback_signal"] == "supportive"
+    assert result["created_scar_id"] is None
+
+    scar_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT id, retrieval_weight FROM scar_registry",
+    )
+    assert len(scar_rows) == 1
+    assert scar_rows[0]["retrieval_weight"] == 1.0
+
+    evidence_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT scar_id, observed_result FROM scar_evidence",
+    )
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0]["scar_id"] == "scar-feedback-anchor"
 
 
 def test_save_strong_rejection_creates_validation_scar(temp_db, monkeypatch) -> None:
