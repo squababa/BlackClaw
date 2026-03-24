@@ -899,6 +899,61 @@ def test_apply_mechanism_naming_precision_rewrites_reporting_prefix_mechanism_op
     assert "mechanism must name a specific process" not in reasons
 
 
+def test_apply_mechanism_naming_precision_rescues_no_connector_mechanism_from_strong_target_anchor() -> None:
+    payload = _valid_stage2_payload()
+    payload["source_domain"] = "Operations research"
+    payload["target_domain"] = "Inventory control with backlog-triggered refill scheduling"
+    payload["mechanism"] = (
+        "Backlog-triggered refill scheduling increases replenishment cadence after "
+        "threshold crossings and lowers stockout exposure."
+    )
+    payload["prediction"]["observable"] = (
+        "stockout rate under backlog-triggered refill scheduling"
+    )
+    payload["test"]["metric"] = "stockout rate"
+    payload["test"]["confirm"] = (
+        "stockout rate falls when queue depth crosses the control threshold and "
+        "faster refill cadence is enabled"
+    )
+    payload["test"]["falsify"] = (
+        "stockout rate does not fall when queue depth crosses the control "
+        "threshold and faster refill cadence is enabled"
+    )
+    payload["evidence_map"]["variable_mappings"][0] = {
+        "source_variable": "threshold_crossing",
+        "target_variable": "queue_depth_control_threshold",
+        "claim": "Threshold-triggered queue regulation adjusts refill cadence.",
+        "evidence_snippet": (
+            "Threshold-triggered queue regulation adjusts refill cadence once "
+            "backlog pressure exceeds the limit."
+        ),
+        "source_reference": "Queue-triggered inventory control note",
+    }
+    payload["evidence_map"]["mechanism_assertions"][0] = {
+        "mechanism_claim": (
+            "Backlog-triggered refill scheduling controls replenishment cadence "
+            "under queue-depth pressure."
+        ),
+        "evidence_snippet": (
+            "Backlog-triggered refill scheduling controls replenishment cadence "
+            "when queue depth crosses a control threshold, reducing stockout rate "
+            "during constrained demand bursts."
+        ),
+        "source_reference": "Backlog-triggered refill scheduling study",
+    }
+
+    rewritten = jump._apply_mechanism_naming_precision(payload)
+    passed, reasons = validate_hypothesis(rewritten)
+
+    assert rewritten["mechanism"].startswith(
+        "Backlog-triggered refill scheduling controls replenishment cadence"
+    )
+    assert "queue depth crosses a control threshold" in rewritten["mechanism"].lower()
+    assert "stockout rate" in rewritten["mechanism"].lower()
+    assert passed is False
+    assert "mechanism must name a specific process" not in reasons
+
+
 def test_salvage_high_value_candidate_keeps_nonmechanism_fields_stable_during_mechanism_only_rescue(
     monkeypatch,
 ) -> None:
