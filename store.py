@@ -6142,8 +6142,8 @@ def _build_scar_retrieval_text(scar_payload: dict) -> str:
     return "\n".join(parts).strip()
 
 
-def _embed_scar_retrieval_text(text: str) -> tuple[list[float], str, str] | None:
-    """Embed scar retrieval text using the same path as semantic dedup."""
+def _embed_text_with_active_path(text: str) -> tuple[list[float], str, str] | None:
+    """Embed one text blob using the active semantic-dedup embedding path."""
     clean_text = _collapse_whitespace(text)
     if clean_text is None:
         return None
@@ -6160,6 +6160,16 @@ def _embed_scar_retrieval_text(text: str) -> tuple[list[float], str, str] | None
         "local",
     )
     return [float(value) for value in vector], embedding_model or "local", "v1"
+
+
+def _embed_scar_retrieval_text(text: str) -> tuple[list[float], str, str] | None:
+    """Embed scar retrieval text using the same path as semantic dedup."""
+    return _embed_text_with_active_path(text)
+
+
+def _embed_scar_mechanism_text(text: str) -> tuple[list[float], str, str] | None:
+    """Embed mechanism canonical text for scar-family semantic matching."""
+    return _embed_text_with_active_path(text)
 
 
 def _build_scar_payload(
@@ -6317,6 +6327,257 @@ def _build_scar_payload(
     }
 
 
+def _family_target_function_compatible(
+    target_function_a: str | None,
+    target_function_b: str | None,
+) -> bool:
+    """Check whether two target-function labels are close enough to share a family."""
+    clean_a = _collapse_whitespace(target_function_a)
+    clean_b = _collapse_whitespace(target_function_b)
+    if clean_a is None or clean_b is None:
+        return False
+    if clean_a == clean_b:
+        return True
+    if clean_a in clean_b or clean_b in clean_a:
+        return True
+    tokens_a = {token for token in re.findall(r"[a-z0-9]+", clean_a) if len(token) >= 4}
+    tokens_b = {token for token in re.findall(r"[a-z0-9]+", clean_b) if len(token) >= 4}
+    if not tokens_a or not tokens_b:
+        return False
+    overlap = len(tokens_a & tokens_b) / float(len(tokens_a | tokens_b))
+    return overlap >= 0.5
+
+
+def _family_semantic_similarity(
+    candidate_canonical_text: str,
+    family_canonical_text: str,
+) -> float:
+    """Score semantic similarity between two family-candidate mechanism payloads."""
+    candidate_embedding = _embed_scar_mechanism_text(candidate_canonical_text)
+    family_embedding = _embed_scar_mechanism_text(family_canonical_text)
+    if candidate_embedding is not None and family_embedding is not None:
+        return max(
+            0.0,
+            min(
+                1.0,
+                compute_similarity(candidate_embedding[0], family_embedding[0]),
+            ),
+        )
+    return _signature_similarity(candidate_canonical_text, family_canonical_text)
+
+
+def _choose_family_summary_text(values: list[str]) -> str:
+    """Choose the best family summary string from recurring scar values."""
+    normalized_values = []
+    for value in values:
+        text = _collapse_whitespace(value)
+        if text is not None:
+            normalized_values.append(text)
+    if not normalized_values:
+        return ""
+    counts = Counter(normalized_values)
+
+    def _sort_key(value: str) -> tuple[int, int, int, str]:
+        token_count = len(re.findall(r"[a-z0-9]+", value.lower()))
+        return (
+            int(counts[value]),
+            token_count,
+            len(value),
+            value,
+        )
+
+    return max(normalized_values, key=_sort_key)
+
+
+def _refresh_scar_family_summary_with_conn(
+    conn: sqlite3.Connection,
+    family_id: str,
+) -> None:
+    """Recompute one family summary and counters from its member scars."""
+    rows = conn.execute(
+        """
+        SELECT
+            constraint_rule,
+            applies_when,
+            failed_assumption,
+            broken_invariant,
+            observed_result,
+            failed_gate,
+            repairability,
+            confidence
+        FROM scar_registry
+        WHERE family_id = ?
+        """,
+        (family_id,),
+    ).fetchall()
+    if not rows:
+        return
+
+    constraint_values = []
+    applies_when_values = []
+    why_it_failed_values = []
+    confidence_values = []
+    fundamental_count = 0
+    repairable_count = 0
+
+    for row in rows:
+        constraint_text = _collapse_whitespace(row["constraint_rule"])
+        if constraint_text is not None:
+            constraint_values.append(constraint_text)
+        applies_text = _collapse_whitespace(row["applies_when"])
+        if applies_text is not None:
+            applies_when_values.append(applies_text)
+        why_text = _first_nonempty_text(
+            row["broken_invariant"],
+            row["observed_result"],
+            row["failed_assumption"],
+            row["failed_gate"],
+        )
+        if why_text is not None:
+            why_it_failed_values.append(why_text)
+        confidence = _coerce_optional_float(row["confidence"])
+        if confidence is not None:
+            confidence_values.append(confidence)
+        repairability = _collapse_whitespace(row["repairability"])
+        if repairability == "fundamental":
+            fundamental_count += 1
+        elif repairability == "repairable":
+            repairable_count += 1
+
+    summary_constraint_rule = _choose_family_summary_text(constraint_values)
+    summary_applies_when = _choose_family_summary_text(applies_when_values)
+    summary_why_it_fails = _choose_family_summary_text(why_it_failed_values)
+    avg_confidence = (
+        sum(confidence_values) / float(len(confidence_values))
+        if confidence_values
+        else 0.0
+    )
+
+    conn.execute(
+        """
+        UPDATE scar_families
+        SET summary_constraint_rule = ?,
+            summary_applies_when = ?,
+            summary_why_it_fails = ?,
+            scar_count = ?,
+            fundamental_count = ?,
+            repairable_count = ?,
+            avg_confidence = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            summary_constraint_rule,
+            summary_applies_when,
+            summary_why_it_fails,
+            len(rows),
+            fundamental_count,
+            repairable_count,
+            avg_confidence,
+            _now(),
+            family_id,
+        ),
+    )
+
+
+def _resolve_or_create_scar_family_with_conn(
+    conn: sqlite3.Connection,
+    scar_payload: dict,
+) -> str:
+    """Attach a scar to an existing family or create a new family anchor."""
+    fingerprint = _collapse_whitespace(scar_payload.get("mechanism_fingerprint"))
+    if fingerprint is not None:
+        exact_row = conn.execute(
+            """
+            SELECT id
+            FROM scar_families
+            WHERE canonical_fingerprint = ?
+            LIMIT 1
+            """,
+            (fingerprint,),
+        ).fetchone()
+        if exact_row is not None:
+            return str(exact_row["id"])
+
+    mechanism_type = _collapse_whitespace(scar_payload.get("mechanism_type"))
+    target_function = _collapse_whitespace(scar_payload.get("target_function"))
+    canonical_text = _collapse_whitespace(scar_payload.get("mechanism_canonical_text"))
+
+    best_family_id = None
+    best_similarity = 0.0
+    if mechanism_type is not None and target_function is not None and canonical_text is not None:
+        family_rows = conn.execute(
+            """
+            SELECT
+                id,
+                mechanism_type,
+                target_function,
+                canonical_text
+            FROM scar_families
+            WHERE mechanism_type = ?
+            """,
+            (mechanism_type,),
+        ).fetchall()
+        for row in family_rows:
+            if not _family_target_function_compatible(
+                target_function,
+                row["target_function"],
+            ):
+                continue
+            similarity = _family_semantic_similarity(
+                canonical_text,
+                row["canonical_text"],
+            )
+            if similarity >= 0.88 and similarity > best_similarity:
+                best_similarity = similarity
+                best_family_id = str(row["id"])
+
+    if best_family_id is not None:
+        return best_family_id
+
+    family_id = f"scar-family-{uuid.uuid4().hex}"
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO scar_families (
+            id,
+            mechanism_type,
+            target_function,
+            canonical_text,
+            canonical_fingerprint,
+            summary_constraint_rule,
+            summary_applies_when,
+            summary_why_it_fails,
+            scar_count,
+            fundamental_count,
+            repairable_count,
+            avg_confidence,
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0.0, ?, ?)
+        """,
+        (
+            family_id,
+            mechanism_type or "",
+            target_function or "",
+            canonical_text or "",
+            fingerprint or family_id,
+            _collapse_whitespace(scar_payload.get("constraint_rule")) or "",
+            _collapse_whitespace(scar_payload.get("applies_when")) or "",
+            _first_nonempty_text(
+                scar_payload.get("broken_invariant"),
+                scar_payload.get("observed_result"),
+                scar_payload.get("failed_assumption"),
+                scar_payload.get("failed_gate"),
+            )
+            or "",
+            now,
+            now,
+        ),
+    )
+    return family_id
+
+
 def _persist_scar_with_conn(
     conn: sqlite3.Connection,
     *,
@@ -6327,6 +6588,9 @@ def _persist_scar_with_conn(
     """Persist one scar plus embedding and occurrence rows inside an existing transaction."""
     if not isinstance(scar_payload, dict) or not scar_payload:
         return
+
+    family_id = _resolve_or_create_scar_family_with_conn(conn, scar_payload)
+    scar_payload["family_id"] = family_id
 
     conn.execute(
         """INSERT INTO scar_registry (
@@ -6371,6 +6635,27 @@ def _persist_scar_with_conn(
         ),
     )
 
+    mechanism_embedded = _embed_scar_mechanism_text(
+        scar_payload.get("mechanism_canonical_text") or ""
+    )
+    if mechanism_embedded is not None:
+        vector, embedding_model, embedding_version = mechanism_embedded
+        conn.execute(
+            """INSERT INTO scar_vectors (
+                scar_id, vector_kind, embedding_model, embedding_version,
+                dimension, vector_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                scar_payload["id"],
+                "mechanism",
+                embedding_model,
+                embedding_version,
+                len(vector),
+                json.dumps(vector, ensure_ascii=False),
+                scar_payload.get("created_at") or _now(),
+            ),
+        )
+
     retrieval_text = _build_scar_retrieval_text(scar_payload)
     embedded = _embed_scar_retrieval_text(retrieval_text)
     if embedded is not None:
@@ -6409,6 +6694,8 @@ def _persist_scar_with_conn(
             scar_payload.get("created_at") or _now(),
         ),
     )
+
+    _refresh_scar_family_summary_with_conn(conn, family_id)
 
 
 def build_mechanism_signature(connection: dict) -> str:

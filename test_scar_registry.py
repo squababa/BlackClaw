@@ -22,6 +22,15 @@ def _fetchall_dicts(db_path: str, query: str) -> list[dict]:
     return rows
 
 
+def _fake_embedding(text: str) -> tuple[list[float], str, str]:
+    clean = str(text).lower()
+    if "queue pressure" in clean or "response latency" in clean:
+        vector = [0.0, 1.0, 0.0]
+    else:
+        vector = [1.0, 0.0, 0.0]
+    return vector, "test-model", "v1"
+
+
 def _insert_exploration(db_path: str, seed_domain: str, target_domain: str) -> int:
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA foreign_keys=ON")
@@ -317,7 +326,12 @@ def test_save_strong_rejection_creates_validation_scar(temp_db, monkeypatch) -> 
     monkeypatch.setattr(
         store,
         "_embed_scar_retrieval_text",
-        lambda text: ([1.0, 0.0, 0.0], "test-model", "v1"),
+        _fake_embedding,
+    )
+    monkeypatch.setattr(
+        store,
+        "_embed_scar_mechanism_text",
+        _fake_embedding,
     )
     exploration_id = _insert_exploration(
         str(temp_db),
@@ -384,6 +398,10 @@ def test_save_strong_rejection_creates_validation_scar(temp_db, monkeypatch) -> 
         str(temp_db),
         "SELECT * FROM scar_occurrences ORDER BY created_at ASC",
     )
+    family_rows = _fetchall_dicts(
+        str(temp_db),
+        "SELECT * FROM scar_families ORDER BY created_at ASC",
+    )
 
     assert len(scar_rows) == 1
     scar = scar_rows[0]
@@ -403,13 +421,18 @@ def test_save_strong_rejection_creates_validation_scar(temp_db, monkeypatch) -> 
         "require direct target-domain evidence for each critical source-to-target "
         "variable mapping before treating the mechanism as transferable"
     )
-    assert len(vector_rows) == 1
-    assert vector_rows[0]["scar_id"] == scar["id"]
+    assert len(vector_rows) == 2
+    assert {row["vector_kind"] for row in vector_rows} == {"mechanism", "retrieval"}
+    assert {row["scar_id"] for row in vector_rows} == {scar["id"]}
     assert len(occurrence_rows) == 1
     assert occurrence_rows[0]["scar_id"] == scar["id"]
     assert occurrence_rows[0]["attempt_id"].startswith(
         f"exploration:{exploration_id}:strong_rejection:"
     )
+    assert len(family_rows) == 1
+    assert family_rows[0]["scar_count"] == 1
+    assert family_rows[0]["summary_constraint_rule"] == scar["constraint_rule"]
+    assert scar["family_id"] == family_rows[0]["id"]
 
 
 @pytest.mark.parametrize(
@@ -454,7 +477,12 @@ def test_save_strong_rejection_creates_late_stage_scars(
     monkeypatch.setattr(
         store,
         "_embed_scar_retrieval_text",
-        lambda text: ([0.0, 1.0, 0.0], "test-model", "v1"),
+        _fake_embedding,
+    )
+    monkeypatch.setattr(
+        store,
+        "_embed_scar_mechanism_text",
+        _fake_embedding,
     )
     exploration_id = _insert_exploration(
         str(temp_db),
@@ -502,7 +530,12 @@ def test_save_strong_rejection_skips_thin_scar_payload_without_crashing(
     monkeypatch.setattr(
         store,
         "_embed_scar_retrieval_text",
-        lambda text: ([1.0, 0.0, 0.0], "test-model", "v1"),
+        _fake_embedding,
+    )
+    monkeypatch.setattr(
+        store,
+        "_embed_scar_mechanism_text",
+        _fake_embedding,
     )
     exploration_id = _insert_exploration(
         str(temp_db),
@@ -531,3 +564,305 @@ def test_save_strong_rejection_skips_thin_scar_payload_without_crashing(
     assert rejection_id > 0
     assert _fetchall_dicts(str(temp_db), "SELECT * FROM strong_rejections")
     assert _fetchall_dicts(str(temp_db), "SELECT * FROM scar_registry") == []
+
+
+def test_exact_fingerprint_family_assignment_reuses_existing_family(
+    temp_db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store, "_embed_scar_retrieval_text", _fake_embedding)
+    monkeypatch.setattr(store, "_embed_scar_mechanism_text", _fake_embedding)
+    conn = sqlite3.connect(str(temp_db))
+    conn.execute(
+        """INSERT INTO scar_families (
+            id, mechanism_type, target_function, canonical_text,
+            canonical_fingerprint, summary_constraint_rule, summary_applies_when,
+            summary_why_it_fails, scar_count, fundamental_count, repairable_count,
+            avg_confidence, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "fam-exact",
+            "modular_arithmetic",
+            "search collision-free offset assignments",
+            "existing canonical text",
+            "exact-fingerprint",
+            "existing rule",
+            "existing applies",
+            "existing why",
+            0,
+            0,
+            0,
+            0.0,
+            "2026-03-20T00:00:00+00:00",
+            "2026-03-20T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    scar_payload = {
+        "id": "scar-exact",
+        "target_domain": "Wireless Scheduling",
+        "source_domain": "Juggling",
+        "abstract_structure": "periodic modular allocation under collision constraints",
+        "target_function": "search collision-free offset assignments",
+        "mechanism_type": "modular_arithmetic",
+        "mechanism_canonical_text": "candidate canonical text",
+        "mechanism_fingerprint": "exact-fingerprint",
+        "scar_type": "bad_mapping",
+        "failed_gate": "validation",
+        "failed_assumption": None,
+        "broken_invariant": None,
+        "observed_result": "missing mapping support",
+        "cheap_test_context": "replay dense schedules",
+        "constraint_rule": "require direct target-domain evidence for each critical mapping",
+        "applies_when": "dense periodic schedulers",
+        "does_not_apply_when": "non-periodic schedules",
+        "repairability": "repairable",
+        "severity": 3,
+        "confidence": 0.82,
+        "retrieval_weight": 1.0,
+        "status": "active",
+        "created_at": "2026-03-23T10:00:00+00:00",
+        "updated_at": "2026-03-23T10:00:00+00:00",
+    }
+
+    conn = sqlite3.connect(str(temp_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    store._persist_scar_with_conn(
+        conn,
+        strong_rejection_id=1,
+        exploration_id=7,
+        scar_payload=scar_payload,
+    )
+    conn.commit()
+    conn.close()
+
+    scar_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_registry")
+    family_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_families")
+
+    assert len(scar_rows) == 1
+    assert scar_rows[0]["family_id"] == "fam-exact"
+    assert len(family_rows) == 1
+    assert family_rows[0]["scar_count"] == 1
+
+
+def test_semantic_family_assignment_reuses_compatible_family(
+    temp_db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store, "_embed_scar_retrieval_text", _fake_embedding)
+    monkeypatch.setattr(store, "_embed_scar_mechanism_text", _fake_embedding)
+    conn = sqlite3.connect(str(temp_db))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        """INSERT INTO scar_families (
+            id, mechanism_type, target_function, canonical_text,
+            canonical_fingerprint, summary_constraint_rule, summary_applies_when,
+            summary_why_it_fails, scar_count, fundamental_count, repairable_count,
+            avg_confidence, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "fam-semantic",
+            "modular_arithmetic",
+            "search collision-free offset assignments",
+            "hyperperiod offset assignment compares candidate activation slots",
+            "semantic-anchor",
+            "existing rule",
+            "dense periodic schedulers",
+            "existing why",
+            1,
+            0,
+            1,
+            0.8,
+            "2026-03-20T00:00:00+00:00",
+            "2026-03-20T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    scar_payload = {
+        "id": "scar-semantic",
+        "target_domain": "Wireless Scheduling",
+        "source_domain": "Juggling",
+        "abstract_structure": "periodic modular allocation under collision constraints",
+        "target_function": "search collision-free offset assignments at high utilization",
+        "mechanism_type": "modular_arithmetic",
+        "mechanism_canonical_text": "hyperperiod offset assignment compares candidate activation slots before collision filtering",
+        "mechanism_fingerprint": "new-fingerprint",
+        "scar_type": "bad_mapping",
+        "failed_gate": "validation",
+        "failed_assumption": None,
+        "broken_invariant": None,
+        "observed_result": "second related mechanism failure",
+        "cheap_test_context": "replay dense schedules",
+        "constraint_rule": "require direct target-domain evidence for each critical mapping",
+        "applies_when": "dense periodic schedulers at high utilization",
+        "does_not_apply_when": None,
+        "repairability": "repairable",
+        "severity": 3,
+        "confidence": 0.86,
+        "retrieval_weight": 1.0,
+        "status": "active",
+        "created_at": "2026-03-23T11:00:00+00:00",
+        "updated_at": "2026-03-23T11:00:00+00:00",
+    }
+
+    conn = sqlite3.connect(str(temp_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    store._persist_scar_with_conn(
+        conn,
+        strong_rejection_id=2,
+        exploration_id=8,
+        scar_payload=scar_payload,
+    )
+    conn.commit()
+    conn.close()
+
+    scar_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_registry")
+    family_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_families")
+
+    assert len(scar_rows) == 1
+    assert scar_rows[0]["family_id"] == "fam-semantic"
+    assert len(family_rows) == 1
+    assert family_rows[0]["scar_count"] == 1
+
+
+def test_new_family_creation_builds_family_row(temp_db, monkeypatch) -> None:
+    monkeypatch.setattr(store, "_embed_scar_retrieval_text", _fake_embedding)
+    monkeypatch.setattr(store, "_embed_scar_mechanism_text", _fake_embedding)
+
+    scar_payload = {
+        "id": "scar-new-family",
+        "target_domain": "Wireless Scheduling",
+        "source_domain": "Juggling",
+        "abstract_structure": "periodic modular allocation under collision constraints",
+        "target_function": "search collision-free offset assignments",
+        "mechanism_type": "modular_arithmetic",
+        "mechanism_canonical_text": "fresh canonical mechanism",
+        "mechanism_fingerprint": "fresh-fingerprint",
+        "scar_type": "bad_mapping",
+        "failed_gate": "validation",
+        "failed_assumption": None,
+        "broken_invariant": None,
+        "observed_result": "new family failure",
+        "cheap_test_context": "replay dense schedules",
+        "constraint_rule": "require direct target-domain evidence for each critical mapping",
+        "applies_when": "dense periodic schedulers",
+        "does_not_apply_when": None,
+        "repairability": "repairable",
+        "severity": 3,
+        "confidence": 0.79,
+        "retrieval_weight": 1.0,
+        "status": "active",
+        "created_at": "2026-03-23T12:00:00+00:00",
+        "updated_at": "2026-03-23T12:00:00+00:00",
+    }
+
+    conn = sqlite3.connect(str(temp_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    store._persist_scar_with_conn(
+        conn,
+        strong_rejection_id=3,
+        exploration_id=9,
+        scar_payload=scar_payload,
+    )
+    conn.commit()
+    conn.close()
+
+    family_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_families")
+    scar_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_registry")
+
+    assert len(family_rows) == 1
+    assert family_rows[0]["canonical_fingerprint"] == "fresh-fingerprint"
+    assert family_rows[0]["scar_count"] == 1
+    assert scar_rows[0]["family_id"] == family_rows[0]["id"]
+
+
+def test_family_summary_updates_when_second_related_scar_arrives(
+    temp_db,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store, "_embed_scar_retrieval_text", _fake_embedding)
+    monkeypatch.setattr(store, "_embed_scar_mechanism_text", _fake_embedding)
+
+    first_payload = {
+        "id": "scar-summary-1",
+        "target_domain": "Wireless Scheduling",
+        "source_domain": "Juggling",
+        "abstract_structure": "periodic modular allocation under collision constraints",
+        "target_function": "search collision-free offset assignments",
+        "mechanism_type": "modular_arithmetic",
+        "mechanism_canonical_text": "family summary canonical one",
+        "mechanism_fingerprint": "family-summary-1",
+        "scar_type": "bad_mapping",
+        "failed_gate": "validation",
+        "failed_assumption": None,
+        "broken_invariant": None,
+        "observed_result": "broad failure wording",
+        "cheap_test_context": "replay dense schedules",
+        "constraint_rule": "reject weak mechanism claims",
+        "applies_when": "schedulers",
+        "does_not_apply_when": None,
+        "repairability": "repairable",
+        "severity": 3,
+        "confidence": 0.70,
+        "retrieval_weight": 1.0,
+        "status": "active",
+        "created_at": "2026-03-23T12:00:00+00:00",
+        "updated_at": "2026-03-23T12:00:00+00:00",
+    }
+    second_payload = {
+        "id": "scar-summary-2",
+        "target_domain": "Wireless Scheduling",
+        "source_domain": "Juggling",
+        "abstract_structure": "periodic modular allocation under collision constraints",
+        "target_function": "search collision-free offset assignments at high utilization",
+        "mechanism_type": "modular_arithmetic",
+        "mechanism_canonical_text": "family summary canonical two",
+        "mechanism_fingerprint": "family-summary-2",
+        "scar_type": "bad_mapping",
+        "failed_gate": "validation",
+        "failed_assumption": None,
+        "broken_invariant": None,
+        "observed_result": "specific mapping support was missing in dense periodic schedulers",
+        "cheap_test_context": "replay dense schedules",
+        "constraint_rule": (
+            "require direct target-domain evidence for each critical source-to-target "
+            "variable mapping before treating the mechanism as transferable"
+        ),
+        "applies_when": "dense periodic schedulers at high utilization",
+        "does_not_apply_when": "non-periodic sparse schedules",
+        "repairability": "repairable",
+        "severity": 3,
+        "confidence": 0.90,
+        "retrieval_weight": 1.0,
+        "status": "active",
+        "created_at": "2026-03-23T13:00:00+00:00",
+        "updated_at": "2026-03-23T13:00:00+00:00",
+    }
+
+    conn = sqlite3.connect(str(temp_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    store._persist_scar_with_conn(conn, strong_rejection_id=4, exploration_id=10, scar_payload=first_payload)
+    store._persist_scar_with_conn(conn, strong_rejection_id=5, exploration_id=11, scar_payload=second_payload)
+    conn.commit()
+    conn.close()
+
+    family_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_families")
+    scar_rows = _fetchall_dicts(str(temp_db), "SELECT * FROM scar_registry ORDER BY created_at ASC")
+
+    assert len(family_rows) == 1
+    family = family_rows[0]
+    assert family["scar_count"] == 2
+    assert family["repairable_count"] == 2
+    assert abs(float(family["avg_confidence"]) - 0.8) < 1e-6
+    assert family["summary_constraint_rule"] == second_payload["constraint_rule"]
+    assert family["summary_applies_when"] == second_payload["applies_when"]
+    assert family["summary_why_it_fails"] == second_payload["observed_result"]
+    assert len({row["family_id"] for row in scar_rows}) == 1
