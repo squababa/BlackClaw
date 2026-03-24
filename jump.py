@@ -2075,6 +2075,9 @@ def _repair_guidance_for_missing_fields(
         guidance.append(
             "- Phase 5 usefulness-alignment bottleneck: keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable unless they are empty. Rewrite the edge layer so it points to the exact same core claim, process, comparator, and metric already named elsewhere."
         )
+        guidance.append(
+            "- Treat this as a repair-quality pass, not a reframing pass. Preserve the original target-domain claim and evidence grounding instead of drifting to a different problem, mechanism, metric, comparator, or stakeholder."
+        )
         lever_anchor = str(normalized_edge.get("actionable_lever") or "").strip()
         operator_anchor = str(normalized_edge.get("primary_operator") or "").strip()
         if metric_anchor:
@@ -2108,12 +2111,18 @@ def _repair_guidance_for_missing_fields(
         guidance.append(
             "- Rewrite `mechanism` as one process-first sentence that opens with the exact target-domain process noun phrase, then names the operator, monitored/control variable, and resulting measurable change. Do not start with `when`, `as`, `if`, or a result summary."
         )
+        guidance.append(
+            "- Preserve the original target-domain claim/process and repair only the unsupported opening or process wording. Do not drift into a different problem framing, metric, comparator, or alternate mechanism."
+        )
         if missing_field_set == {"mechanism"}:
             guidance.append(
                 "- This is a mechanism-only rescue pass. Keep `edge_analysis`, `prediction`, `test`, and `evidence_map` wording fixed unless a referenced anchor is empty."
             )
             guidance.append(
                 "- Prefer the smallest wording change that restores direct process anchoring and passes schema/validation."
+            )
+            guidance.append(
+                "- Prefer the smallest valid rewrite to the opening/process phrasing rather than rewriting the whole causal story."
             )
             guidance.append(
                 "- If the rest of the payload is already sound, return only `{\"mechanism\": ...}` instead of regenerating the full candidate."
@@ -2148,6 +2157,10 @@ def _repair_guidance_for_missing_fields(
         if falsify_anchor:
             guidance.append(
                 f"- Preserve the current falsify-side decision wording so the rescue stays on the same operator check: `{falsify_anchor}`."
+            )
+        if mechanism_claim_anchor:
+            guidance.append(
+                "- Reuse existing process wording from `mechanism` / `evidence_map.mechanism_assertions` wherever it is already specific and evidence-grounded; do not swap in a new process label just to make the sentence sound broader."
             )
         core_strength = str(repair_context.get("core_target_evidence_strength") or "").strip()
         core_reasons = [
@@ -2193,9 +2206,20 @@ def _repair_guidance_for_missing_fields(
         guidance.append(
             "- Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move on a narrow slice of the workflow, not a generic validation suggestion and not a restatement of the main test. Reuse the same metric/comparator as `test.metric`, and make `confirm`/`falsify` name that same metric explicitly."
         )
+        guidance.append(
+            "- Preserve the same target-domain process, operator decision, and target claim already grounded elsewhere in the payload. Do not turn the repair into a broader validation program or a different workflow."
+        )
         if str(test_payload.get("metric") or "").strip():
             guidance.append(
                 "- Keep `edge_analysis.cheap_test.metric` identical to `test.metric` unless the current metric is empty."
+            )
+        if confirm_anchor:
+            guidance.append(
+                "- Reuse the existing `test.confirm` comparator wording as closely as possible so the cheap test checks the same decision boundary."
+            )
+        if falsify_anchor:
+            guidance.append(
+                "- Reuse the existing `test.falsify` decision wording as closely as possible so the cheap test kills the same claim if it fails."
             )
         if edge_alignment.get("cheap_test_generic_validation"):
             guidance.append(
@@ -2208,6 +2232,9 @@ def _repair_guidance_for_missing_fields(
     if "edge_analysis.edge_if_right" in missing_fields:
         guidance.append(
             "- Rewrite `edge_analysis.edge_if_right` so it states one concrete operator gain such as lower collision rate, earlier warning, lower cost, higher throughput, or reduced false positives. Reject generic usefulness language and name the decision or workflow advantage unlocked if the cheap test confirms."
+        )
+        guidance.append(
+            "- Keep the same operator, the same decision unlocked by the cheap test, and the same measured advantage family already implied by the current metric/comparator. Do not introduce a new benefit axis, stakeholder, or unrelated KPI."
         )
         if confirm_anchor:
             guidance.append(
