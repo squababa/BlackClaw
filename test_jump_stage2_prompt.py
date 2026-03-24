@@ -648,12 +648,42 @@ def test_build_repair_prompt_targets_usefulness_alignment_bottleneck() -> None:
     assert "Reuse the existing confirm-side comparator language instead of paraphrasing it" in repair_prompt
     assert "Reuse the existing falsify-side decision language" in repair_prompt
     assert "Keep `edge_analysis.cheap_test.metric` identical to `test.metric`" in repair_prompt
-    assert "Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move" in repair_prompt
-    assert "Preserve the same target-domain process, operator decision, and target claim already grounded elsewhere in the payload." in repair_prompt
+    assert "Rewrite `edge_analysis.cheap_test` so it includes `setup`, `metric`, `confirm`, `falsify`, and optional `time_to_signal`" in repair_prompt
+    assert "Preserve the same current mechanism, target-domain process, operator decision, and target claim already grounded elsewhere in the payload." in repair_prompt
     assert "Reuse the existing `test.confirm` comparator wording as closely as possible" in repair_prompt
     assert "Reuse the existing `test.falsify` decision wording as closely as possible" in repair_prompt
+    assert "Make `setup` one concrete operator move, replay, simulation, filter, audit, or measurement path" in repair_prompt
+    assert "If the rest of the candidate is already sound, complete only `edge_analysis.cheap_test` rather than rewriting unrelated fields." in repair_prompt
     assert "Keep the same operator, the same decision unlocked by the cheap test, and the same measured advantage family already implied by the current metric/comparator." in repair_prompt
     assert "The current cheap test sounds like generic validation rather than an operator move." in repair_prompt
+
+
+def test_build_repair_prompt_marks_cheap_test_only_completion_as_narrow() -> None:
+    payload = _valid_stage2_payload()
+    payload["edge_analysis"]["cheap_test"]["setup"] = (
+        "Run a study to validate whether the hypothesis is true."
+    )
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        ["edge_analysis.cheap_test"],
+        original_data=payload,
+    )
+
+    assert "This is an `edge_analysis.cheap_test`-only completion pass." in repair_prompt
+    assert (
+        "prefer returning only "
+        "`{\"edge_analysis\": {\"cheap_test\": {\"setup\": ..., \"metric\": ..., "
+        "\"confirm\": ..., \"falsify\": ..., \"time_to_signal\": ...}}}` "
+        "instead of rewriting the full candidate."
+    ) in repair_prompt
+    assert "includes `setup`, `metric`, `confirm`, `falsify`, and optional `time_to_signal`" in repair_prompt
+    assert "Make `setup` one concrete operator move, replay, simulation, filter, audit, or measurement path" in repair_prompt
+    assert "Keep `edge_analysis.cheap_test.metric` identical to `test.metric` when possible." in repair_prompt
+    assert "Reuse the existing `test.confirm` comparator wording as closely as possible" in repair_prompt
+    assert "Reuse the existing `test.falsify` decision wording as closely as possible" in repair_prompt
+    assert "If the rest of the candidate is already sound, complete only `edge_analysis.cheap_test` rather than rewriting unrelated fields." in repair_prompt
 
 
 def test_build_repair_prompt_marks_mechanism_only_rescue_as_narrow() -> None:

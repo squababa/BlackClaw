@@ -2626,8 +2626,10 @@ def _repair_guidance_for_missing_fields(
         if isinstance(normalized_edge.get("cheap_test"), dict)
         else {}
     )
+    cheap_test_setup_anchor = str(cheap_test_payload.get("setup") or "").strip()
     cheap_test_metric_anchor = str(cheap_test_payload.get("metric") or "").strip()
     cheap_test_confirm_anchor = str(cheap_test_payload.get("confirm") or "").strip()
+    cheap_test_falsify_anchor = str(cheap_test_payload.get("falsify") or "").strip()
     if any(field in usefulness_bottleneck_fields for field in missing_fields):
         guidance.append(
             "- Phase 5 usefulness-alignment bottleneck: keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable unless they are empty. Rewrite the edge layer so it points to the exact same core claim, process, comparator, and metric already named elsewhere."
@@ -2760,15 +2762,48 @@ def _repair_guidance_for_missing_fields(
             "- Rewrite `edge_analysis.actionable_lever` so it names one concrete operator action, filter, intervention, or decision rule. Reject advisory phrasing like `investigate further`, `study this`, or `consider this`."
         )
     if "edge_analysis.cheap_test" in missing_fields:
+        if missing_field_set == {"edge_analysis.cheap_test"}:
+            guidance.append(
+                "- This is an `edge_analysis.cheap_test`-only completion pass. Keep `connection`, `mechanism`, `prediction`, `test`, `variable_mapping`, `evidence_map`, and the rest of `edge_analysis` stable."
+            )
+            guidance.append(
+                "- If only this field is missing, prefer returning only `{\"edge_analysis\": {\"cheap_test\": {\"setup\": ..., \"metric\": ..., \"confirm\": ..., \"falsify\": ..., \"time_to_signal\": ...}}}` instead of rewriting the full candidate."
+            )
         guidance.append(
-            "- Rewrite `edge_analysis.cheap_test` so `setup` names one cheap operator move on a narrow slice of the workflow, not a generic validation suggestion and not a restatement of the main test. Reuse the same metric/comparator as `test.metric`, and make `confirm`/`falsify` name that same metric explicitly."
+            "- Rewrite `edge_analysis.cheap_test` so it includes `setup`, `metric`, `confirm`, `falsify`, and optional `time_to_signal`. `setup` must name one cheap operator move on a narrow slice of the workflow, not a generic validation suggestion and not a restatement of the main test."
         )
         guidance.append(
-            "- Preserve the same target-domain process, operator decision, and target claim already grounded elsewhere in the payload. Do not turn the repair into a broader validation program or a different workflow."
+            "- Make `setup` one concrete operator move, replay, simulation, filter, audit, or measurement path inside the current operator workflow. Do not turn the repair into a generic validation study, broader research program, or different workflow."
         )
+        guidance.append(
+            "- Preserve the same current mechanism, target-domain process, operator decision, and target claim already grounded elsewhere in the payload. Keep the cheap test tied to the existing workflow context."
+        )
+        guidance.append(
+            "- Reuse the same metric/comparator wording as the current `test.metric`, and make `confirm`/`falsify` name that same metric explicitly."
+        )
+        if cheap_test_setup_anchor:
+            guidance.append(
+                f"- Reuse any already-grounded cheap-test setup wording where possible and only complete what is missing: `{cheap_test_setup_anchor}`."
+            )
         if str(test_payload.get("metric") or "").strip():
             guidance.append(
-                "- Keep `edge_analysis.cheap_test.metric` identical to `test.metric` unless the current metric is empty."
+                "- Keep `edge_analysis.cheap_test.metric` identical to `test.metric` when possible."
+            )
+        if cheap_test_metric_anchor:
+            guidance.append(
+                f"- Reuse the current cheap-test metric wording directly if it already matches the main test metric: `{cheap_test_metric_anchor}`."
+            )
+        elif metric_anchor:
+            guidance.append(
+                f"- Reuse the current metric wording directly: `{metric_anchor}`."
+            )
+        if cheap_test_confirm_anchor:
+            guidance.append(
+                f"- Reuse the current cheap-test confirm wording closely if it already tracks the same decision boundary: `{cheap_test_confirm_anchor}`."
+            )
+        if cheap_test_falsify_anchor:
+            guidance.append(
+                f"- Reuse the current cheap-test falsify wording closely if it already tracks the same decision boundary: `{cheap_test_falsify_anchor}`."
             )
         if confirm_anchor:
             guidance.append(
@@ -2778,6 +2813,29 @@ def _repair_guidance_for_missing_fields(
             guidance.append(
                 "- Reuse the existing `test.falsify` decision wording as closely as possible so the cheap test kills the same claim if it fails."
             )
+        if metric_anchor:
+            guidance.append(
+                f"- Keep the cheap test on the current metric and decision boundary: `{metric_anchor}`."
+            )
+        if operator_anchor:
+            guidance.append(
+                f"- Keep the cheap test scoped to the current operator workflow: `{operator_anchor}`."
+            )
+        if lever_anchor:
+            guidance.append(
+                f"- Keep the cheap test tied to the current operator move or lever context: `{lever_anchor}`."
+            )
+        if current_mechanism:
+            guidance.append(
+                f"- Keep the cheap test anchored to the current mechanism wording instead of inventing a new causal story: `{current_mechanism}`."
+            )
+        if observable_anchor:
+            guidance.append(
+                f"- Keep the cheap test tied to the current target claim anchor: `{observable_anchor}`."
+            )
+        guidance.append(
+            "- If the rest of the candidate is already sound, complete only `edge_analysis.cheap_test` rather than rewriting unrelated fields."
+        )
         if edge_alignment.get("cheap_test_generic_validation"):
             guidance.append(
                 "- The current cheap test sounds like generic validation rather than an operator move. Replace wording like `validate whether`, `run a study`, or `collect more data` with a concrete replay/filter/rerank/toggle/audit action."
