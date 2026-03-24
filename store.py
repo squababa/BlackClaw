@@ -6772,7 +6772,8 @@ def _normalize_scar_evidence_type(value: object) -> str:
     clean_value = _clean_optional_text(value)
     if clean_value in SCAR_EVIDENCE_TYPES:
         return clean_value
-    return "manual_review"
+    allowed_values = ", ".join(SCAR_EVIDENCE_TYPES)
+    raise ValueError(f"evidence_type must be one of: {allowed_values}")
 
 
 def _validate_scar_feedback_confidence(value: object) -> float:

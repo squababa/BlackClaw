@@ -441,31 +441,6 @@ def _print_credibility_weighting_summary(score_label: str, scores: dict):
     print(f"  [{score_label}] Credibility: " + " | ".join(parts))
 
 
-def _print_structural_false_positive_summary(score_label: str, scores: dict):
-    """Render structural false-positive penalties when the early filter activates."""
-    if not isinstance(scores, dict):
-        return
-
-    penalty = float(scores.get("structural_false_positive_penalty") or 0.0)
-    if penalty <= 0.0005:
-        return
-
-    structural_score = scores.get("structural_false_positive_score")
-    score_text = (
-        f"{float(structural_score):.3f}"
-        if isinstance(structural_score, (int, float))
-        else "n/a"
-    )
-    print(
-        f"  [{score_label}] Structural filter: -{penalty:.3f} "
-        f"(score: {score_text})"
-    )
-    for reason in (scores.get("structural_false_positive_reasons") or [])[:4]:
-        cleaned = str(reason).strip()
-        if cleaned:
-            print(f"  [{score_label}] Structural - {cleaned}")
-
-
 def _record_late_stage_timing(
     timing_payload: dict,
     stage_key: str,
@@ -555,6 +530,10 @@ def _parse_report_only_args():
     )
     parser.add_argument(
         "--review-recent",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--jump-diagnostics",
         action="store_true",
     )
     parser.add_argument(
@@ -1603,6 +1582,106 @@ def _print_recent_review_items(limit: int = 20):
             print("  connection:")
             print(_indent_block(_truncate_text(row.get("connection_description"), 280)))
         print("")
+
+
+def _print_jump_diagnostics(limit: int = 20) -> None:
+    """Print recent jump-stage attempt diagnostics from stored exploration JSON."""
+    rows = list_recent_review_items(limit=max(1, int(limit)))
+    if not rows:
+        print("[JumpDiagnostics] No recent explorations found.")
+        return
+
+    print(f"[JumpDiagnostics] Recent {len(rows)} explorations")
+    total_attempts = 0
+    outcome_counts = {
+        "no_results": 0,
+        "detect_no_signal": 0,
+        "stage2_no_connection": 0,
+        "connection_found": 0,
+    }
+
+    for row in rows:
+        pattern_diagnostics = row.get("pattern_diagnostics") or {}
+        jump_attempts = (
+            pattern_diagnostics.get("jump_attempts")
+            if isinstance(pattern_diagnostics.get("jump_attempts"), list)
+            else []
+        )
+        print(
+            f"exploration #{row.get('exploration_id')} | "
+            f"{_short_timestamp(row.get('timestamp'))} | "
+            f"seed={row.get('seed_domain') or '—'} | "
+            f"seed_quality={row.get('seed_quality_band') or '—'}"
+        )
+        print(
+            "  pattern_diagnostics="
+            + _truncate_text(pattern_diagnostics.get("summary"), 160)
+        )
+        if not jump_attempts:
+            print("  jump_attempts=—")
+            print("")
+            continue
+
+        for attempt in jump_attempts:
+            if not isinstance(attempt, dict):
+                continue
+            total_attempts += 1
+            stage1_outcome = str(attempt.get("stage1_outcome") or "—").strip()
+            stage2_outcome = str(attempt.get("stage2_outcome") or "—").strip()
+            result_count = int(attempt.get("result_count") or 0)
+            if stage1_outcome == "no_results":
+                outcome_counts["no_results"] += 1
+            elif stage1_outcome == "detect_no_signal":
+                outcome_counts["detect_no_signal"] += 1
+            elif stage2_outcome == "stage2_no_connection":
+                outcome_counts["stage2_no_connection"] += 1
+            elif stage2_outcome == "connection_found":
+                outcome_counts["connection_found"] += 1
+
+            pattern_name = _truncate_text(attempt.get("pattern_name"), 52)
+            built_query = _truncate_text(attempt.get("built_jump_query"), 72)
+            target_domain = _truncate_text(
+                attempt.get("stage2_target_domain")
+                or attempt.get("stage1_target_domain"),
+                56,
+            )
+            failure_hint = _truncate_text(
+                attempt.get("stage2_failure_hint")
+                or attempt.get("stage1_failure_hint"),
+                72,
+            )
+            print(
+                f"  pattern={pattern_name} | query={built_query} | "
+                f"results={result_count} | stage1={stage1_outcome} | stage2={stage2_outcome}"
+            )
+            if target_domain != "—" or failure_hint != "—":
+                print(
+                    f"    target={target_domain} | failure_hint={failure_hint}"
+                )
+            titles = attempt.get("top_result_titles")
+            if isinstance(titles, list) and titles:
+                print(
+                    "    top_titles="
+                    + "; ".join(_truncate_text(title, 40) for title in titles[:3])
+                )
+        print("")
+
+    print("[JumpDiagnostics] Aggregate")
+    print(f"total_attempted_patterns\t{total_attempts}")
+
+    def _share(count: int) -> str:
+        if total_attempts <= 0:
+            return "0.0%"
+        return f"{(100.0 * count / float(total_attempts)):.1f}%"
+
+    for label in (
+        "no_results",
+        "detect_no_signal",
+        "stage2_no_connection",
+        "connection_found",
+    ):
+        count = outcome_counts.get(label, 0)
+        print(f"{label}\t{count}\t{_share(count)}")
 
 
 def _map_suggested_grade_to_manual(row: dict) -> tuple[str | None, str | None]:
@@ -4128,6 +4207,7 @@ if __name__ == "__main__":
     _early_transmission_review_action_count = sum(
         [
             _early_report_args.review_recent,
+            _early_report_args.jump_diagnostics,
             _early_report_args.grade_transmission is not None,
             _early_report_args.apply_suggested_grades,
         ]
@@ -4218,7 +4298,7 @@ if __name__ == "__main__":
         sys.exit(1)
     if _early_transmission_review_action_count > 1:
         print(
-            "  [!] Use only one transmission review action at a time: --review-recent, --grade-transmission, or --apply-suggested-grades."
+            "  [!] Use only one transmission review action at a time: --review-recent, --jump-diagnostics, --grade-transmission, or --apply-suggested-grades."
         )
         sys.exit(1)
     if _early_prediction_action_count > 1:
@@ -4278,10 +4358,11 @@ if __name__ == "__main__":
         and not _early_report_args.scan_open_predictions
         and not _early_report_args.strong_rejections
         and not _early_report_args.review_recent
+        and not _early_report_args.jump_diagnostics
         and not _early_report_args.apply_suggested_grades
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --review-recent, or --apply-suggested-grades."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --review-recent, --jump-diagnostics, or --apply-suggested-grades."
         )
         sys.exit(1)
     if (
@@ -4373,6 +4454,7 @@ if __name__ == "__main__":
         or _early_report_args.strong_rejections
         or _early_report_args.strong_rejection is not None
         or _early_report_args.review_recent
+        or _early_report_args.jump_diagnostics
         or _early_report_args.mark_supported is not None
         or _early_report_args.mark_contradicted is not None
         or _early_report_args.mark_mixed is not None
@@ -4437,6 +4519,8 @@ if __name__ == "__main__":
             _print_mechanism_check_report(limit=_early_report_args.window)
         if _early_report_args.review_recent:
             _print_recent_review_items(limit=_early_report_args.limit or 10)
+        if _early_report_args.jump_diagnostics:
+            _print_jump_diagnostics(limit=_early_report_args.limit or 10)
         if _early_report_args.apply_suggested_grades:
             _apply_suggested_grades(
                 limit=_early_report_args.limit or 20,
@@ -4641,8 +4725,8 @@ from config import (
     CYCLE_COOLDOWN,
     MAX_PATTERNS_PER_CYCLE,
 )
-from explore import dive, finalize_pattern_diagnostics
-from jump import lateral_jump, salvage_high_value_candidate
+from explore import append_jump_attempt_diagnostic, dive, finalize_pattern_diagnostics
+from jump import lateral_jump, lateral_jump_with_diagnostics, salvage_high_value_candidate
 from score import (
     score_connection,
     deep_dive_convergence,
@@ -4769,6 +4853,11 @@ def parse_args():
         "--review-recent",
         action="store_true",
         help="List recent explorations/transmissions with grading context and exit",
+    )
+    parser.add_argument(
+        "--jump-diagnostics",
+        action="store_true",
+        help="Inspect stored jump-stage attempt diagnostics from recent explorations and exit",
     )
     parser.add_argument(
         "--credibility-stats",
@@ -7400,7 +7489,6 @@ def _evaluate_connection_candidate(
     _record_late_stage_timing(late_stage_timing, "score", score_started)
     print(f"  [{score_label}] Total: {scores['total']:.3f} (threshold: {threshold})")
     _print_credibility_weighting_summary(score_label, scores)
-    _print_structural_false_positive_summary(score_label, scores)
     prediction_quality = (
         scores.get("prediction_quality")
         if isinstance(scores.get("prediction_quality"), dict)
@@ -7457,14 +7545,6 @@ def _evaluate_connection_candidate(
             "prediction_quality": prediction_quality,
             "claim_provenance": claim_provenance,
             "mechanism_typing": mechanism_typing,
-            "structural_filter": {
-                "score": scores.get("structural_false_positive_score"),
-                "penalty": scores.get("structural_false_positive_penalty"),
-                "reasons": list(scores.get("structural_false_positive_reasons") or []),
-                "reason_codes": list(
-                    scores.get("structural_false_positive_reason_codes") or []
-                ),
-            },
         }
         if not validation_ok:
             print("  [Validation] Rejected hypothesis - skipping transmission")
@@ -7915,10 +7995,6 @@ def _evaluate_connection_candidate(
     stage_failures: list[str] = []
     if not passes_threshold:
         stage_failures.append(f"below_threshold:{scores['total']:.3f}")
-    for reason in scores.get("structural_false_positive_reasons") or []:
-        cleaned = str(reason).strip()
-        if cleaned:
-            stage_failures.append(f"structural:{cleaned}")
     if not validation_ok:
         stage_failures.extend(
             f"validation:{reason}" for reason in validation_reasons if reason
@@ -8585,7 +8661,12 @@ def run_cycle(
             break
 
         print(f"  [Jump] Pattern {i+1}: {pattern['pattern_name']} → searching...")
-        connection = lateral_jump(pattern, seed["name"], seed["category"])
+        connection, jump_attempt = lateral_jump_with_diagnostics(
+            pattern,
+            seed["name"],
+            seed["category"],
+        )
+        append_jump_attempt_diagnostic(seed, jump_attempt)
         if connection is None:
             print("  [Jump] No connection found")
             consecutive_misses += 1
@@ -8661,11 +8742,12 @@ def run_cycle(
                 f"  [Hop-2 Jump] Pattern {j+1}: "
                 f"{hop_pattern['pattern_name']} → searching..."
             )
-            second_connection = lateral_jump(
+            second_connection, hop_jump_attempt = lateral_jump_with_diagnostics(
                 hop_pattern,
                 hop_seed["name"],
                 hop_seed["category"],
             )
+            append_jump_attempt_diagnostic(hop_seed, hop_jump_attempt)
             if second_connection is None:
                 print("  [Hop-2 Jump] No connection found")
                 hop_consecutive_misses += 1
@@ -8751,6 +8833,7 @@ def main():
     feedback_action_count = sum(
         [
             args.review_recent,
+            args.jump_diagnostics,
             args.apply_suggested_grades,
             args.star is not None,
             args.dismiss is not None,
@@ -8837,7 +8920,7 @@ def main():
         sys.exit(1)
     if feedback_action_count > 1:
         print(
-            "  [!] Use only one of --review-recent, --apply-suggested-grades, --star, --dismiss, --grade-transmission, --dive, or --transmission-lineage at a time."
+            "  [!] Use only one of --review-recent, --jump-diagnostics, --apply-suggested-grades, --star, --dismiss, --grade-transmission, --dive, or --transmission-lineage at a time."
         )
         sys.exit(1)
     if prediction_action_count > 1:
@@ -8923,10 +9006,11 @@ def main():
         and not args.strong_rejections
         and not args.backfill_lineage_scars
         and not args.review_recent
+        and not args.jump_diagnostics
         and not args.apply_suggested_grades
     ):
         print(
-            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --backfill-lineage-scars, --review-recent, or --apply-suggested-grades."
+            "  [!] --limit can only be used with --prediction-evidence, --outcome-review-queue, --evidence-review-queue, --scan-open-predictions, --strong-rejections, --backfill-lineage-scars, --review-recent, --jump-diagnostics, or --apply-suggested-grades."
         )
         sys.exit(1)
     if (
@@ -9011,6 +9095,10 @@ def main():
 
     if args.review_recent:
         _print_recent_review_items(limit=args.limit or 10)
+        return
+
+    if args.jump_diagnostics:
+        _print_jump_diagnostics(limit=args.limit or 10)
         return
 
     if args.apply_suggested_grades:

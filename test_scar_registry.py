@@ -707,6 +707,23 @@ def test_save_scar_feedback_supportive_result_records_evidence_without_new_scar(
     assert evidence_rows[0]["scar_id"] == "scar-feedback-anchor"
 
 
+def test_save_scar_feedback_rejects_unknown_evidence_type(
+    temp_db,
+) -> None:
+    _insert_feedback_anchor(str(temp_db))
+
+    with pytest.raises(ValueError) as excinfo:
+        store.save_scar_feedback(
+            scar_id="scar-feedback-anchor",
+            observed_result="torque transfer collapsed under high load",
+            evidence_type="field_observation",
+            confidence=0.9,
+        )
+
+    assert "evidence_type must be one of:" in str(excinfo.value)
+    assert _fetchall_dicts(str(temp_db), "SELECT * FROM scar_evidence") == []
+
+
 def test_log_scar_cli_attaches_evidence_to_existing_scar(
     temp_db,
     monkeypatch,

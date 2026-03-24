@@ -549,6 +549,26 @@ def _store_pattern_diagnostics(seed: dict, diagnostics: dict) -> None:
         seed["pattern_diagnostics"] = diagnostics
 
 
+def append_jump_attempt_diagnostic(seed: dict, jump_attempt: dict) -> dict | None:
+    """Append one lightweight jump-attempt diagnostic to the seed diagnostics."""
+    diagnostics = seed.get("pattern_diagnostics")
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        return None
+    if not isinstance(jump_attempt, dict) or not jump_attempt:
+        return diagnostics
+
+    jump_attempts = diagnostics.get("jump_attempts")
+    if not isinstance(jump_attempts, list):
+        jump_attempts = []
+    jump_attempts = list(jump_attempts)
+    jump_attempts.append(dict(jump_attempt))
+
+    updated = dict(diagnostics)
+    updated["jump_attempts"] = jump_attempts
+    _store_pattern_diagnostics(seed, updated)
+    return updated
+
+
 def finalize_pattern_diagnostics(seed: dict, connections_found: int) -> dict | None:
     """Update extraction diagnostics with post-jump outcome context."""
     diagnostics = seed.get("pattern_diagnostics")
@@ -556,6 +576,8 @@ def finalize_pattern_diagnostics(seed: dict, connections_found: int) -> dict | N
         return None
 
     final = dict(diagnostics)
+    if isinstance(diagnostics.get("jump_attempts"), list):
+        final["jump_attempts"] = list(diagnostics.get("jump_attempts") or [])
     final["connections_found"] = int(connections_found)
     if connections_found > 0:
         final["jump_outcome"] = "connection_found"

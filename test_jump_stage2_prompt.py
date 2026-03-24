@@ -6,6 +6,7 @@ from hypothesis_validation import validate_hypothesis
 
 def _valid_stage2_payload() -> dict:
     return {
+        "no_connection": False,
         "source_domain": "Juggling",
         "target_domain": "Time-triggered scheduling",
         "connection": "Periodic task sets assign offsets within a shared hyperperiod so activations do not collide under modular collision constraints.",

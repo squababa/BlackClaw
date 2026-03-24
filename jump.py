@@ -2463,11 +2463,11 @@ def salvage_high_value_candidate(
     return repaired_candidate
 
 
-def _stage_one_detect(
+def _stage_one_detect_with_diagnostics(
     source_domain: str,
     abstract_structure: str,
     search_results: str,
-) -> dict | None:
+) -> tuple[dict | None, str | None]:
     prompt = DETECT_PROMPT.format(
         source_domain=source_domain,
         abstract_structure=abstract_structure,
@@ -2475,24 +2475,48 @@ def _stage_one_detect(
     )
     extracted_json = _generate_json_with_retry(prompt, "stage1_detect", 2048)
     if extracted_json is None:
-        return None
+        return None, "generation_failed"
     try:
         data = json.loads(extracted_json)
     except json.JSONDecodeError:
-        return None
+        return None, "invalid_json"
     if not isinstance(data, dict):
-        return None
+        return None, "invalid_payload"
     if data.get("no_connection", True):
-        return None
+        return None, "no_connection"
     target_domain = str(data.get("target_domain", "")).strip()
     signal = str(data.get("signal", "")).strip()
     evidence = str(data.get("evidence", "")).strip()
     if not target_domain or not signal or not evidence:
-        return None
+        return None, "invalid_payload"
     data["target_domain"] = target_domain
     data["signal"] = signal
     data["evidence"] = evidence
+    return data, None
+
+
+def _stage_one_detect(
+    source_domain: str,
+    abstract_structure: str,
+    search_results: str,
+) -> dict | None:
+    data, _failure_hint = _stage_one_detect_with_diagnostics(
+        source_domain=source_domain,
+        abstract_structure=abstract_structure,
+        search_results=search_results,
+    )
     return data
+
+
+def _short_stage_two_failure_hint(payload: object) -> str | None:
+    """Extract one compact Stage 2 no-connection hint when the model provides one."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("failure_hint", "reason", "why", "message", "note"):
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return " ".join(value.split())[:120]
+    return None
 
 
 def _format_relevant_scars_for_prompt(
@@ -2532,12 +2556,12 @@ def _format_relevant_scars_for_prompt(
     return "\n\n".join(blocks)
 
 
-def _stage_two_hypothesize(
+def _stage_two_hypothesize_with_diagnostics(
     source_domain: str,
     abstract_structure: str,
     stage_one: dict,
     search_results: str,
-) -> dict | None:
+) -> tuple[dict | None, str | None]:
     relevant_scars = _format_relevant_scars_for_prompt(
         str(stage_one.get("target_domain") or ""),
         abstract_structure,
@@ -2552,15 +2576,15 @@ def _stage_two_hypothesize(
     )
     extracted_json = _generate_json_with_retry(prompt, "stage2_hypothesize", 4096)
     if extracted_json is None:
-        return None
+        return None, "generation_failed"
     try:
         data = json.loads(extracted_json)
     except json.JSONDecodeError:
-        return None
+        return None, "invalid_json"
     if not isinstance(data, dict):
-        return None
+        return None, "invalid_payload"
     if data.get("no_connection", True):
-        return None
+        return None, _short_stage_two_failure_hint(data) or "returned_no_connection"
 
     data = _apply_mechanism_naming_precision(data)
     data = _apply_normalized_mechanism_typing(data)
@@ -2573,11 +2597,11 @@ def _stage_two_hypothesize(
             original_data=data,
         )
         if repaired is None or repaired.get("no_connection", True):
-            return None
+            return None, "repair_failed"
         repaired = _apply_mechanism_naming_precision(repaired)
         repaired = _apply_normalized_mechanism_typing(repaired)
         if _missing_required_fields(repaired):
-            return None
+            return None, "repair_incomplete"
         data = repaired
 
     data["evidence_map"] = normalize_evidence_map(data.get("evidence_map"))
@@ -2585,7 +2609,144 @@ def _stage_two_hypothesize(
 
     # Jump output must never self-grade depth.
     data.pop("depth", None)
+    return data, None
+
+
+def _stage_two_hypothesize(
+    source_domain: str,
+    abstract_structure: str,
+    stage_one: dict,
+    search_results: str,
+) -> dict | None:
+    data, _failure_hint = _stage_two_hypothesize_with_diagnostics(
+        source_domain=source_domain,
+        abstract_structure=abstract_structure,
+        stage_one=stage_one,
+        search_results=search_results,
+    )
     return data
+
+
+def lateral_jump_with_diagnostics(
+    pattern: dict,
+    source_domain: str,
+    source_category: str,
+) -> tuple[dict | None, dict]:
+    """
+    Attempt a lateral jump and return lightweight diagnostics describing where it died.
+    """
+    raw_search_query = str(pattern.get("search_query", "") or "").strip()
+    diagnostic = {
+        "pattern_name": str(pattern.get("pattern_name", "") or "").strip() or "Unknown",
+        "abstract_structure": str(pattern.get("abstract_structure", "") or "").strip(),
+        "raw_search_query": raw_search_query,
+        "built_jump_query": None,
+        "result_count": 0,
+        "top_result_titles": [],
+        "stage1_outcome": None,
+        "stage1_target_domain": None,
+        "stage1_failure_hint": None,
+        "stage2_outcome": None,
+        "stage2_target_domain": None,
+        "stage2_failure_hint": None,
+    }
+
+    query = _build_jump_search_query(pattern, source_domain, source_category)
+    diagnostic["built_jump_query"] = query
+    if not query:
+        diagnostic["stage1_outcome"] = "no_results"
+        diagnostic["stage1_failure_hint"] = "empty_jump_query"
+        return None, diagnostic
+
+    try:
+        results = _tavily.search(
+            query=query,
+            max_results=5,
+            include_answer=False,
+            search_depth="basic",
+        )
+        increment_tavily_calls(1)
+    except Exception as e:
+        print(f"  [!] Tavily search failed for jump query '{query}': {e}")
+        diagnostic["stage1_outcome"] = "no_results"
+        diagnostic["stage1_failure_hint"] = "search_error"
+        return None, diagnostic
+
+    raw_results = results.get("results", [])
+    if not isinstance(raw_results, list):
+        raw_results = []
+
+    search_content = []
+    source_lower = source_domain.lower()
+    category_lower = source_category.lower()
+    target_url = None
+    target_excerpt = None
+    top_titles: list[str] = []
+    for result in raw_results:
+        title_text = str(result.get("title", "") or "").strip()
+        title = title_text.lower()
+        content = result.get("content", "")
+        if source_lower in title or category_lower in title:
+            continue
+        clean = sanitize(content)
+        if clean:
+            if target_excerpt is None:
+                target_excerpt = clean[:500]
+            if target_url is None:
+                url = (result.get("url") or "").strip()
+                if url:
+                    target_url = url
+            if title_text and title_text not in top_titles and len(top_titles) < 3:
+                top_titles.append(title_text)
+            search_content.append(f"Title: {result.get('title', 'Unknown')}")
+            search_content.append(clean)
+            search_content.append("")
+
+    diagnostic["result_count"] = len(search_content) // 3
+    diagnostic["top_result_titles"] = top_titles
+
+    combined = "\n".join(search_content)
+    if not combined.strip():
+        diagnostic["stage1_outcome"] = "no_results"
+        diagnostic["stage1_failure_hint"] = "no_usable_results"
+        return None, diagnostic
+
+    stage_one, stage_one_failure_hint = _stage_one_detect_with_diagnostics(
+        source_domain=source_domain,
+        abstract_structure=pattern.get("abstract_structure", ""),
+        search_results=combined,
+    )
+    if stage_one is None:
+        diagnostic["stage1_outcome"] = (
+            "detect_no_signal"
+            if stage_one_failure_hint == "no_connection"
+            else "no_results"
+        )
+        diagnostic["stage1_failure_hint"] = stage_one_failure_hint
+        return None, diagnostic
+
+    diagnostic["stage1_outcome"] = "detect_signal"
+    diagnostic["stage1_target_domain"] = str(stage_one.get("target_domain", "") or "").strip() or None
+
+    data, stage_two_failure_hint = _stage_two_hypothesize_with_diagnostics(
+        source_domain=source_domain,
+        abstract_structure=str(pattern.get("abstract_structure", "") or ""),
+        stage_one=stage_one,
+        search_results=combined,
+    )
+    if data is None:
+        diagnostic["stage2_outcome"] = "stage2_no_connection"
+        diagnostic["stage2_failure_hint"] = stage_two_failure_hint or "returned_no_connection"
+        return None, diagnostic
+
+    diagnostic["stage2_outcome"] = "connection_found"
+    diagnostic["stage2_target_domain"] = str(data.get("target_domain", "") or "").strip() or None
+    data["abstract_structure"] = str(pattern.get("abstract_structure", "") or "").strip()
+    if target_url:
+        data["target_url"] = target_url
+    if target_excerpt:
+        data["target_excerpt"] = target_excerpt
+    return data, diagnostic
 
 
 def lateral_jump(
@@ -2600,68 +2761,9 @@ def lateral_jump(
     3. Stage 2 hypothesize a mechanism-first mapping
     4. Return connection dict or None
     """
-    query = _build_jump_search_query(pattern, source_domain, source_category)
-    if not query:
-        return None
-
-    try:
-        results = _tavily.search(
-            query=query,
-            max_results=5,
-            include_answer=False,
-            search_depth="basic",
-        )
-        increment_tavily_calls(1)
-    except Exception as e:
-        print(f"  [!] Tavily search failed for jump query '{query}': {e}")
-        return None
-
-    search_content = []
-    source_lower = source_domain.lower()
-    category_lower = source_category.lower()
-    target_url = None
-    target_excerpt = None
-    for result in results.get("results", []):
-        title = result.get("title", "").lower()
-        content = result.get("content", "")
-        if source_lower in title or category_lower in title:
-            continue
-        clean = sanitize(content)
-        if clean:
-            if target_excerpt is None:
-                target_excerpt = clean[:500]
-            if target_url is None:
-                url = (result.get("url") or "").strip()
-                if url:
-                    target_url = url
-            search_content.append(f"Title: {result.get('title', 'Unknown')}")
-            search_content.append(clean)
-            search_content.append("")
-
-    combined = "\n".join(search_content)
-    if not combined.strip():
-        return None
-
-    stage_one = _stage_one_detect(
-        source_domain=source_domain,
-        abstract_structure=pattern.get("abstract_structure", ""),
-        search_results=combined,
+    data, _diagnostic = lateral_jump_with_diagnostics(
+        pattern,
+        source_domain,
+        source_category,
     )
-    if stage_one is None:
-        return None
-
-    data = _stage_two_hypothesize(
-        source_domain=source_domain,
-        abstract_structure=pattern.get("abstract_structure", ""),
-        stage_one=stage_one,
-        search_results=combined,
-    )
-    if data is None:
-        return None
-
-    data["abstract_structure"] = str(pattern.get("abstract_structure", "") or "").strip()
-    if target_url:
-        data["target_url"] = target_url
-    if target_excerpt:
-        data["target_excerpt"] = target_excerpt
     return data
