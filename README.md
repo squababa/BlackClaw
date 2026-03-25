@@ -1,10 +1,10 @@
-# BlackClaw
+# **Parallax**
 
-**BlackClaw** is an evidence-grounded structural hypothesis engine built to generate useful transmissions: cross-domain insights that can create practical leverage, predictive value, transferable understanding, or decision advantage.
+**Parallax** is an evidence-grounded structural hypothesis engine built to generate useful transmissions: cross-domain insights that can create practical leverage, predictive value, transferable understanding, or decision advantage.
 
 It is not a content bot and not yet a full discovery engine. Its purpose is to generate distant structural candidates, ground them at the claim level, pressure them with validation and adversarial checks, and preserve only the strongest transmissions — the ones that can actually help someone understand, predict, decide, optimize, or avoid loss.
 
-## Why BlackClaw
+## Why Parallax
 
 Most systems either retrieve what is already known or generate endless interesting analogies. BlackClaw is built for the harder middle ground:
 
@@ -15,7 +15,7 @@ Most systems either retrieve what is already known or generate endless interesti
 
 The standard is not “is this cool?” The standard is “can anyone gain from this?”
 
-## What BlackClaw Does
+## What Parallax Does
 
 BlackClaw runs a loop that:
 
@@ -40,7 +40,7 @@ BlackClaw runs a loop that:
 
 ## Model Providers
 
-BlackClaw supports multiple LLM providers through `llm_client.py`:
+Parallax supports multiple LLM providers through `llm_client.py`:
 
 * `gemini`
 * `claude`
@@ -126,7 +126,7 @@ Interesting but unusable outputs are not the target.
 
 ## Epistemic Safeguards
 
-BlackClaw is designed to avoid becoming a clever-analogy machine.
+Parallax is designed to avoid becoming a clever-analogy machine.
 
 Current and in-progress safeguards include:
 
