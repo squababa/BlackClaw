@@ -2641,8 +2641,24 @@ def _repair_guidance_for_missing_fields(
         "edge_analysis.edge_if_right",
         "edge_analysis.primary_operator",
     }
+    coherent_edge_package_fields = {
+        "edge_analysis.problem_statement",
+        "edge_analysis.actionable_lever",
+        "edge_analysis.cheap_test",
+        "edge_analysis.edge_if_right",
+        "edge_analysis.expected_asymmetry",
+    }
+    coherent_evidence_package_fields = {
+        "evidence_map.variable_mappings",
+        "evidence_map.mechanism_assertions",
+    }
     current_mechanism = (
         str(original_data.get("mechanism") or "").strip()
+        if isinstance(original_data, dict)
+        else ""
+    )
+    connection_anchor = (
+        str(original_data.get("connection") or "").strip()
         if isinstance(original_data, dict)
         else ""
     )
@@ -2670,6 +2686,86 @@ def _repair_guidance_for_missing_fields(
     cheap_test_metric_anchor = str(cheap_test_payload.get("metric") or "").strip()
     cheap_test_confirm_anchor = str(cheap_test_payload.get("confirm") or "").strip()
     cheap_test_falsify_anchor = str(cheap_test_payload.get("falsify") or "").strip()
+    target_evidence_anchor = str(core_target_anchor.get("evidence_snippet") or "").strip()
+    target_evidence_source = str(core_target_anchor.get("source_reference") or "").strip()
+    if not target_evidence_anchor:
+        for entry in evidence_map.get("mechanism_assertions", [])[:3]:
+            if not isinstance(entry, dict):
+                continue
+            target_evidence_anchor = str(entry.get("evidence_snippet") or "").strip()
+            target_evidence_source = str(entry.get("source_reference") or "").strip()
+            if target_evidence_anchor:
+                break
+    if not target_evidence_anchor:
+        for entry in evidence_map.get("variable_mappings", [])[:3]:
+            if not isinstance(entry, dict):
+                continue
+            target_evidence_anchor = str(entry.get("evidence_snippet") or "").strip()
+            target_evidence_source = str(entry.get("source_reference") or "").strip()
+            if target_evidence_anchor:
+                break
+    coherent_edge_missing = [
+        field for field in missing_fields if field in coherent_edge_package_fields
+    ]
+    coherent_evidence_missing = [
+        field for field in missing_fields if field in coherent_evidence_package_fields
+    ]
+    coherent_package_mode = len(coherent_edge_missing) + len(coherent_evidence_missing) >= 3 and (
+        len(coherent_edge_missing) >= 2
+        or bool(coherent_edge_missing and coherent_evidence_missing)
+    )
+    if coherent_package_mode:
+        guidance.append(
+            "- Multi-field coherent repair mode: repair the affected edge/evidence layer as one coordinated grounded package instead of patching each listed field independently."
+        )
+        guidance.append(
+            "- Decision rule: either repair a coherent grounded package anchored to the existing claim, mechanism, target evidence, metric, and comparator, or return `{\"no_connection\": true}` if that support is too thin."
+        )
+        guidance.append(
+            "- Treat `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, `edge_analysis.edge_if_right`, `edge_analysis.expected_asymmetry`, `evidence_map.variable_mappings`, and `evidence_map.mechanism_assertions` as coupled support for the same target-domain claim rather than independent fill-in-the-blank fields."
+        )
+        guidance.append(
+            "- Rebuild only the affected layer around the current grounded core: same target claim, same mechanism, same operator decision, same test metric/comparator, and the same best available target-domain evidence already present in the payload."
+        )
+        claim_anchor = observable_anchor or connection_anchor
+        if claim_anchor:
+            guidance.append(
+                f"- Keep the package tied to the current target claim anchor: `{claim_anchor}`."
+            )
+        if current_mechanism:
+            guidance.append(
+                f"- Keep the package tied to the current mechanism: `{current_mechanism}`."
+            )
+        if target_evidence_anchor:
+            guidance.append(
+                "- Rebuild around this current target-domain evidence snippet instead of inventing new support: "
+                f"`{target_evidence_anchor}`"
+                + (f" (source: `{target_evidence_source}`)." if target_evidence_source else ".")
+            )
+        if metric_anchor:
+            guidance.append(
+                f"- Keep the package tied to the current test metric: `{metric_anchor}`."
+            )
+        if confirm_anchor:
+            guidance.append(
+                f"- Reuse the current confirm-side comparator wording where possible: `{confirm_anchor}`."
+            )
+        if falsify_anchor:
+            guidance.append(
+                f"- Reuse the current falsify-side decision wording where possible: `{falsify_anchor}`."
+            )
+        guidance.append(
+            "- Package the repair coherently: one concrete hidden operator problem, one concrete operator lever, one cheap operator check on the same metric/comparator, one operator consequence if confirmed, and only the minimum mapping/mechanism-support entries needed to ground that same story."
+        )
+        guidance.append(
+            "- Reuse current claim/process/operator/metric language wherever possible. Do not broaden the claim, do not add a new mechanism, and do not rewrite unrelated parts of the payload if the current grounded core is still usable."
+        )
+        guidance.append(
+            "- If the current payload plus retrieved evidence do not support a concrete operator problem, lever, cheap test, and mapping/mechanism-support set without unsupported extrapolation, return `{\"no_connection\": true}`."
+        )
+        guidance.append(
+            "- Prefer grounded repair or `{\"no_connection\": true}`. Do not invent a lever, operator advantage, variable mapping, or mechanism assertion just to satisfy required fields."
+        )
     if any(field in usefulness_bottleneck_fields for field in missing_fields):
         guidance.append(
             "- Phase 5 usefulness-alignment bottleneck: keep `connection`, `mechanism`, `prediction`, `test`, and `evidence_map` stable unless they are empty. Rewrite the edge layer so it points to the exact same core claim, process, comparator, and metric already named elsewhere."
