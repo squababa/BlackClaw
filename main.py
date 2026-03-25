@@ -8441,6 +8441,16 @@ def _run_eval_batch(
     return stored_rows
 
 
+def _should_launch_hop2(candidate: dict | None) -> bool:
+    """Allow Hop-2 only when the parent cleared score and distance gates."""
+    payload = candidate if isinstance(candidate, dict) else {}
+    if payload.get("passes_threshold") is False:
+        return False
+    if payload.get("distance_ok") is False:
+        return False
+    return True
+
+
 def _score_store_and_transmit(
     score_label: str,
     source_domain: str,
@@ -8454,7 +8464,7 @@ def _score_store_and_transmit(
     chain_path: list[str],
     exploration_path: list[str],
     threshold: float,
-) -> tuple[bool, float]:
+) -> tuple[bool, float, bool]:
     """Score one connection, store it, run convergence handling, and transmit if valid."""
     candidate = _evaluate_connection_candidate(
         score_label=score_label,
@@ -8587,7 +8597,11 @@ def _score_store_and_transmit(
         print_transmission(formatted)
         transmitted = True
 
-    return transmitted, float(candidate["total_score"] or 0.0)
+    return (
+        transmitted,
+        float(candidate["total_score"] or 0.0),
+        _should_launch_hop2(candidate),
+    )
 
 
 def _seed_quality_text(seed: dict) -> str | None:
@@ -8717,7 +8731,7 @@ def run_cycle(
         print(f"  [Jump] Connection found: {seed['name']} ↔ {target}")
         finalize_pattern_diagnostics(seed, connections_found=connections_found)
 
-        tx_sent, _ = _score_store_and_transmit(
+        tx_sent, _, hop2_allowed = _score_store_and_transmit(
             score_label="Score",
             source_domain=seed["name"],
             source_category=seed["category"],
@@ -8736,6 +8750,8 @@ def run_cycle(
 
         # Multi-hop chain jump: A -> B -> C, max 2 hops total per cycle.
         if hops_completed >= max_hops_per_cycle:
+            continue
+        if not hop2_allowed:
             continue
 
         hop_seed = build_derived_seed(target)
@@ -8797,7 +8813,7 @@ def run_cycle(
             print(f"  [Hop-2 Jump] Connection found: {hop_seed['name']} ↔ {target_2}")
             finalize_pattern_diagnostics(hop_seed, connections_found=1)
 
-            tx_sent_2, _ = _score_store_and_transmit(
+            tx_sent_2, _, _ = _score_store_and_transmit(
                 score_label="Hop-2 Score",
                 source_domain=hop_seed["name"],
                 source_category=hop_seed["category"],
