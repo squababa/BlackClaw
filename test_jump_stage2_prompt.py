@@ -688,6 +688,124 @@ def test_build_repair_prompt_targets_usefulness_alignment_bottleneck() -> None:
     assert "The current cheap test sounds like generic validation rather than an operator move." in repair_prompt
 
 
+def test_build_repair_prompt_prefers_coherent_multi_field_package_repair() -> None:
+    payload = _valid_stage2_payload()
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        [
+            "edge_analysis.problem_statement",
+            "edge_analysis.actionable_lever",
+            "edge_analysis.cheap_test",
+            "edge_analysis.edge_if_right",
+            "edge_analysis.expected_asymmetry",
+            "evidence_map.variable_mappings",
+            "evidence_map.mechanism_assertions",
+        ],
+        original_data=payload,
+    )
+
+    assert "Multi-field coherent repair mode" in repair_prompt
+    assert "repair the affected edge/evidence layer as one coordinated grounded package" in repair_prompt
+    assert "either repair a coherent grounded package anchored to the existing claim, mechanism, target evidence, metric, and comparator" in repair_prompt
+    assert "Treat `edge_analysis.problem_statement`, `edge_analysis.actionable_lever`, `edge_analysis.cheap_test`, `edge_analysis.edge_if_right`, `edge_analysis.expected_asymmetry`, `evidence_map.variable_mappings`, and `evidence_map.mechanism_assertions` as coupled support" in repair_prompt
+    assert "Keep the package tied to the current target claim anchor" in repair_prompt
+    assert "Keep the package tied to the current mechanism" in repair_prompt
+    assert "Rebuild around this current target-domain evidence snippet instead of inventing new support" in repair_prompt
+    assert "Keep the package tied to the current test metric" in repair_prompt
+    assert "Package the repair coherently: one concrete hidden operator problem, one concrete operator lever, one cheap operator check on the same metric/comparator" in repair_prompt
+    assert "Do not broaden the claim, do not add a new mechanism" in repair_prompt
+
+
+def test_build_repair_prompt_prefers_no_connection_when_multi_field_support_is_thin() -> None:
+    payload = _valid_stage2_payload()
+    payload["variable_mapping"] = {
+        "beat parity": "scheduler parity flag",
+        "pattern period": "schedule epoch length",
+        "throw index": "release index register",
+    }
+    payload["evidence_map"]["variable_mappings"] = [
+        {
+            "source_variable": "beat parity",
+            "target_variable": "scheduler parity flag",
+            "claim": "Alternating schedule beats are tracked with a scheduler parity flag.",
+            "evidence_snippet": (
+                "Alternating schedule beats are tracked with a scheduler parity flag "
+                "across the repeating execution frame."
+            ),
+            "source_reference": "Alternating release parity in periodic schedulers",
+        },
+        {
+            "source_variable": "pattern period",
+            "target_variable": "schedule epoch length",
+            "claim": "Periodic schedulers repeat over a fixed execution epoch length.",
+            "evidence_snippet": (
+                "Periodic schedulers repeat over a fixed execution epoch length "
+                "for each recurring release pattern."
+            ),
+            "source_reference": "Fixed execution epochs in recurring schedules",
+        },
+        {
+            "source_variable": "throw index",
+            "target_variable": "release index register",
+            "claim": "Release ordering is recorded with an index register for each cycle.",
+            "evidence_snippet": (
+                "Release ordering is recorded with an index register for each cycle "
+                "before the schedule repeats."
+            ),
+            "source_reference": "Release index registers in periodic schedulers",
+        },
+    ]
+    payload["mechanism"] = (
+        "interval-by-interval activation conflict detection compares queued releases "
+        "against a programmable collision cutoff, triggering schedule suppression."
+    )
+    payload["prediction"]["observable"] = (
+        "schedule suppression count per hyperperiod under dense periodic task allocation"
+    )
+    payload["test"]["metric"] = "schedule suppression count per hyperperiod"
+    payload["test"]["confirm"] = (
+        "schedule suppression count per hyperperiod is lower under filtered assignment "
+        "than under sequential assignment at the same utilization"
+    )
+    payload["test"]["falsify"] = (
+        "schedule suppression count per hyperperiod does not improve under filtered "
+        "assignment at the same utilization"
+    )
+    payload["evidence_map"]["mechanism_assertions"][0] = {
+        "mechanism_claim": (
+            "interval-by-interval activation conflict detection compares queued releases "
+            "against a programmable collision cutoff before suppressing conflicting schedules."
+        ),
+        "evidence_snippet": (
+            "The article discusses why scheduling tradeoffs matter in periodic systems "
+            "and how planners evaluate feasible schedules."
+        ),
+        "source_reference": "Scheduling Overview Guide",
+    }
+
+    repair_prompt = jump._build_repair_prompt(
+        "full prompt",
+        json.dumps(payload),
+        [
+            "edge_analysis.problem_statement",
+            "edge_analysis.actionable_lever",
+            "edge_analysis.cheap_test",
+            "edge_analysis.edge_if_right",
+            "evidence_map.variable_mappings",
+            "evidence_map.mechanism_assertions",
+        ],
+        original_data=payload,
+    )
+
+    assert "Multi-field coherent repair mode" in repair_prompt
+    assert "Current core-target-evidence weakness:" in repair_prompt
+    assert "If the current payload plus retrieved evidence do not support a concrete operator problem, lever, cheap test, and mapping/mechanism-support set without unsupported extrapolation, return `{\"no_connection\": true}`." in repair_prompt
+    assert "Prefer grounded repair or `{\"no_connection\": true}`." in repair_prompt
+    assert "Do not invent a lever, operator advantage, variable mapping, or mechanism assertion just to satisfy required fields." in repair_prompt
+
+
 def test_build_repair_prompt_marks_cheap_test_only_completion_as_narrow() -> None:
     payload = _valid_stage2_payload()
     payload["edge_analysis"]["cheap_test"]["setup"] = (
