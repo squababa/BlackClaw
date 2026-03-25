@@ -10,6 +10,7 @@
     {"name": "Quantum Mechanics", "category": "Physics", "seed_queries": ["quantum superposition entanglement", "quantum mechanics measurement problem"]},
     {"name": "Thermodynamics", "category": "Physics", "seed_queries": ["entropy thermodynamics second law", "thermodynamic equilibrium dissipative structures"]},
     {"name": "Fluid Dynamics", "category": "Physics", "seed_queries": ["turbulence fluid dynamics", "Navier-Stokes laminar turbulent flow"]},
+    {"name": "Cavitation bubble collapse in hydrodynamic pumps", "category": "Fluid Dynamics", "seed_queries": ["hydrodynamic cavitation bubble collapse mechanisms", "pressure drop vapor phase transition pump impeller", "trailing edge vortex shedding cavitation mitigation"]},
     {"name": "Acoustics", "category": "Physics", "seed_queries": ["acoustic resonance harmonic series", "sound wave propagation physics"]},
     {"name": "Optics", "category": "Physics", "seed_queries": ["wave optics interference diffraction", "optical phenomena physics"]},
     {"name": "Statistical Mechanics", "category": "Physics", "seed_queries": ["Boltzmann distribution statistical mechanics", "phase transitions critical phenomena"]},
