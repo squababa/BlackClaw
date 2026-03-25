@@ -987,3 +987,138 @@ def test_evaluate_connection_candidate_keeps_strict_validation_after_salvage(
     assert candidate["salvage_applied"] is False
     assert candidate["validation_ok"] is False
     assert candidate["validation_reasons"] == ["edge_analysis edge_if_right is too generic"]
+
+
+def test_should_launch_hop2_rejects_distance_or_score_gate_failures() -> None:
+    assert (
+        main._should_launch_hop2(
+            {"passes_threshold": True, "distance_ok": False}
+        )
+        is False
+    )
+    assert (
+        main._should_launch_hop2(
+            {"passes_threshold": False, "distance_ok": True}
+        )
+        is False
+    )
+
+
+def test_should_launch_hop2_keeps_validation_only_rejections_eligible() -> None:
+    assert (
+        main._should_launch_hop2(
+            {
+                "passes_threshold": True,
+                "distance_ok": True,
+                "validation_ok": False,
+                "should_transmit": False,
+            }
+        )
+        is True
+    )
+
+
+def _run_cycle_hop2_trace(monkeypatch, *, hop2_allowed: bool) -> tuple[bool, list[str], list[str], list[str]]:
+    manual_seed = {
+        "name": "Seed Domain",
+        "category": "Category",
+        "seed_queries": [],
+        "quality_profile": {
+            "band": "high",
+            "score": 0.9,
+            "strengths": [],
+            "concerns": [],
+        },
+    }
+    first_patterns = [
+        {
+            "pattern_name": "Primary Pattern",
+            "abstract_structure": "source structure",
+        }
+    ]
+    second_patterns = [
+        {
+            "pattern_name": "Hop Pattern",
+            "abstract_structure": "hop structure",
+        }
+    ]
+    dive_calls = []
+    hop_seed_calls = []
+    score_labels = []
+    jump_targets = iter(
+        [
+            ({"target_domain": "Allowed Target"}, {"status": "found"}),
+            ({"target_domain": "Second Target"}, {"status": "found"}),
+        ]
+    )
+
+    monkeypatch.setattr(main, "describe_seed_quality", lambda seed: seed["quality_profile"])
+    monkeypatch.setattr(main, "update_domain_visited", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "finalize_pattern_diagnostics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "append_jump_attempt_diagnostic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "print_cycle_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "get_next_transmission_number", lambda: 1)
+
+    def fake_dive(seed: dict) -> list[dict]:
+        dive_calls.append(seed["name"])
+        return first_patterns if len(dive_calls) == 1 else second_patterns
+
+    def fake_build_derived_seed(topic: str) -> dict:
+        hop_seed_calls.append(topic)
+        return {
+            "name": topic,
+            "category": "Derived",
+            "seed_queries": [],
+            "quality_profile": {
+                "band": "derived",
+                "score": 0.7,
+                "strengths": [],
+                "concerns": [],
+            },
+        }
+
+    def fake_score_store_and_transmit(**kwargs):
+        score_labels.append(kwargs["score_label"])
+        return (False, 0.81, hop2_allowed if kwargs["score_label"] == "Score" else True)
+
+    monkeypatch.setattr(main, "dive", fake_dive)
+    monkeypatch.setattr(main, "build_derived_seed", fake_build_derived_seed)
+    monkeypatch.setattr(
+        main,
+        "lateral_jump_with_diagnostics",
+        lambda *_args, **_kwargs: next(jump_targets),
+    )
+    monkeypatch.setattr(main, "_score_store_and_transmit", fake_score_store_and_transmit)
+
+    transmitted = main.run_cycle(
+        cycle_num=1,
+        threshold=0.64,
+        max_patterns=1,
+        manual_seed=manual_seed,
+    )
+
+    return transmitted, dive_calls, hop_seed_calls, score_labels
+
+
+def test_run_cycle_skips_hop2_after_rejected_parent(monkeypatch) -> None:
+    transmitted, dive_calls, hop_seed_calls, score_labels = _run_cycle_hop2_trace(
+        monkeypatch,
+        hop2_allowed=False,
+    )
+
+    assert transmitted is False
+    assert dive_calls == ["Seed Domain"]
+    assert hop_seed_calls == []
+    assert score_labels == ["Score"]
+
+
+def test_run_cycle_preserves_hop2_for_allowed_parent(monkeypatch) -> None:
+    transmitted, dive_calls, hop_seed_calls, score_labels = _run_cycle_hop2_trace(
+        monkeypatch,
+        hop2_allowed=True,
+    )
+
+    assert transmitted is False
+    assert dive_calls == ["Seed Domain", "Allowed Target"]
+    assert hop_seed_calls == ["Allowed Target"]
+    assert score_labels == ["Score", "Hop-2 Score"]
