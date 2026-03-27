@@ -165,6 +165,48 @@ def test_build_jump_search_query_preserves_concrete_raw_anchor_terms() -> None:
     assert query == "queue threshold throttling latency"
 
 
+def test_build_jump_search_queries_returns_base_query_plus_solution_variant(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump,
+        "_generate_llm_jump_search_query",
+        lambda *_args, **_kwargs: "queue threshold throttling latency",
+    )
+
+    queries = jump._build_jump_search_queries(
+        {"search_query": "queue threshold throttling latency"},
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert queries == [
+        "queue threshold throttling latency",
+        "queue threshold throttling latency workaround",
+    ]
+
+
+def test_build_jump_search_queries_uses_next_unused_solution_variant(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump,
+        "_generate_llm_jump_search_query",
+        lambda *_args, **_kwargs: "queue threshold throttling latency workaround",
+    )
+
+    queries = jump._build_jump_search_queries(
+        {"search_query": "queue threshold throttling latency"},
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert queries == [
+        "queue threshold throttling latency workaround",
+        "queue threshold throttling latency workaround mitigation",
+    ]
+
+
 def test_build_jump_search_query_preserves_selection_pressure_phrase_anchor() -> None:
     query = jump._build_jump_search_query(
         {
@@ -335,6 +377,88 @@ def test_build_jump_search_query_falls_back_when_llm_query_is_formal_token_soup(
     )
 
     assert query == expected
+
+
+def test_stage_one_detect_prompt_prefers_solution_bearing_analogues(
+    monkeypatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_generate_json_with_retry(prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+        return json.dumps({"no_connection": True})
+
+    monkeypatch.setattr(jump, "_generate_json_with_retry", fake_generate_json_with_retry)
+
+    data, failure_hint = jump._stage_one_detect_with_diagnostics(
+        source_domain="Network Protocols",
+        abstract_structure="load compared against a queue threshold",
+        search_results="Retrieved via: base\nTitle: Target paper\nresponse details",
+    )
+
+    assert data is None
+    assert failure_hint == "no_connection"
+    assert "concrete evidence of an already engineered workaround" in captured["prompt"]
+    assert "prefer the one with the clearest retrieved workaround or mitigation evidence" in captured["prompt"]
+    assert "only restate the problem, constraint, or failure mode without concrete workaround evidence" in captured["prompt"]
+    assert '"solution_evidence": "specific retrieved workaround, mitigation, or operating response evidence"' in captured["prompt"]
+
+
+def test_stage_one_detect_requires_solution_evidence_field_on_positive_payload(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump,
+        "_generate_json_with_retry",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "no_connection": False,
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared thresholded gating structure",
+                "evidence": "diagnostic comparison reveals the same constraint",
+                "solution_evidence": "redundant interlock logic suppresses actuation during mismatch faults",
+            }
+        ),
+    )
+
+    data, failure_hint = jump._stage_one_detect_with_diagnostics(
+        source_domain="Network Protocols",
+        abstract_structure="load compared against a queue threshold",
+        search_results="Retrieved via: solution-biased\nTitle: Target paper\nresponse details",
+    )
+
+    assert failure_hint is None
+    assert data is not None
+    assert data["target_domain"] == "Safety Interlock Monitoring"
+    assert data["solution_evidence"] == (
+        "redundant interlock logic suppresses actuation during mismatch faults"
+    )
+
+
+def test_stage_one_detect_rejects_problem_only_positive_payload_without_solution_evidence(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump,
+        "_generate_json_with_retry",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "no_connection": False,
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared thresholded gating structure",
+                "evidence": "diagnostic comparison reveals the same constraint",
+            }
+        ),
+    )
+
+    data, failure_hint = jump._stage_one_detect_with_diagnostics(
+        source_domain="Network Protocols",
+        abstract_structure="load compared against a queue threshold",
+        search_results="Retrieved via: base\nTitle: Target paper\nproblem description only",
+    )
+
+    assert data is None
+    assert failure_hint == "missing_solution_evidence"
 
 
 def test_dive_filters_weak_patterns_and_records_only_weak_diagnostics(
@@ -638,6 +762,51 @@ def test_lateral_jump_with_diagnostics_does_not_mislabel_stage1_generation_failu
     assert diagnostic["stage2_outcome"] is None
 
 
+def test_lateral_jump_with_diagnostics_treats_missing_solution_evidence_as_detect_no_signal(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        jump._tavily,
+        "search",
+        lambda **_kwargs: {
+            "results": [
+                {
+                    "title": "Independent target paper",
+                    "content": "concrete signal in another field",
+                    "url": "https://target.test/paper",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        jump,
+        "_generate_json_with_retry",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "no_connection": False,
+                "target_domain": "Wireless Scheduling",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+            }
+        ),
+    )
+
+    connection, diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is None
+    assert diagnostic["stage1_outcome"] == "detect_no_signal"
+    assert diagnostic["stage1_failure_hint"] == "missing_solution_evidence"
+    assert diagnostic["stage2_outcome"] is None
+
+
 def test_lateral_jump_with_diagnostics_records_stage2_no_connection(monkeypatch) -> None:
     monkeypatch.setattr(
         jump._tavily,
@@ -841,6 +1010,355 @@ def test_lateral_jump_with_diagnostics_records_success(monkeypatch) -> None:
     assert diagnostic["stage1_outcome"] == "detect_signal"
     assert diagnostic["stage2_outcome"] == "connection_found"
     assert diagnostic["stage2_target_domain"] == "Wireless Scheduling"
+
+
+def test_lateral_jump_with_diagnostics_merges_multi_query_results_for_both_stages(
+    monkeypatch,
+) -> None:
+    seen_queries: list[str] = []
+    stage_inputs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        jump,
+        "_build_jump_search_queries",
+        lambda *_args, **_kwargs: [
+            "queue threshold throttling latency",
+            "queue threshold throttling latency workaround",
+        ],
+    )
+
+    def fake_search(**kwargs):
+        query = kwargs["query"]
+        seen_queries.append(query)
+        if query == "queue threshold throttling latency":
+            return {
+                "results": [
+                    {
+                        "title": "Shared target paper",
+                        "content": "shared mechanism evidence for both queries",
+                        "url": "https://target.test/shared",
+                    },
+                    {
+                        "title": "Base-only target paper",
+                        "content": "base query retrieval evidence",
+                        "url": "https://target.test/base-only",
+                    },
+                ]
+            }
+        return {
+            "results": [
+                {
+                    "title": "Shared target paper",
+                    "content": "shared mechanism evidence for both queries",
+                    "url": "https://target.test/shared",
+                },
+                {
+                    "title": "Solution-only target paper",
+                    "content": "solution-biased retrieval evidence",
+                    "url": "https://target.test/solution-only",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(jump._tavily, "search", fake_search)
+
+    def fake_stage_one(**kwargs):
+        stage_inputs["stage1"] = kwargs["search_results"]
+        return (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+                "solution_evidence": "actuation suppression during mismatch faults is the concrete workaround",
+            },
+            None,
+        )
+
+    def fake_stage_two(**kwargs):
+        stage_inputs["stage2"] = kwargs["search_results"]
+        stage_inputs["stage2_solution_evidence"] = kwargs["stage_one"].get(
+            "solution_evidence"
+        )
+        return (_safety_interlock_jump_payload(), None, None)
+
+    monkeypatch.setattr(jump, "_stage_one_detect_with_diagnostics", fake_stage_one)
+    monkeypatch.setattr(jump, "_stage_two_hypothesize_with_diagnostics", fake_stage_two)
+
+    connection, diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is not None
+    assert seen_queries == [
+        "queue threshold throttling latency",
+        "queue threshold throttling latency workaround",
+    ]
+    assert diagnostic["built_jump_query"] == "queue threshold throttling latency"
+    assert diagnostic["built_jump_queries"] == [
+        "queue threshold throttling latency",
+        "queue threshold throttling latency workaround",
+    ]
+    assert diagnostic["result_count"] == 3
+    assert diagnostic["top_result_titles"] == [
+        "Shared target paper",
+        "Base-only target paper",
+        "Solution-only target paper",
+    ]
+    assert stage_inputs["stage1"] == stage_inputs["stage2"]
+    assert stage_inputs["stage2_solution_evidence"] == (
+        "actuation suppression during mismatch faults is the concrete workaround"
+    )
+    assert stage_inputs["stage1"].count("Title: Shared target paper") == 1
+    assert "Retrieved via: base, solution-biased" in stage_inputs["stage1"]
+    assert "Retrieved via: base" in stage_inputs["stage1"]
+    assert "Retrieved via: solution-biased" in stage_inputs["stage1"]
+
+
+def test_lateral_jump_with_diagnostics_prefers_better_solution_bearing_excerpt_for_duplicate_url(
+    monkeypatch,
+) -> None:
+    stage_inputs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        jump,
+        "_build_jump_search_queries",
+        lambda *_args, **_kwargs: [
+            "queue threshold throttling latency",
+            "queue threshold throttling latency workaround",
+        ],
+    )
+
+    def fake_search(**kwargs):
+        if kwargs["query"] == "queue threshold throttling latency":
+            return {
+                "results": [
+                    {
+                        "title": "Shared target paper",
+                        "content": "General background discussion of the same bottleneck and constraint.",
+                        "url": "https://target.test/shared",
+                    }
+                ]
+            }
+        return {
+            "results": [
+                {
+                    "title": "Shared target paper",
+                    "content": (
+                        "A practical workaround suppresses guard-channel mismatch faults "
+                        "by isolating the failing redundant lane before actuation."
+                    ),
+                    "url": "https://target.test/shared",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(jump._tavily, "search", fake_search)
+
+    def fake_stage_one(**kwargs):
+        stage_inputs["stage1"] = kwargs["search_results"]
+        return (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+                "solution_evidence": "lane isolation is the concrete workaround",
+            },
+            None,
+        )
+
+    def fake_stage_two(**kwargs):
+        stage_inputs["stage2"] = kwargs["search_results"]
+        return (_safety_interlock_jump_payload(), None, None)
+
+    monkeypatch.setattr(jump, "_stage_one_detect_with_diagnostics", fake_stage_one)
+    monkeypatch.setattr(jump, "_stage_two_hypothesize_with_diagnostics", fake_stage_two)
+
+    connection, diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is not None
+    assert diagnostic["result_count"] == 1
+    assert stage_inputs["stage1"] == stage_inputs["stage2"]
+    assert "Retrieved via: base, solution-biased" in stage_inputs["stage1"]
+    assert "A practical workaround suppresses guard-channel mismatch faults" in stage_inputs["stage1"]
+    assert "General background discussion of the same bottleneck and constraint." not in stage_inputs["stage1"]
+    assert connection["target_excerpt"] == (
+        "A practical workaround suppresses guard-channel mismatch faults "
+        "by isolating the failing redundant lane before actuation."
+    )
+
+
+def test_lateral_jump_with_diagnostics_prefers_solution_biased_duplicate_excerpt_on_provenance_tie(
+    monkeypatch,
+) -> None:
+    stage_inputs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        jump,
+        "_build_jump_search_queries",
+        lambda *_args, **_kwargs: [
+            "queue threshold throttling latency",
+            "queue threshold throttling latency workaround",
+        ],
+    )
+
+    def fake_search(**kwargs):
+        if kwargs["query"] == "queue threshold throttling latency":
+            return {
+                "results": [
+                    {
+                        "title": "Shared target paper",
+                        "content": (
+                            "Routine relay gating records channel mismatch during actuator startup."
+                        ),
+                        "url": "https://target.test/shared",
+                    }
+                ]
+            }
+        return {
+            "results": [
+                {
+                    "title": "Shared target paper",
+                    "content": (
+                        "Focused relay gating targets channel mismatch during actuator startup."
+                    ),
+                    "url": "https://target.test/shared",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(jump._tavily, "search", fake_search)
+
+    def fake_stage_one(**kwargs):
+        stage_inputs["stage1"] = kwargs["search_results"]
+        return (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+                "solution_evidence": "targeted relay gating is the concrete workaround",
+            },
+            None,
+        )
+
+    def fake_stage_two(**kwargs):
+        stage_inputs["stage2"] = kwargs["search_results"]
+        return (_safety_interlock_jump_payload(), None, None)
+
+    monkeypatch.setattr(jump, "_stage_one_detect_with_diagnostics", fake_stage_one)
+    monkeypatch.setattr(jump, "_stage_two_hypothesize_with_diagnostics", fake_stage_two)
+
+    connection, diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is not None
+    assert diagnostic["result_count"] == 1
+    assert stage_inputs["stage1"] == stage_inputs["stage2"]
+    assert "Retrieved via: base, solution-biased" in stage_inputs["stage1"]
+    assert (
+        "Focused relay gating targets channel mismatch during actuator startup."
+        in stage_inputs["stage1"]
+    )
+    assert (
+        "Routine relay gating records channel mismatch during actuator startup."
+        not in stage_inputs["stage1"]
+    )
+    assert connection["target_excerpt"] == (
+        "Focused relay gating targets channel mismatch during actuator startup."
+    )
+
+
+def test_lateral_jump_with_diagnostics_continues_after_partial_tavily_failure(
+    monkeypatch,
+) -> None:
+    seen_queries: list[str] = []
+    stage_inputs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        jump,
+        "_build_jump_search_queries",
+        lambda *_args, **_kwargs: [
+            "queue threshold throttling latency",
+            "queue threshold throttling latency workaround",
+        ],
+    )
+
+    def fake_search(**kwargs):
+        query = kwargs["query"]
+        seen_queries.append(query)
+        if query == "queue threshold throttling latency workaround":
+            raise RuntimeError("transient tavily failure")
+        return {
+            "results": [
+                {
+                    "title": "Base-only target paper",
+                    "content": "base query retrieval evidence with a concrete operator response",
+                    "url": "https://target.test/base-only",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(jump._tavily, "search", fake_search)
+
+    def fake_stage_one(**kwargs):
+        stage_inputs["stage1"] = kwargs["search_results"]
+        return (
+            {
+                "target_domain": "Safety Interlock Monitoring",
+                "signal": "shared structural signal",
+                "evidence": "specific evidence",
+                "solution_evidence": "concrete operator response",
+            },
+            None,
+        )
+
+    def fake_stage_two(**kwargs):
+        stage_inputs["stage2"] = kwargs["search_results"]
+        return (_safety_interlock_jump_payload(), None, None)
+
+    monkeypatch.setattr(jump, "_stage_one_detect_with_diagnostics", fake_stage_one)
+    monkeypatch.setattr(jump, "_stage_two_hypothesize_with_diagnostics", fake_stage_two)
+
+    connection, diagnostic = jump.lateral_jump_with_diagnostics(
+        {
+            "pattern_name": "Queue-threshold congestion gating",
+            "abstract_structure": "load compared against a queue threshold",
+            "search_query": "queue threshold throttling latency",
+        },
+        "Network Protocols",
+        "Technology",
+    )
+
+    assert connection is not None
+    assert seen_queries == [
+        "queue threshold throttling latency",
+        "queue threshold throttling latency workaround",
+    ]
+    assert diagnostic["stage1_outcome"] == "detect_signal"
+    assert diagnostic["stage2_outcome"] == "connection_found"
+    assert diagnostic["result_count"] == 1
+    assert stage_inputs["stage1"] == stage_inputs["stage2"]
+    assert "Base-only target paper" in stage_inputs["stage1"]
 
 
 def _safety_interlock_jump_payload(evidence_map: dict | None = None) -> dict:

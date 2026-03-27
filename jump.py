@@ -38,10 +38,11 @@ Strict rules:
 - Look for a conserved causal structure, not shared topic words.
 - A real structural match usually preserves the same driver -> mechanism -> outcome shape, with similar control logic.
 - Strong structural clues include similar threshold behavior, routing, bottlenecks, feedback loops, switching conditions, or gating logic.
+- Approve only when the target domain shows both the shared causal structure and concrete evidence of an already engineered workaround, mitigation, or operating response to that constraint.
 - Reject vague analogies, keyword overlap, and broad theme matches without similar causal organization.
 - Reject universal principles that connect everything (generic feedback, emergence, optimization, networks).
-- Approve if there is a concrete mechanistic or mathematical signal in a specific target field, even if the evidence is only enough for a plausible structural analogue rather than a full hypothesis.
-- If the search results show a mechanistically plausible partial analogue with clear structural overlap, pass it to Stage 2 instead of rejecting it early.
+- If multiple candidate domains appear, prefer the one with the clearest retrieved workaround or mitigation evidence.
+- If the search results only restate the problem, constraint, or failure mode without concrete workaround evidence, return no_connection.
 
 Return ONLY valid JSON. No markdown.
 If no real signal: {{"no_connection": true}}
@@ -50,7 +51,8 @@ If yes signal:
   "no_connection": false,
   "target_domain": "specific target field",
   "signal": "1-2 sentence mechanism-level signal",
-  "evidence": "specific evidence from search results"
+  "evidence": "specific evidence from search results",
+  "solution_evidence": "specific retrieved workaround, mitigation, or operating response evidence"
 }}"""
 
 HYPOTHESIZE_PROMPT = """Stage 2: hypothesis only.
@@ -66,6 +68,8 @@ RELEVANT PRIOR FAILURE CONSTRAINTS:
 
 Requirements:
 - Keep target_domain aligned with Stage 1.
+- Ask the core retrieval-grounded question directly: which domain operated under this same constraint and engineered a working solution, what specific workaround or mitigation did it use, and how does that workaround translate into a concrete target-domain lever grounded in SEARCH RESULTS?
+- If STAGE 1 DETECTION JSON includes `solution_evidence`, treat it as a required anchor for the working solution or workaround. Reuse that retrieved workaround evidence instead of inventing a different fix.
 - If RELEVANT PRIOR FAILURE CONSTRAINTS are provided, treat them as hard cautionary constraints. Do not repeat the same failure mode unless the retrieved target evidence specifically overcomes it.
 - Lock onto exactly one primary target-domain causal claim before elaborating the comparison.
 - Final candidate wording must read like a concise operator briefing, not an analogy, essay, or literature summary.
@@ -74,6 +78,7 @@ Requirements:
 - The primary target-domain claim must be no broader than the retrieved target-domain evidence. Do not generalize beyond what the target snippets directly support.
 - If the search results support only a narrow, local, conditional, or partial version of the claim, make that narrower version the core claim.
 - Prefer the smaller honest claim over the broader impressive one. Do not reward elegant analogy shells that outrun the retrieved target evidence.
+- Keep the workaround, mitigation, or engineered operating response grounded in retrieved target-domain evidence. Do not invent a fix that is not supported in SEARCH RESULTS or STAGE 1 DETECTION JSON.
 - That primary claim must name one measurable target-domain operator or operator-driven outcome that can be checked in literature or experiments.
 - If the target material does not directly support a concrete target-domain claim at that level, return `no_connection`.
 - The first-pass Stage 2 output should already satisfy required-field checks without relying on repair. If any field would be generic, missing, or placeholder-like, rewrite it concretely now or return `no_connection`.
@@ -1154,6 +1159,35 @@ def _build_jump_search_query(
         heuristic_query,
     )
     return llm_query or heuristic_query
+
+
+def _build_jump_search_queries(
+    pattern: dict,
+    source_domain: str,
+    source_category: str,
+) -> list[str]:
+    query = _build_jump_search_query(
+        pattern,
+        source_domain,
+        source_category,
+    )
+    if not query:
+        return []
+
+    solution_terms = (
+        "workaround",
+        "mitigation",
+        "correction",
+        "bypass",
+        "compensation",
+        "solution",
+    )
+    query_tokens = set(_tokenize_query_terms(query))
+    solution_term = next(
+        (term for term in solution_terms if term not in query_tokens),
+        solution_terms[0],
+    )
+    return [query, f"{query} {solution_term}"]
 
 
 def _extract_json_substring(text: str) -> str | None:
@@ -3407,11 +3441,15 @@ def _stage_one_detect_with_diagnostics(
     target_domain = str(data.get("target_domain", "")).strip()
     signal = str(data.get("signal", "")).strip()
     evidence = str(data.get("evidence", "")).strip()
+    solution_evidence = str(data.get("solution_evidence", "")).strip()
     if not target_domain or not signal or not evidence:
         return None, "invalid_payload"
+    if not solution_evidence:
+        return None, "missing_solution_evidence"
     data["target_domain"] = target_domain
     data["signal"] = signal
     data["evidence"] = evidence
+    data["solution_evidence"] = solution_evidence
     return data, None
 
 
@@ -3563,6 +3601,7 @@ def lateral_jump_with_diagnostics(
         "abstract_structure": str(pattern.get("abstract_structure", "") or "").strip(),
         "raw_search_query": raw_search_query,
         "built_jump_query": None,
+        "built_jump_queries": [],
         "result_count": 0,
         "top_result_titles": [],
         "stage1_outcome": None,
@@ -3573,64 +3612,137 @@ def lateral_jump_with_diagnostics(
         "stage2_failure_hint": None,
     }
 
-    query = _build_jump_search_query(pattern, source_domain, source_category)
+    queries = _build_jump_search_queries(
+        pattern,
+        source_domain,
+        source_category,
+    )
+    query = queries[0] if queries else ""
     diagnostic["built_jump_query"] = query
+    diagnostic["built_jump_queries"] = queries
     if not query:
         diagnostic["stage1_outcome"] = "no_results"
         diagnostic["stage1_failure_hint"] = "empty_jump_query"
         return None, diagnostic
-
-    try:
-        results = _tavily.search(
-            query=query,
-            max_results=5,
-            include_answer=False,
-            search_depth="basic",
-        )
-        increment_tavily_calls(1)
-    except Exception as e:
-        print(f"  [!] Tavily search failed for jump query '{query}': {e}")
-        diagnostic["stage1_outcome"] = "no_results"
-        diagnostic["stage1_failure_hint"] = "search_error"
-        return None, diagnostic
-
-    raw_results = results.get("results", [])
-    if not isinstance(raw_results, list):
-        raw_results = []
 
     search_content = []
     source_lower = source_domain.lower()
     category_lower = source_category.lower()
     raw_target_candidates: list[dict] = []
     top_titles: list[str] = []
-    for result in raw_results:
-        title_text = str(result.get("title", "") or "").strip()
-        title = title_text.lower()
-        content = result.get("content", "")
-        if source_lower in title or category_lower in title:
-            continue
-        clean = sanitize(content)
-        if clean:
-            url = (result.get("url") or "").strip()
-            source_reference = url or title_text
-            raw_target_candidates.append(
-                {
-                    "target_excerpt": clean[:500],
-                    "target_url": source_reference or None,
-                    "evaluation_source_reference": " ".join(
-                        part for part in (title_text, url) if part
-                    )
-                    or source_reference
-                    or None,
-                }
-            )
-            if title_text and title_text not in top_titles and len(top_titles) < 3:
-                top_titles.append(title_text)
-            search_content.append(f"Title: {result.get('title', 'Unknown')}")
-            search_content.append(clean)
-            search_content.append("")
+    merged_results: list[dict] = []
+    merged_result_index: dict[str, int] = {}
+    query_labels = ("base", "solution-biased")
+    solution_excerpt_markers = (
+        "workaround",
+        "mitigat",
+        "correct",
+        "bypass",
+        "compensat",
+        "solution",
+        "response",
+    )
+    query_error_count = 0
 
-    diagnostic["result_count"] = len(search_content) // 3
+    def _excerpt_rank(text: str, labels: list[str]) -> tuple[int, int, int, int, int]:
+        lowered = text.lower()
+        tokens = _tokenize_query_terms(text)
+        return (
+            sum(1 for marker in solution_excerpt_markers if marker in lowered),
+            len(set(tokens)),
+            len(tokens),
+            len(text),
+            1 if "solution-biased" in labels else 0,
+        )
+
+    for index, current_query in enumerate(queries):
+        try:
+            results = _tavily.search(
+                query=current_query,
+                max_results=5,
+                include_answer=False,
+                search_depth="basic",
+            )
+            increment_tavily_calls(1)
+        except Exception as e:
+            print(f"  [!] Tavily search failed for jump query '{current_query}': {e}")
+            query_error_count += 1
+            continue
+
+        raw_results = results.get("results", [])
+        if not isinstance(raw_results, list):
+            raw_results = []
+
+        query_label = query_labels[index] if index < len(query_labels) else f"variant-{index + 1}"
+        for result in raw_results:
+            title_text = str(result.get("title", "") or "").strip()
+            title = title_text.lower()
+            content = result.get("content", "")
+            if source_lower in title or category_lower in title:
+                continue
+            clean = sanitize(content)
+            if not clean:
+                continue
+            url = str(result.get("url", "") or "").strip()
+            dedupe_key = (url or title_text or clean).lower()
+            existing_index = merged_result_index.get(dedupe_key)
+            if existing_index is None:
+                merged_result_index[dedupe_key] = len(merged_results)
+                merged_results.append(
+                    {
+                        "title_text": title_text,
+                        "clean": clean,
+                        "url": url,
+                        "query_labels": [query_label],
+                    }
+                )
+            else:
+                existing_result = merged_results[existing_index]
+                existing_labels = list(existing_result["query_labels"])
+                incoming_labels = [query_label]
+                incoming_rank = _excerpt_rank(clean, incoming_labels)
+                existing_rank = _excerpt_rank(
+                    str(existing_result.get("clean", "") or ""),
+                    existing_labels,
+                )
+                if incoming_rank > existing_rank:
+                    existing_result["clean"] = clean
+                    if title_text:
+                        existing_result["title_text"] = title_text
+                if query_label not in existing_result["query_labels"]:
+                    existing_result["query_labels"].append(query_label)
+
+    if query_error_count == len(queries):
+        diagnostic["stage1_outcome"] = "no_results"
+        diagnostic["stage1_failure_hint"] = "search_error"
+        return None, diagnostic
+
+    for merged_result in merged_results:
+        title_text = str(merged_result.get("title_text", "") or "").strip()
+        clean = str(merged_result.get("clean", "") or "").strip()
+        url = str(merged_result.get("url", "") or "").strip()
+        source_reference = url or title_text
+        raw_target_candidates.append(
+            {
+                "target_excerpt": clean[:500],
+                "target_url": source_reference or None,
+                "evaluation_source_reference": " ".join(
+                    part for part in (title_text, url) if part
+                )
+                or source_reference
+                or None,
+            }
+        )
+        if title_text and title_text not in top_titles and len(top_titles) < 3:
+            top_titles.append(title_text)
+        search_content.append(
+            f"Retrieved via: {', '.join(merged_result.get('query_labels', []))}"
+        )
+        search_content.append(f"Title: {title_text or 'Unknown'}")
+        search_content.append(clean)
+        search_content.append("")
+
+    diagnostic["result_count"] = len(merged_results)
     diagnostic["top_result_titles"] = top_titles
 
     combined = "\n".join(search_content)
@@ -3647,7 +3759,7 @@ def lateral_jump_with_diagnostics(
     if stage_one is None:
         diagnostic["stage1_outcome"] = (
             "detect_no_signal"
-            if stage_one_failure_hint == "no_connection"
+            if stage_one_failure_hint in ("no_connection", "missing_solution_evidence")
             else "no_results"
         )
         diagnostic["stage1_failure_hint"] = stage_one_failure_hint

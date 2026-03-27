@@ -98,8 +98,14 @@ def test_hypothesize_prompt_has_stronger_examples() -> None:
     prompt = jump.HYPOTHESIZE_PROMPT
 
     assert "Final candidate wording must read like a concise operator briefing, not an analogy, essay, or literature summary." in prompt
+    assert "which domain operated under this same constraint and engineered a working solution" in prompt
+    assert "what specific workaround or mitigation did it use" in prompt
+    assert "how does that workaround translate into a concrete target-domain lever grounded in SEARCH RESULTS?" in prompt
+    assert "If STAGE 1 DETECTION JSON includes `solution_evidence`, treat it as a required anchor" in prompt
+    assert "Reuse that retrieved workaround evidence instead of inventing a different fix." in prompt
     assert "Prefer short, direct sentences. Prefer explicit operators, metrics, comparators, and decisions over abstract connective filler." in prompt
     assert "Reduce analogy-style phrasing, decorative transitions, and explanatory padding." in prompt
+    assert "Keep the workaround, mitigation, or engineered operating response grounded in retrieved target-domain evidence." in prompt
     assert "Good problem statements name one concrete hidden failure mode" in prompt
     assert "`edge_analysis.problem_statement` must describe one hidden or underexploited operational problem, not a broad summary of the field." in prompt
     assert "Tie `edge_analysis.problem_statement` to one concrete operator decision or one concrete failure mode on the same observable or metric already used in `prediction` / `test`." in prompt
@@ -1423,3 +1429,37 @@ def test_stage_two_hypothesize_with_diagnostics_returns_incomplete_field_names(
     assert repaired is None
     assert failure_hint == "repair_incomplete"
     assert incomplete_fields == ["edge_analysis.actionable_lever"]
+
+
+def test_stage_two_hypothesize_prompt_reuses_stage_one_solution_evidence(
+    monkeypatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(jump, "_format_relevant_scars_for_prompt", lambda *_args: "")
+
+    def fake_generate_json_with_retry(prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+        return json.dumps({"no_connection": True})
+
+    monkeypatch.setattr(jump, "_generate_json_with_retry", fake_generate_json_with_retry)
+
+    repaired, failure_hint, incomplete_fields = jump._stage_two_hypothesize_with_diagnostics(
+        source_domain="Juggling",
+        abstract_structure="load compared against a queue threshold",
+        stage_one={
+            "target_domain": "Time-triggered scheduling",
+            "signal": "shared structural signal",
+            "evidence": "specific evidence",
+            "solution_evidence": (
+                "offset assignment with collision-avoidance constraints provides the working workaround"
+            ),
+        },
+        search_results="Title: target paper\nconcrete target evidence",
+    )
+
+    assert repaired is None
+    assert failure_hint == "returned_no_connection"
+    assert incomplete_fields is None
+    assert '"solution_evidence": "offset assignment with collision-avoidance constraints provides the working workaround"' in captured["prompt"]
+    assert "treat it as a required anchor for the working solution or workaround" in captured["prompt"]
